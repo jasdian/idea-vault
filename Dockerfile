@@ -8,6 +8,12 @@
 # debian:bookworm-slim, non-root, with curl for the healthcheck and a writable
 # /data mountpoint for the rebuildable index volume.
 #
+# The app is compiled as a fully STATIC musl binary
+# (x86_64-unknown-linux-musl), so it depends on no host glibc — this is why the
+# newer-glibc builder (rust:slim tracks Debian trixie) can pair with the older
+# bookworm runtime without a `GLIBC_2.xx not found` error. rustls + bundled
+# SQLite (no OpenSSL/libsqlite3) is what makes a clean static link possible.
+#
 # NOTE: this builds once the crate is scaffolded (Cargo.toml + src/ +
 # templates/ exist). Until then it is the deployment contract, not a working
 # build. See docs/12-deployment.md.
@@ -16,10 +22,12 @@
 # ---- base with cargo-chef -------------------------------------------------
 FROM rust:1.91-slim AS chef
 WORKDIR /app
-# gcc ships in rust:slim (needed to link); pkg-config is a harmless safety net
-# for the bundled-sqlite C compile.
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
+# musl-tools provides musl-gcc, which the cc crate uses to compile bundled
+# SQLite for the musl target; pkg-config is a harmless safety net. Add the
+# static musl target so every stage below can build against it.
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config musl-tools \
     && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-unknown-linux-musl \
     && cargo install cargo-chef --locked
 
 # ---- plan: hash only the dependency manifests ------------------------------
@@ -37,10 +45,11 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ---- build: compile deps (cached), then the app ---------------------------
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-# This layer is cached until Cargo.toml/Cargo.lock change.
-RUN cargo chef cook --release --recipe-path recipe.json
+# This layer is cached until Cargo.toml/Cargo.lock change. Cook + build for the
+# static musl target so the emitted binary carries no glibc dependency.
+RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path recipe.json
 COPY . .
-RUN cargo build --release --bin idea-vault
+RUN cargo build --release --target x86_64-unknown-linux-musl --bin idea-vault
 
 # ---- runtime: minimal, non-root -------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -64,7 +73,7 @@ WORKDIR /app
 # volume-ownership gotcha) so the non-root process can write index.db.
 RUN mkdir -p /data /vault && chown -R ${APP_UID}:${APP_GID} /data /vault
 
-COPY --from=builder /app/target/release/idea-vault /usr/local/bin/idea-vault
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/idea-vault /usr/local/bin/idea-vault
 # If you do NOT embed static assets with rust-embed, ship them instead:
 # COPY --from=builder /app/static /app/static
 

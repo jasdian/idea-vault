@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use idea_vault::ai::budget::ContextBudget;
-use idea_vault::ai::OllamaClient;
+use idea_vault::ai::{LlmBackend, OllamaClient};
 use idea_vault::concepts::skills::SkillRegistry;
 use idea_vault::concepts::workflows::run_workflow;
 use idea_vault::concepts::ConceptError;
@@ -57,7 +57,7 @@ async fn interrogate_runs_the_fixed_dag_in_order_and_persists_only_the_synthesis
         ],
     )
     .await;
-    let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
+    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
     let registry = SkillRegistry::builtin();
 
@@ -111,7 +111,7 @@ async fn failed_step_is_skipped_and_workflow_degrades() {
         ],
     )
     .await;
-    let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
+    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
     let registry = SkillRegistry::builtin();
 
@@ -149,7 +149,7 @@ async fn all_steps_failed_errors_and_persists_nothing() {
     seed_idea(tmp.path(), "i");
     let convo_before = store::read_conversation(tmp.path(), "i").unwrap();
     let mock = spawn(&["llama3.2"], ChatScript::EofAfter(vec![])).await;
-    let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
+    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(2));
     let registry = SkillRegistry::builtin();
 
@@ -176,7 +176,7 @@ async fn unknown_workflow_fails_fast_with_no_ai_calls() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
     let mock = spawn(&["llama3.2"], tokens("x")).await;
-    let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
+    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
     let registry = SkillRegistry::builtin();
 

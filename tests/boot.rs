@@ -28,6 +28,16 @@ fn test_state() -> AppState {
         ollama_model: "llama3.2".to_string(),
         ai_concurrency: 1,
         ollama_timeout: std::time::Duration::from_secs(5),
+        llm_backend: idea_vault::config::LlmBackendKind::Ollama,
+        claude: idea_vault::config::ClaudeSettings {
+            binary: "claude".to_string(),
+            cwd: std::path::PathBuf::from("."),
+            add_dirs: Vec::new(),
+            allowed_tools: Vec::new(),
+            model: None,
+            skip_permissions: true,
+            timeout: std::time::Duration::from_secs(5),
+        },
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
@@ -40,7 +50,7 @@ fn test_state() -> AppState {
     AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
-        ollama,
+        llm: idea_vault::ai::LlmBackend::Ollama(ollama),
         ai_semaphore: Arc::new(Semaphore::new(1)),
         skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
     }

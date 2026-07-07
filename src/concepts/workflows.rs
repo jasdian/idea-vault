@@ -11,7 +11,7 @@ use std::path::Path;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::ContextBudget;
-use crate::ai::ollama::OllamaClient;
+use crate::ai::LlmBackend;
 use crate::concepts::agents::{AgentResult, AgentRole, AgentTask};
 use crate::concepts::skills::{hydrate_context, SkillRegistry};
 use crate::concepts::swarm::{fan_out, judge, synthesize};
@@ -85,7 +85,7 @@ pub struct WorkflowOutcome {
 /// judge, synthesize, and append the single result as an assistant turn. Deterministic control
 /// flow: the same workflow takes the same path every run; only step outputs vary.
 pub async fn run_workflow(
-    ollama: &OllamaClient,
+    ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     registry: &SkillRegistry,
     vault_dir: &Path,

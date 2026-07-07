@@ -2,8 +2,8 @@
 //! (docs/01-architecture.md D25, docs/09-web-ui.md D16/D17).
 //!
 //! `AppState` is the cloneable bundle injected into every handler: config, the SQLite index
-//! connection (behind a mutex), the Ollama client, and the single process-wide AI concurrency
-//! semaphore (ADR-0006 — chat and swarm share one bound).
+//! connection (behind a mutex), the LLM backend (Ollama or claude-code, docs/adr/0009), and the
+//! single process-wide AI concurrency semaphore (ADR-0006 — chat and swarm share one bound).
 
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +20,7 @@ use crate::web::routes::{admin, chat, ideas, memory};
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: Arc<Mutex<rusqlite::Connection>>,
-    pub ollama: crate::ai::OllamaClient,
+    pub llm: crate::ai::LlmBackend,
     pub ai_semaphore: Arc<Semaphore>,
     /// Built-in skill registry, populated at boot (docs/06-concepts/skills.md "Registry").
     pub skills: Arc<crate::concepts::skills::SkillRegistry>,

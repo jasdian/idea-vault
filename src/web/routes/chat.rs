@@ -75,7 +75,7 @@ pub async fn chat(
     // Stream: headers go out immediately; the spawned task acquires the shared semaphore
     // (ADR-0006), pumps tokens, and persists the assistant turn only on completion.
     let (tx, rx): (EventSender, _) = tokio::sync::mpsc::channel(32);
-    let ollama = state.ollama.clone();
+    let ollama = state.llm.clone();
     let semaphore = state.ai_semaphore.clone();
     let task_state = state.clone();
     let task_slug = slug.clone();

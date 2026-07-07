@@ -35,8 +35,10 @@ flowchart TB
             I_REIDX["reindex.rs — rebuild-from-disk (D15)"]
         end
 
-        subgraph ai["ai/ (Ollama boundary)"]
-            A_OLL["ollama.rs — client + health (D20)"]
+        subgraph ai["ai/ (LLM backend boundary)"]
+            A_OLL["ollama.rs — Ollama client + health (D20)"]
+            A_CC["claude_code.rs — claude CLI backend (ADR-0009)"]
+            A_BK["backend.rs — LlmBackend enum (ADR-0009)"]
             A_STREAM["stream.rs — tokens → SSE (D11)"]
             A_BUDGET["budget.rs — context budgeting (D21)"]
         end
@@ -137,12 +139,15 @@ flowchart TD
   from [03-data-model](./03-data-model.md). Append-only for `conversation.md`.
 - **`index`** — owns `index.db`: schema + FTS5, query functions, and `reindex` (the rebuild-from-disk
   that upholds the reindex invariant, [D15](./03-data-model.md)).
-- **`ai`** — the sole Ollama boundary: HTTP client, health probe, token-stream→SSE adapter, and
+- **`ai`** — the sole LLM-backend boundary (ADR-0009): the `LlmBackend` enum over an Ollama HTTP client or the `claude` CLI, health probe, token-stream→SSE adapter, and
   context budgeting. Provider-swap would be localized here (out of scope, [ADR-0003](./adr/0003-ollama-local-only-ai.md)).
 - **`memory`** — the memory feature: extract facts at Store ([D12](./06-concepts/memory.md)), load
   them at Reopen ([D13](./06-concepts/memory.md)), resolve backlinks ([D23](./06-concepts/memory.md)).
 - **`concepts`** — skills, agents, workflows, and the swarm orchestrator ([06-concepts](./06-concepts/)).
 - **`web`** — axum router, handlers, Askama rendering, SSE plumbing. The top of the graph.
+- **`import`** — a bin-level driver (used only by `main`, like `web`): converts a directory of flat
+  Obsidian `.md` notes into ideas, then reindexes ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)).
+  Depends on `domain` + `vault` + `index`; nothing depends on it.
 
 ## Future workspace mapping (not built now)
 

@@ -9,7 +9,8 @@
 
 use tokio::sync::Semaphore;
 
-use crate::ai::ollama::{ChatMessage, OllamaClient};
+use crate::ai::ollama::ChatMessage;
+use crate::ai::LlmBackend;
 use crate::concepts::skills::SkillRegistry;
 use crate::concepts::ConceptError;
 
@@ -93,7 +94,7 @@ fn build_prompt(registry: &SkillRegistry, task: &AgentTask) -> Result<String, Co
 /// maps that to a null result the judge skips; this function itself does not swallow errors.
 /// Nothing is written to the vault here.
 pub async fn run_agent(
-    ollama: &OllamaClient,
+    ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     registry: &SkillRegistry,
     task: AgentTask,

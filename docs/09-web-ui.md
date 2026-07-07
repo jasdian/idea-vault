@@ -36,7 +36,7 @@ flowchart LR
     end
     subgraph admin["Admin"]
         R10["POST /admin/reindex — rebuild index (D15)"]
-        R11["GET /admin/health — Ollama probe (D20)"]
+        R11["GET /admin/health — LLM backend probe (D20)"]
     end
 
     R1 --> T_LIST["templates/list.html"]
@@ -99,7 +99,7 @@ base.html`.
   the transcript target. On the `done` event the stream closes.
 - **Markdown rendering:** idea bodies and memory facts are rendered server-side (markdown → sanitized
   HTML) before templating; the browser only receives HTML.
-- **Degraded AI:** when `/admin/health` (or the boot probe) reports Ollama absent, the compose box is
+- **Degraded AI:** when `/admin/health` (or the boot probe) reports the LLM backend absent, the compose box is
   rendered disabled with the banner from [D20](./05-ai-integration.md); read-only browsing is
   unaffected.
 

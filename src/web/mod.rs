@@ -88,7 +88,10 @@ impl IntoResponse for WebError {
             | WebError::Concept(crate::concepts::ConceptError::Ai(_))
             | WebError::Concept(crate::concepts::ConceptError::NothingToSynthesize) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "AI is unavailable — check that Ollama is running and the model is pulled"
+                // Backend-neutral: the message must fit either Ollama or claude-code (ADR-0009),
+                // and this arm has no access to config. `/admin/health` reports which backend.
+                "AI is unavailable — check that the configured LLM backend (Ollama or the `claude` \
+                 CLI) is running and authenticated"
                     .to_string(),
             )
                 .into_response(),

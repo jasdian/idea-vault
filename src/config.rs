@@ -31,6 +31,30 @@ pub struct Config {
     /// Hard inactivity timeout for Ollama calls (D20): the initial response and every token gap
     /// must arrive within this window or the call aborts (docs/05 "per-request timeout").
     pub ollama_timeout: std::time::Duration,
+    /// Which LLM backend answers chat/skills/swarm (docs/adr/0009).
+    pub llm_backend: LlmBackendKind,
+    /// claude-code backend settings (used only when `llm_backend == ClaudeCode`).
+    pub claude: ClaudeSettings,
+}
+
+/// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmBackendKind {
+    Ollama,
+    ClaudeCode,
+}
+
+/// Settings for the claude-code backend. `cwd` deliberately defaults to the vault dir (never the
+/// idea-vault source tree) so a full-agentic foil cannot rewrite the app itself.
+#[derive(Debug, Clone)]
+pub struct ClaudeSettings {
+    pub binary: String,
+    pub cwd: PathBuf,
+    pub add_dirs: Vec<PathBuf>,
+    pub allowed_tools: Vec<String>,
+    pub model: Option<String>,
+    pub skip_permissions: bool,
+    pub timeout: std::time::Duration,
 }
 
 const DEFAULT_BIND: &str = "127.0.0.1:3000";
@@ -40,6 +64,9 @@ const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL: &str = "qwen3.5:4b";
 const DEFAULT_AI_CONCURRENCY: usize = 2;
 const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_CLAUDE_BIN: &str = "claude";
+// Agentic turns (process spawn + tool use) run longer than a hot local model.
+const DEFAULT_CLAUDE_TIMEOUT_SECS: u64 = 300;
 
 impl Config {
     /// Build configuration from the real process environment.
@@ -53,7 +80,7 @@ impl Config {
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let bind = lookup("IDEA_VAULT_BIND").unwrap_or_else(|| DEFAULT_BIND.to_string());
 
-        let vault_dir = lookup("IDEA_VAULT_VAULT_DIR")
+        let vault_dir: PathBuf = lookup("IDEA_VAULT_VAULT_DIR")
             .unwrap_or_else(|| DEFAULT_VAULT_DIR.to_string())
             .into();
 
@@ -93,6 +120,38 @@ impl Config {
             }),
         };
 
+        let llm_backend = match lookup("IDEA_VAULT_LLM_BACKEND").as_deref() {
+            Some("claude-code") | Some("claude") => LlmBackendKind::ClaudeCode,
+            Some("ollama") | None => LlmBackendKind::Ollama,
+            Some(other) => {
+                tracing::warn!(value = %other, "unknown IDEA_VAULT_LLM_BACKEND, using ollama");
+                LlmBackendKind::Ollama
+            }
+        };
+
+        let claude_timeout_secs = match lookup("IDEA_VAULT_CLAUDE_TIMEOUT_SECS") {
+            None => DEFAULT_CLAUDE_TIMEOUT_SECS,
+            Some(raw) => raw.parse::<u64>().unwrap_or(DEFAULT_CLAUDE_TIMEOUT_SECS),
+        };
+
+        let claude = ClaudeSettings {
+            binary: lookup("IDEA_VAULT_CLAUDE_BIN")
+                .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
+            // Default the foil's working dir to the vault (owner content), never the app source.
+            cwd: lookup("IDEA_VAULT_CLAUDE_CWD")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| vault_dir.clone()),
+            add_dirs: split_paths(lookup("IDEA_VAULT_CLAUDE_ADD_DIRS")),
+            allowed_tools: split_csv(lookup("IDEA_VAULT_CLAUDE_ALLOWED_TOOLS")),
+            model: lookup("IDEA_VAULT_CLAUDE_MODEL").filter(|s| !s.trim().is_empty()),
+            // Unattended server: default to skipping interactive permission prompts (the owner's
+            // "full agentic" choice; see docs/adr/0009). Set to `false` for a locked-down run.
+            skip_permissions: lookup("IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true),
+            timeout: std::time::Duration::from_secs(claude_timeout_secs),
+        };
+
         Self {
             bind,
             vault_dir,
@@ -101,8 +160,36 @@ impl Config {
             ollama_model,
             ai_concurrency,
             ollama_timeout: std::time::Duration::from_secs(ollama_timeout_secs),
+            llm_backend,
+            claude,
         }
     }
+}
+
+/// Split a colon-separated `PATH`-style list into paths, dropping empties.
+fn split_paths(raw: Option<String>) -> Vec<PathBuf> {
+    raw.into_iter()
+        .flat_map(|s| {
+            s.split(':')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Split a comma-separated list into trimmed, non-empty items.
+fn split_csv(raw: Option<String>) -> Vec<String> {
+    raw.into_iter()
+        .flat_map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -125,6 +212,56 @@ mod tests {
         assert_eq!(cfg.ollama_model, "qwen3.5:4b");
         assert_eq!(cfg.ai_concurrency, 2);
         assert_eq!(cfg.ollama_timeout, std::time::Duration::from_secs(120));
+        // Backend defaults to Ollama for an offline local run; claude settings are sane.
+        assert_eq!(cfg.llm_backend, LlmBackendKind::Ollama);
+        assert_eq!(cfg.claude.binary, "claude");
+        assert_eq!(
+            cfg.claude.cwd, cfg.vault_dir,
+            "claude cwd defaults to the vault, not the app"
+        );
+        assert!(cfg.claude.add_dirs.is_empty());
+        assert!(cfg.claude.skip_permissions);
+        assert_eq!(cfg.claude.timeout, std::time::Duration::from_secs(300));
+    }
+
+    #[test]
+    fn claude_backend_selection_and_lists() {
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_LLM_BACKEND", "claude-code");
+        map.insert("IDEA_VAULT_CLAUDE_BIN", "/usr/bin/claude");
+        map.insert(
+            "IDEA_VAULT_CLAUDE_ADD_DIRS",
+            "/home/x/vault:/home/x/artifacts",
+        );
+        map.insert("IDEA_VAULT_CLAUDE_ALLOWED_TOOLS", "Read, Grep , Glob");
+        map.insert("IDEA_VAULT_CLAUDE_MODEL", "opus");
+        map.insert("IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS", "false");
+        let cfg = Config::from_lookup(lookup_from(map));
+
+        assert_eq!(cfg.llm_backend, LlmBackendKind::ClaudeCode);
+        assert_eq!(cfg.claude.binary, "/usr/bin/claude");
+        assert_eq!(
+            cfg.claude.add_dirs,
+            vec![
+                PathBuf::from("/home/x/vault"),
+                PathBuf::from("/home/x/artifacts")
+            ]
+        );
+        assert_eq!(cfg.claude.allowed_tools, vec!["Read", "Grep", "Glob"]);
+        assert_eq!(cfg.claude.model.as_deref(), Some("opus"));
+        assert!(!cfg.claude.skip_permissions);
+
+        // Alias + unknown fallback.
+        let alias = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_LLM_BACKEND",
+            "claude",
+        )])));
+        assert_eq!(alias.llm_backend, LlmBackendKind::ClaudeCode);
+        let bogus = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_LLM_BACKEND",
+            "gpt5",
+        )])));
+        assert_eq!(bogus.llm_backend, LlmBackendKind::Ollama);
     }
 
     #[test]

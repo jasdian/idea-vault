@@ -6,7 +6,8 @@ use std::path::Path;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::{assemble_context, AssembledContext, ContextBudget, ContextInput};
-use crate::ai::ollama::{ChatMessage, OllamaClient};
+use crate::ai::ollama::ChatMessage;
+use crate::ai::LlmBackend;
 use crate::concepts::ConceptError;
 use crate::vault::store;
 
@@ -129,7 +130,7 @@ pub(crate) fn hydrate_context(
 /// assistant turn only after the call completes (nothing partial ever reaches
 /// `conversation.md`); idea state is not changed.
 pub async fn invoke(
-    ollama: &OllamaClient,
+    ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     vault_dir: &Path,
     idea_slug: &str,

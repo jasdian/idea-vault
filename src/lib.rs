@@ -6,6 +6,7 @@ pub mod app;
 pub mod concepts;
 pub mod config;
 pub mod domain;
+pub mod import;
 pub mod index;
 pub mod memory;
 pub mod vault;

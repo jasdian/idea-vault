@@ -51,7 +51,7 @@ pub async fn store_idea(
     // The extraction pipeline acquires the shared permit itself, scoped to exactly its two
     // AI calls (ADR-0006) — this route must not hold one around it (deadlock rule).
     let outcome = memory::extract::extract_and_store(
-        &state.ollama,
+        &state.llm,
         &state.ai_semaphore,
         &vault_dir,
         &slug,
@@ -101,13 +101,13 @@ pub async fn reopen_idea(
     reindex_logged(&state);
 
     let conversation = store::read_conversation(&vault_dir, &slug)?;
-    let health = state.ollama.probe().await;
+    let health = state.llm.probe().await;
     let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
     build_discussion(
         &slug,
         &conversation,
         health,
-        state.ollama.model(),
+        state.llm.model(),
         true,
         skill_names,
     )
@@ -146,7 +146,7 @@ pub async fn run_skill(
     };
 
     let output = concepts::skills::invoke(
-        &state.ollama,
+        &state.llm,
         &state.ai_semaphore,
         &vault_dir,
         &slug,
@@ -218,7 +218,7 @@ pub async fn run_swarm(
     }
 
     let outcome = concepts::swarm::swarm(
-        &state.ollama,
+        &state.llm,
         &state.ai_semaphore,
         &state.skills,
         &vault_dir,
