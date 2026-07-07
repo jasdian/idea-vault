@@ -132,8 +132,10 @@ docker compose down
 
 **Config is env-driven, not hardcoded.** `config.rs` reads `IDEA_VAULT_BIND` (default
 `127.0.0.1:3000`; `0.0.0.0:3000` in-container), `IDEA_VAULT_VAULT_DIR`, `IDEA_VAULT_INDEX_PATH`,
-`IDEA_VAULT_OLLAMA_URL` (default `http://localhost:11434`; `http://ollama:11434` in-compose), and
-`IDEA_VAULT_OLLAMA_MODEL`. **Never hardcode `localhost:11434` or a localhost bind** — it breaks the
+`IDEA_VAULT_OLLAMA_URL` (default `http://localhost:11434`; `http://ollama:11434` in-compose),
+`IDEA_VAULT_OLLAMA_MODEL`, `IDEA_VAULT_AI_CONCURRENCY` (default `2`, the shared Ollama-call bound K,
+ADR-0006), and `IDEA_VAULT_OLLAMA_TIMEOUT_SECS` (default `120`, the hard inactivity timeout).
+**Never hardcode `localhost:11434` or a localhost bind** — it breaks the
 containerized run. `vault/` is a host bind mount (truth you own); the SQLite index and Ollama models
 are named volumes (rebuildable / re-pullable). GPU touches only the Ollama service.
 

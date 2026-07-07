@@ -58,6 +58,27 @@ erDiagram
     }
 ```
 
+### Conversation turn grammar
+
+`conversation.md` is plain markdown: a turn is a `## <role>` heading line followed by its content
+lines up to the next such heading. The app writes `## user`, `## assistant`, and labelled assistant
+variants — `## assistant (skill: <name>)`, `## assistant (swarm)`, `## assistant (workflow: <name>)`
+— for turns produced by a skill, swarm synthesis, or workflow step. Only `## user`/`## assistant`
+heading lines are recognized as boundaries, so an ordinary `## Section` heading written inside a
+turn's own content does not split it — it stays part of that turn, verbatim, because markdown is
+truth. Any content line that would otherwise read as a `## user`/`## assistant` heading is escaped
+with a leading backslash on write, so submitted chat text or model output can never forge a turn
+boundary and masquerade as another speaker.
+
+```markdown
+## user
+Is a subscription model viable here?
+## Second-order effects
+This is just a heading the user typed, not a new turn.
+## assistant
+Steelmanning it first: predictable revenue, but watch churn.
+```
+
 ### Canonical vs indexed (traceability)
 
 Every indexed field traces to a vault source. This table is the contract the reindex must satisfy:
