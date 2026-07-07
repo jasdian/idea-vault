@@ -4,6 +4,7 @@
 
 pub mod frontmatter;
 pub mod idea;
+pub mod links;
 pub mod memory;
 pub mod slug;
 
