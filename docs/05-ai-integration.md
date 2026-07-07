@@ -1,22 +1,37 @@
-# 05 — AI Integration (Ollama)
+# 05 — AI Integration (Ollama + claude-code)
 
-> The `ai` module: the single boundary to the local Ollama server, the SSE streaming protocol,
-> context budgeting, degradation, and the error taxonomy. Home of **D3** (swarm component view),
-> **D11** (chat → Ollama → SSE), **D20** (degradation), **D24** (error taxonomy).
-> Decisions: [ADR-0003](./adr/0003-ollama-local-only-ai.md), [ADR-0004](./adr/0004-sse-token-streaming.md).
+> The `ai` module: the live-switchable LLM backend boundary (Ollama HTTP client and an agentic
+> claude-code client behind one router), context budgeting, degradation, and the error taxonomy.
+> Home of **D3** (swarm component view), **D11** (chat → LlmBackend → background job → poll),
+> **D20** (degradation), **D24** (error taxonomy).
+> Decisions: [ADR-0003](./adr/0003-ollama-local-only-ai.md),
+> [ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md),
+> [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md) (supersedes the earlier SSE decision,
+> [ADR-0004](./adr/0004-sse-token-streaming.md)),
+> [ADR-0011](./adr/0011-live-switchable-llm-backend.md).
 
 ## The `ai` boundary
 
 `ai` is a **pure model boundary** — it does not touch the vault or index. Callers assemble prompts
-(idea body + selected memory + trimmed conversation) and hand them in; `ai` talks HTTP to Ollama and
-streams tokens back. This keeps provider concerns in one place ([D4](./02-module-reference.md)).
+(idea body + selected memory + trimmed conversation) and hand them in; `ai` dispatches to whichever
+backend is currently active and returns text (or a token stream, for callers that still want one).
+This keeps provider concerns in one place ([D4](./02-module-reference.md)).
 
 Submodules:
 
-- `ai::ollama` — HTTP client to `http://localhost:11434` (`/api/chat`, `/api/tags`), plus health
+- `ai::ollama` — HTTP client to the configured Ollama URL (`/api/chat`, `/api/tags`), plus health
   probe.
-- `ai::stream` — adapts Ollama's streaming NDJSON response into an SSE event stream ([D11](#d11--chat--ollama--sse-token-stream)).
+- `ai::claude_code` — spawns the local `claude` CLI as a one-shot agentic process per turn
+  ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)).
+- `ai::backend` — `LlmBackend`, the **live router**: a struct holding both clients plus
+  `Arc<RwLock<LlmSettings>>`; every call re-reads the current settings to pick the backend and its
+  tuned parameters (Ollama temperature; claude-code model + effort), so the Settings page
+  (`GET`/`POST /settings`) can retoggle/retune with no restart
+  ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)).
 - `ai::budget` — assembles a prompt within the model's context limit ([D21](./06-concepts/swarm.md)).
+
+`AppState` holds one `LlmBackend` (`state.llm`); handlers never talk to `OllamaClient` or
+`ClaudeCodeClient` directly.
 
 ## Ollama client contract
 
@@ -25,53 +40,74 @@ Submodules:
 | Health / model list | `GET /api/tags` | used by the boot probe (D25) and degradation (D20) |
 | Chat completion (stream) | `POST /api/chat` (`stream: true`) | NDJSON, one token-chunk per line, final line `done: true` |
 
-The client is configured from `config.rs` (base URL, default model, per-request timeout). The base
-URL comes from `IDEA_VAULT_OLLAMA_URL` — default `http://localhost:11434` for a bare `cargo run`,
-`http://ollama:11434` (compose service DNS) when containerized. **No code path hardcodes
-`localhost:11434`** ([12-deployment](./12-deployment.md), [ADR-0008](./adr/0008-containerized-local-deployment.md)).
-All calls acquire the process-wide **concurrency semaphore**
-([ADR-0006](./adr/0006-bounded-concurrency-swarm.md)) so chat and swarm share one budget.
+The client is configured from `config.rs` (base URL, default model, per-request timeout, initial
+sampling temperature). The base URL comes from `IDEA_VAULT_OLLAMA_URL` — default
+`http://localhost:11434` for a bare `cargo run`, `http://ollama:11434` (compose service DNS) when
+containerized. **No code path hardcodes `localhost:11434`**
+([12-deployment](./12-deployment.md), [ADR-0008](./adr/0008-containerized-local-deployment.md)).
+Sampling temperature (`IDEA_VAULT_OLLAMA_TEMPERATURE`, default `0.7`) is only the *initial* value —
+the Settings page can retune it live ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)). All
+calls acquire the process-wide **concurrency semaphore**
+([ADR-0006](./adr/0006-bounded-concurrency-swarm.md)) so chat, skills, and swarm share one budget
+regardless of which backend answers.
 
-## D11 — Chat message → Ollama → SSE token stream
+## D11 — Chat message → LlmBackend → background job → poll
 
-The core streaming flow behind every discussion turn. Non-blocking: the transcript updates live.
+The core flow behind every discussion turn. Non-blocking: the request returns immediately with a
+"thinking" indicator; the model call runs in a **detached background job**
+([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) so navigating away can't kill it.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant B as Browser (HTMX sse)
+    participant B as Browser (HTMX, polling)
     participant H as web::routes::chat
+    participant J as web::jobs
     participant V as vault::store
+    participant Task as detached tokio task
     participant Bud as ai::budget
-    participant O as ai::ollama
-    participant Ol as Ollama :11434
+    participant L as ai::backend::LlmBackend
 
     B->>H: POST /idea/:slug/chat (turn text)
-    H->>V: append user turn to conversation.md
+    H->>J: try_claim(slug) — one job per idea
+    H->>V: append user turn to conversation.md (persisted up front)
     H->>V: set state=in_discussion/reopened (if transitioning)
-    H->>Bud: assemble prompt (body + memory + trimmed convo)
-    H-->>B: open SSE response (200 text/event-stream)
-    H->>O: chat(prompt, stream=true)  [acquires semaphore]
-    O->>Ol: POST /api/chat stream
-    loop each token chunk
-        Ol-->>O: {message.content: "..."}
-        O-->>H: token
-        H-->>B: SSE event: token → HTMX swaps into transcript
+    H-->>B: 200 transcript + "thinking…" indicator (self-repolling)
+    H->>Task: tokio::spawn (detached — outlives the request)
+    Task->>Bud: assemble prompt (body + memory + trimmed convo)
+    Task->>L: chat(prompt) [acquires semaphore; dispatches to the active backend]
+    L-->>Task: reply (or AiError)
+    alt success, non-empty reply
+        Task->>V: append full assistant turn to conversation.md
+        Task->>J: mark_done(slug)
+    else failure or empty reply
+        Task->>J: mark_failed(slug, message)
     end
-    Ol-->>O: {done: true}
-    O-->>H: end
-    H->>V: append full assistant turn to conversation.md
-    H-->>B: SSE event: done (close)
-    Note over B,H: on client disconnect → abort Ollama call, release semaphore
+    loop every ~1.5s until Idle
+        B->>H: GET /idea/:slug/pending
+        H->>J: peek(slug)
+        J-->>H: Running(elapsed_secs) | Failed(msg) | Idle
+        H-->>B: re-emit "thinking…" | error block | finished transcript
+    end
 ```
 
 Key obligations:
 
-- **Persist boundaries:** user turn appended *before* streaming; assistant turn appended *after*
-  completion (never mid-stream — a partial turn must not become truth).
-- **Disconnect handling:** if the browser closes, abort the Ollama request and release the semaphore.
+- **Persist boundaries:** user turn appended *before* the job is spawned (survives navigation);
+  assistant turn appended *only after* a complete, non-empty reply (a partial or empty reply must
+  never become truth — on failure nothing is written, `mark_failed` just records a message).
+- **One job per idea:** `try_claim` refuses a second concurrent job for the same idea; a second
+  "Send" while busy just re-shows the in-flight state.
+- **Poll, don't hold a connection open:** the indicator is a self-repolling HTMX fragment
+  (`hx-get="/idea/:slug/pending" hx-trigger="load delay:1500ms"`) carrying a server-computed
+  elapsed-seconds count — there is no long-lived connection to manage or a client disconnect to
+  detect.
 - **State transition:** the first turn moves `Draft→InDiscussion` (or keeps `Reopened`) per
   [D9](./04-state-machine.md).
+
+Skills (`POST /idea/:slug/skill/:name`) and swarm (`POST /idea/:slug/swarm`) use the identical
+claim → spawn → poll shape; see [06-concepts/skills](./06-concepts/skills.md) D18 and
+[06-concepts/swarm](./06-concepts/swarm.md) D14.
 
 ## D3 — Swarm/AI component view (C4 Level 3)
 
@@ -88,7 +124,9 @@ flowchart TB
     end
     subgraph aimod["ai"]
         BUD["ai::budget"]
+        LLM["ai::backend::LlmBackend (live router)"]
         OLL["ai::ollama"]
+        CC["ai::claude_code"]
     end
     AGENTS["concepts::agents — role prompts"]
     SKILLS["concepts::skills — ideation moves"]
@@ -98,11 +136,14 @@ flowchart TB
     DISP --> SEM
     SEM --> WORK
     WORK --> BUD
-    WORK --> OLL
+    WORK --> LLM
     WORK --> SYNTH
     SYNTH --> BUD
-    SYNTH --> OLL
+    SYNTH --> LLM
+    LLM -->|"settings.backend == Ollama"| OLL
+    LLM -->|"settings.backend == ClaudeCode"| CC
     OLL -->|":11434"| ext["Ollama"]
+    CC -->|"spawn"| claude["claude CLI"]
 ```
 
 ## D20 — Degradation when Ollama is unavailable or slow
@@ -133,12 +174,14 @@ stateDiagram-v2
         UI: "Pull a model: `ollama pull <model>`".
     end note
     note right of Slow
-        UI: keep SSE open, show typing indicator; allow cancel.
+        UI: background job keeps running; the polling "thinking… Ns" indicator
+        (ADR-0010) keeps ticking, so a slow reply still reads as alive, not hung.
     end note
 ```
 
 Guarantees: browsing/reading the vault works with Ollama down (it needs only vault+index); only AI
-actions are gated. No AI call blocks the request thread — all are async with timeouts.
+actions are gated. No AI call blocks the request thread — every AI call runs inside a detached
+background job ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) with a hard timeout.
 
 ## D24 — Error / failure taxonomy
 
@@ -172,4 +215,6 @@ Principles: **truth-preserving** (index errors never lose vault data — reindex
 
 - [06-concepts/swarm](./06-concepts/swarm.md) — D14 orchestration, D21 concurrency/budget.
 - [06-concepts/memory](./06-concepts/memory.md) — extraction/load prompts that use `ai`.
-- [09-web-ui](./09-web-ui.md) — D16 middleware, D17 routes (the SSE endpoints).
+- [09-web-ui](./09-web-ui.md) — D16 middleware, D17 routes (the chat/skill/swarm + pending endpoints).
+- [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md) — background-job model (supersedes SSE).
+- [ADR-0011](./adr/0011-live-switchable-llm-backend.md) — live backend router + Settings page.

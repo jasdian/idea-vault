@@ -32,6 +32,14 @@ stateDiagram-v2
     Reopened --> Reopened: chat turn / skill / swarm
     Reopened --> Stored: "store it" (D12 re-extract / merge memory)
 
+    [*] --> InDiscussion: fork an existing idea (copies body + conversation + memory forward)
+
+    note left of InDiscussion
+        Fork (POST /idea/:slug/fork) creates a NEW idea that opens directly
+        in InDiscussion, not Draft — it carries the source's whole
+        transcript and memory forward, so there is nothing left to "start".
+    end note
+
     note right of Stored
         Side effects on entry:
         - consolidate best statement into idea.md body
@@ -60,17 +68,29 @@ stateDiagram-v2
 | `Stored` | `Reopened` | Reopen | idea exists | load `MEMORY.md`+facts, budget context ([D21](./06-concepts/swarm.md)), `state=reopened` ([D13](./06-concepts/memory.md)) |
 | `Reopened` | `Reopened` | Chat turn / skill / swarm | — | append transcript |
 | `Reopened` | `Stored` | "Store it" | — | re-consolidate, **merge** new facts into existing `memory/` (dedupe), rebuild `MEMORY.md`, `state=stored` |
+| — | `InDiscussion` | Fork (`POST /idea/:slug/fork`) | source idea exists | create `vault/<new-slug>/` (title `"<source> (fork)"`, slug disambiguated per [D22](./03-data-model.md)), write `idea.md` with the source's body and `state=in_discussion` directly (not `draft`), copy the whole `conversation.md` and every `memory/*.md` fact forward, rebuild `MEMORY.md`, index upsert |
 
 ## Invariants
 
 - **State is persisted before it is trusted.** A transition is not complete until `idea.md`
   frontmatter is written; the index copy is a best-effort derivative ([ADR-0007](./adr/0007-state-in-frontmatter-not-db.md)).
-- **`conversation.md` is append-only** across every discussion state; storing never truncates it.
-- **Memory only grows or merges.** Re-storing a `Reopened` idea merges/dedupes facts; it does not
-  silently drop prior conclusions.
-- **`Draft` has no memory.** `memory/` and `MEMORY.md` first appear on the transition to `Stored`.
+- **`conversation.md` is append-only** across every discussion state, with **one deliberate
+  exception**: `vault::store::delete_turn` lets the owner explicitly remove a single turn they
+  don't want, rewriting the file atomically (tmp + rename). This is a human cleanup action, never
+  an automated one — no AI or workflow path ever calls it — and it is distinct from the streaming
+  "never persist a partial turn" rule, which still holds absolutely. Storing itself never truncates
+  the file.
+- **Memory only grows or merges — with one deliberate exception.** Re-storing a `Reopened` idea
+  merges/dedupes facts; it does not silently drop prior conclusions. The owner can still explicitly
+  delete one accumulated fact (`vault::store::delete_memory_fact`, rebuilds `MEMORY.md`) to shrink
+  the context a future reopen reloads — again a human cleanup action, never automatic.
+- **`Draft` has no memory.** `memory/` and `MEMORY.md` first appear on the transition to `Stored`
+  (or immediately, on a fork of an idea that already has memory).
 - **Reopening is idempotent w.r.t. truth.** It reloads context and flips state; it does not rewrite
   the body or memory (those change only on Store).
+- **Forking is a copy, not a link.** The fork's `idea.md`/`conversation.md`/`memory/*.md` are
+  independent files from the moment of creation; editing or storing either idea afterward never
+  touches the other.
 
 ## Mapping to code
 

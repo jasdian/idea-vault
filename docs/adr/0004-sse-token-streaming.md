@@ -1,8 +1,15 @@
 # ADR-0004 — SSE for AI token streaming
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0010](./0010-ai-turns-as-background-jobs.md)
 - **Date:** 2026-07-07
 - **Deciders:** owner
+
+> **Superseded by ADR-0010.** AI turns (chat/skill/swarm) now run as detached background jobs
+> polled via `GET /idea/{slug}/pending`, not SSE — see
+> [ADR-0010](./0010-ai-turns-as-background-jobs.md) for why (a model call tied to the request future
+> died on client navigation/disconnect; the htmx SSE extension referenced below was never vendored,
+> so browser-side SSE consumption never actually worked) and for the mechanics that replaced it.
+> The body below is preserved unchanged as the historical record of the original decision.
 
 ## Context
 

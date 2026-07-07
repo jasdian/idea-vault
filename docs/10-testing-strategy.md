@@ -41,15 +41,26 @@ returned by `index::reindex` ([D15](./03-data-model.md)) as a first-line asserti
 - **Index (`index`)** — the reindex property test above, plus query correctness (FTS search, tag
   filter, backlink both-directions) on fixture vaults.
 - **AI (`ai`) with a mock Ollama** — a stub HTTP server standing in for `:11434`:
-  - streaming path (D11) yields tokens then `done`, assistant turn persisted only on completion;
+  - the model call (D11) returns a complete reply that the caller persists only on success — no
+    partial/empty reply ever reaches `conversation.md`;
   - absence / connection-refused / timeout → degradation states (D20), no hang (bounded by timeout);
   - budget assembler respects the size limit and priority order (D21).
+- **claude-code backend** — tested against a fake `claude` shell script emitting canned
+  `stream-json` (`tests/fixtures/fake-claude.sh`, `tests/claude_backend.rs`); see
+  [ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md).
+- **Live backend toggle (`ai::backend::LlmBackend`)** — assert `chat`/`chat_stream`/`probe`/`model`
+  dispatch to whichever backend `LlmSettings.backend` currently names, and that a `set_settings`
+  call changes the very next dispatch with no reconstruction ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)).
+- **Background jobs (`web::jobs`)** — `try_claim` refuses a second concurrent claim for the same
+  idea; `peek` reports `Running`/`Failed`/`Idle` correctly and `Failed` is consumed exactly once
+  ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
 - **Concurrency (`concepts::swarm`)** — instrument the semaphore; fan out N ≫ K tasks against the
-  mock and assert max concurrent Ollama calls == K and all N complete; a failing agent yields null
+  mock and assert max concurrent calls == K and all N complete; a failing agent yields null
   and the judge proceeds (degrade-don't-abort, D14).
 - **Web (`web`)** — handler tests over the router: create (D10) produces a `Draft`; store (D12)
-  transitions to `Stored` and writes memory; reopen (D13) loads context and sets `Reopened`; SSE
-  endpoint emits events; error mapping matches the taxonomy (D24).
+  transitions to `Stored` and writes memory; reopen (D13) loads context and sets `Reopened`; the
+  chat/skill/swarm routes claim a job and the `/pending` poll reflects job state; error mapping
+  matches the taxonomy (D24).
 
 ## Test doubles & fixtures
 

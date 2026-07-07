@@ -11,7 +11,7 @@
 |---|------|---------|-------------|
 | 1 | Startup / boot | D25 | [01-architecture](./01-architecture.md) |
 | 2 | New-idea creation | **D10** | *this doc* |
-| 3 | Chat turn → Ollama → SSE stream | D11 | [05-ai-integration](./05-ai-integration.md) |
+| 3 | Chat turn → LlmBackend → background job → poll | D11 | [05-ai-integration](./05-ai-integration.md) |
 | 4 | Store → memory extraction | D12 | [06-concepts/memory](./06-concepts/memory.md) |
 | 5 | Reopen → load memory | D13 | [06-concepts/memory](./06-concepts/memory.md) |
 | 6 | Subagent swarm (fan-out → converge) | D14 | [06-concepts/swarm](./06-concepts/swarm.md) |
@@ -19,15 +19,18 @@
 | 8 | Workflow orchestration | D19 | [06-concepts/workflows](./06-concepts/workflows.md) |
 | 9 | Reindex (rebuild from markdown) | D15 | [03-data-model](./03-data-model.md) |
 | 10 | HTTP request / middleware lifecycle | D16 | [09-web-ui](./09-web-ui.md) |
+| 11 | Fork an idea (carries body + conversation + memory into a new `InDiscussion` idea) | *(no dedicated diagram — see the D9 transitions table)* | [04-state-machine](./04-state-machine.md) |
 
 These ten cover every flow named in [CLAUDE.md](../CLAUDE.md); the six *core* flows it calls out
-explicitly are #2, #3, #4, #5, #6, #9.
+explicitly are #2, #3, #4, #5, #6, #9. Fork (#11) is a newer, additive flow not among those six.
 
 ## The idea lifecycle, end to end (prose)
 
 1. **Create (D10).** Owner enters a title; a `Draft` idea folder is created.
-2. **Discuss (D11, D18, D14).** Owner submits turns; the AI streams replies. The owner can invoke
-   skills or launch a swarm to attack the idea from many angles. State is `InDiscussion`.
+2. **Discuss (D11, D18, D14).** Owner submits turns; each reply runs as a background job the owner
+   watches via a polling "thinking" indicator, not a token stream ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
+   The owner can invoke skills or launch a swarm to attack the idea from many angles. State is
+   `InDiscussion`.
 3. **Store (D12).** Owner says "store it". The idea body is consolidated and memory facts are
    extracted. State → `Stored`.
 4. **Reopen (D13).** Later, the owner reopens; memory is reloaded as context and discussion resumes.

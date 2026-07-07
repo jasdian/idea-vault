@@ -67,14 +67,16 @@ Containerization requires the app to stop assuming `localhost`. `config.rs`
 | `IDEA_VAULT_OLLAMA_MODEL` | `qwen3.5:4b` | `${IDEA_VAULT_OLLAMA_MODEL}` | default model, shared with the `ollama-pull` one-shot. |
 | `IDEA_VAULT_AI_CONCURRENCY` | `2` | not set — falls back to `2` | process-wide bound K on concurrent Ollama calls — chat, skills, and swarm all share one semaphore ([ADR-0006](./adr/0006-bounded-concurrency-swarm.md)). |
 | `IDEA_VAULT_OLLAMA_TIMEOUT_SECS` | `120` | not set — falls back to `120` | hard inactivity timeout for Ollama calls — the initial response and every token gap must arrive within this window or the call aborts ([05-ai-integration](./05-ai-integration.md), D20 degrade-not-hang). |
-| `IDEA_VAULT_LLM_BACKEND` | `ollama` | `ollama` | which LLM backend answers chat/skills/swarm: `ollama` or `claude-code` ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)). |
+| `IDEA_VAULT_LLM_BACKEND` | `ollama` | `ollama` | which LLM backend answers chat/skills/swarm **at boot** (the initial value): `ollama` or `claude-code` ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)). Retunable live via the Settings page (`GET`/`POST /settings`) with no restart — see [ADR-0011](./adr/0011-live-switchable-llm-backend.md). |
+| `IDEA_VAULT_OLLAMA_TEMPERATURE` | `0.7` | not set — falls back to `0.7` | initial Ollama sampling temperature, clamped to `0.0..=2.0` (unparsable/out-of-range falls back to the default); retunable live via `/settings`. |
 | `IDEA_VAULT_CLAUDE_BIN` | `claude` | — | path to the `claude` CLI (claude-code backend only). |
-| `IDEA_VAULT_CLAUDE_MODEL` | *(CLI default)* | — | optional `--model` for the claude-code backend. |
+| `IDEA_VAULT_CLAUDE_MODEL` | *(CLI default)* | — | optional `--model` for the claude-code backend; retunable live via `/settings`. |
 | `IDEA_VAULT_CLAUDE_CWD` | *(the vault dir)* | — | the foil's working dir. Defaults to the vault, **never the app source**, so a full-agentic foil cannot rewrite idea-vault. |
 | `IDEA_VAULT_CLAUDE_ADD_DIRS` | *(none)* | — | colon-separated dirs the foil may read (Obsidian vault, Claude Code artifacts) → `--add-dir`. |
 | `IDEA_VAULT_CLAUDE_ALLOWED_TOOLS` | *(all)* | — | comma-separated allow-list (only applied when permissions are **not** skipped). |
 | `IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS` | `true` | — | `--dangerously-skip-permissions` for unattended runs (the full-agentic default); set `false` to lock down. |
 | `IDEA_VAULT_CLAUDE_TIMEOUT_SECS` | `300` | — | hard inactivity timeout for claude-code turns (agentic turns run longer than a hot local model). |
+| `IDEA_VAULT_CLAUDE_EFFORT` | `high` | — | initial claude-code reasoning effort (`low`/`medium`/`high`), injected as a system-prompt hint since the CLI has no per-call effort flag; retunable live via `/settings`. |
 
 > This is the one behavioral change containers impose on the app design. It updates the boot
 > ([D25](./01-architecture.md)) "bind localhost" step and the Ollama client construction
@@ -178,6 +180,19 @@ First-run note: a fresh `ollama-models` volume has no model, so AI is in the **d
 service_healthy` gates only the **daemon**, not the model — the stack starts clean and the UI shows
 the degraded banner until the model exists. This is intentional and matches the graceful-degradation
 requirement.
+
+**Local `.gguf` import (alternative to `ollama-pull`).** To run a local or fine-tuned weight file
+instead of a registry pull, the `ollama-import` one-shot (`--profile tools`, same profile as
+`ollama-pull`) reads the blob once into the `ollama-models` volume:
+
+```bash
+IDEA_VAULT_MODELS_DIR=/abs/path/to/gguf-dir IDEA_VAULT_GGUF=Your-Model-Q4_K_M.gguf \
+  IDEA_VAULT_OLLAMA_MODEL=my-local docker compose --profile tools run --rm ollama-import
+```
+
+then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`. See
+`.env.example` for the `IDEA_VAULT_MODELS_DIR`/`IDEA_VAULT_GGUF` variables and a GPU-fit note for
+7-8B Q4_K_M models on an 11 GB card.
 
 ## Pitfalls (carry into scaffolding & ops)
 

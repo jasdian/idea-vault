@@ -16,6 +16,11 @@ self-contained binary and no external toolchains.
 We will render HTML on the server with **Askama** templates and drive interactivity with **HTMX**,
 returning HTML **partials** for dynamic updates. AI output streams over **SSE** (see
 [ADR-0004](./0004-sse-token-streaming.md)). There is **no JavaScript SPA** and **no JS build step**.
+>
+> **Note (2026-07-07):** the "AI output streams over SSE" clause was superseded by
+> [ADR-0010](./0010-ai-turns-as-background-jobs.md) — AI turns now run as detached background jobs
+> polled via HTMX, not SSE. Everything else in this decision (Askama + HTMX partials, no SPA, no JS
+> build step) is unchanged and still authoritative.
 
 ## Consequences
 

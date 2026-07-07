@@ -2,15 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Status: scaffolded — skeleton built, features are stubs
+## Status: built out — core loop implemented, not a stub scaffold
 
-The crate skeleton exists and matches the docs: `cargo run` boots the D25 sequence and serves
-`GET /` and `GET /admin/health`; `domain/` is fully implemented and unit-tested; `vault`, `index`
-(real schema + list query), `ai` (real client + probe), `memory`, `concepts`, and most `web`
-routes are typed stubs returning **501 Not Implemented** with `TODO(<milestone>)` markers citing
-their design docs. The "Commands" section below is real. Do not invent build/test output — run
-the commands and report real results. Next build-out order: `vault` → `index` (reindex) →
-`ai`/`memory` → `concepts` → `web` (chat SSE).
+The crate matches the docs and is implemented past the original stub milestone: `cargo run` boots
+the D25 sequence and serves the full route set — idea list/view, chat, skills, swarm, store/reopen,
+fork, history, and a live Settings page. `domain/`, `vault`, `index` (schema + queries + reindex),
+`ai` (Ollama client + claude-code client behind a live-switchable `LlmBackend` router, see
+[ADR-0009](docs/adr/0009-pluggable-llm-backend-claude-code.md)/[ADR-0011](docs/adr/0011-live-switchable-llm-backend.md)),
+`memory`, `concepts` (skills/agents/workflows/swarm), and `web` are all implemented, not typed
+501 stubs. The "Commands" section below is real. Do not invent build/test output — run the
+commands and report real results. Any remaining `TODO(<milestone>)` markers in the source are
+narrow (e.g. individual skill prompt templates), not whole-module stubs — check the source before
+assuming a gap.
 
 ## What this is
 
@@ -29,16 +32,29 @@ These were chosen explicitly by the owner. Do not silently revise them; if you b
 wrong, raise it rather than working around it.
 
 - **Backend / UI:** Rust, **axum** HTTP server. Server-rendered HTML via **Askama** templates,
-  enhanced with **HTMX**; AI responses stream token-by-token over **Server-Sent Events (SSE)**.
-  No JS build step, no SPA — ships as a single binary. New chat routes should stream, not block.
+  enhanced with **HTMX**; No JS build step, no SPA — ships as a single binary. AI turns (chat,
+  skills, swarm) run as **detached background jobs** (`web::jobs`), not SSE — the model call
+  outlives the request so navigating away can't kill it; the browser polls
+  `GET /idea/{slug}/pending` for a server-driven "thinking… Ns" indicator and swaps in the finished
+  transcript on completion. See [ADR-0010](docs/adr/0010-ai-turns-as-background-jobs.md), which
+  supersedes the earlier SSE-streaming decision ([ADR-0004](docs/adr/0004-sse-token-streaming.md)).
+  New chat-adjacent routes should follow this same claim → spawn → poll pattern, not block the
+  request thread on a model call.
 - **Storage: hybrid.** Markdown files on disk are the **source of truth**; **SQLite is a
   rebuildable index** for search/tags/backlinks only. Never store canonical idea content only in
   SQLite — anything in the DB must be reconstructable by re-scanning the vault. A `reindex`
   path that rebuilds the DB from markdown must always exist and stay correct.
-- **AI backend: local models via Ollama** (`http://localhost:11434`). Fully offline/private.
-  The subagent-swarm and skills concepts run against local models — keep prompt/context budgets
-  modest and degrade gracefully when a model is slow or unavailable.
-- No cloud AI provider is in scope. Do not add Anthropic/OpenAI calls without the owner asking.
+- **AI backend: local models via Ollama** (`http://localhost:11434`) by default, offline/private,
+  with an optional agentic **claude-code** backend (the local, authenticated `claude` CLI — not a
+  cloud API call) for owners who want the foil to read their own notes/artifacts. The two backends
+  sit behind a **live-switchable router** (`ai::backend::LlmBackend`): a Settings page
+  (`GET`/`POST /settings`) toggles the active backend and tunes Ollama temperature / claude-code
+  model+effort with no restart. See [ADR-0009](docs/adr/0009-pluggable-llm-backend-claude-code.md)
+  and [ADR-0011](docs/adr/0011-live-switchable-llm-backend.md). The subagent-swarm and skills
+  concepts run against whichever backend is active — keep prompt/context budgets modest and degrade
+  gracefully when a model is slow or unavailable.
+- No cloud AI provider is in scope beyond the local `claude` CLI above. Do not add a networked
+  Anthropic/OpenAI API call without the owner asking.
 
 ## The ideation lifecycle (the core product loop)
 
@@ -60,11 +76,13 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 
 ## Design docs (build against these)
 
-The full design foundation now lives in [`docs/`](docs/README.md): architecture (C4), the
-single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI/Ollama
-integration, the five harness concepts (memory/skills/agents/workflows/swarm), the web-UI routes,
-a 25-diagram Mermaid catalog, and ADRs 0001–0007. Start at [docs/README.md](docs/README.md).
-The code is not scaffolded yet; these docs are the contract to build against.
+The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
+single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
+integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
+the web-UI routes, a Mermaid diagram catalog (D1–D28), and ADRs 0001–0011. Start at
+[docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
+disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
+either.
 
 ## Vault layout (source of truth)
 
@@ -134,7 +152,12 @@ docker compose down
 `127.0.0.1:3000`; `0.0.0.0:3000` in-container), `IDEA_VAULT_VAULT_DIR`, `IDEA_VAULT_INDEX_PATH`,
 `IDEA_VAULT_OLLAMA_URL` (default `http://localhost:11434`; `http://ollama:11434` in-compose),
 `IDEA_VAULT_OLLAMA_MODEL`, `IDEA_VAULT_AI_CONCURRENCY` (default `2`, the shared Ollama-call bound K,
-ADR-0006), and `IDEA_VAULT_OLLAMA_TIMEOUT_SECS` (default `120`, the hard inactivity timeout).
+ADR-0006), `IDEA_VAULT_OLLAMA_TIMEOUT_SECS` (default `120`, the hard inactivity timeout),
+`IDEA_VAULT_OLLAMA_TEMPERATURE` (default `0.7`, range `0.0..=2.0`), and `IDEA_VAULT_CLAUDE_EFFORT`
+(default `high`; injected as a system-prompt hint, since the claude CLI has no per-call effort
+flag). The last two are only the **initial** values — the live Settings page
+(`GET`/`POST /settings`, [ADR-0011](docs/adr/0011-live-switchable-llm-backend.md)) can retune
+backend/temperature/model/effort at runtime with no restart.
 **Never hardcode `localhost:11434` or a localhost bind** — it breaks the
 containerized run. `vault/` is a host bind mount (truth you own); the SQLite index and Ollama models
 are named volumes (rebuildable / re-pullable). GPU touches only the Ollama service.
@@ -144,6 +167,8 @@ are named volumes (rebuildable / re-pullable). GPU touches only the Ollama servi
 - Markdown is the durable format everywhere the owner reads content; render it in the UI.
 - Frontmatter carries structured state (idea state, tags, timestamps) so the vault is
   self-describing and the SQLite index is always regenerable from disk.
-- Prefer streaming (SSE) for anything AI-generated so long local-model responses feel live.
+- Run anything AI-generated as a detached background job with a visible, server-driven "thinking"
+  indicator ([ADR-0010](docs/adr/0010-ai-turns-as-background-jobs.md)) so long local-model
+  responses feel live without tying a model call to the request that started it.
 - Keep it a single self-contained binary + a `vault/` directory the owner can read, back up,
   and version with git independently of the app.

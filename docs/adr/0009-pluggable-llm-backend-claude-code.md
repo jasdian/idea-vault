@@ -31,6 +31,13 @@ Introduce an **`LlmBackend` enum** (`ai::backend`) with two variants — `Ollama
 An enum (not a `dyn` trait) keeps this zero-cost and dependency-free; the backend set is closed and
 small. `AppState` holds one `LlmBackend`, selected at boot from `IDEA_VAULT_LLM_BACKEND`
 (`ollama` default | `claude-code`).
+>
+> **Amended by [ADR-0011](./0011-live-switchable-llm-backend.md).** The sentence above ("selected
+> at boot") and the two-variant-enum-dispatched-by-`match` shape are no longer current: `LlmBackend`
+> is now a struct that always holds both backends plus a live `Arc<RwLock<LlmSettings>>`, and a
+> Settings page can retoggle the active backend (and retune Ollama temperature / claude-code
+> model+effort) at runtime with no restart. The enum-vs-`dyn` rationale and the four-method surface
+> are unchanged; only "fixed at boot" is superseded — see ADR-0011 for the current shape.
 
 The **claude-code backend** (`ai::claude_code`) spawns a fresh one-shot `claude` process per turn
 (idea-vault reassembles the full budgeted context every turn, so no `--resume`/session state is

@@ -35,7 +35,7 @@ AgentTask {
   skill?:   <skill name to apply>          // optional lens
   context:  <budgeted block>               // from ai::budget (D21)
 }
-      │  concepts::agents runs the role prompt via ai::ollama (under the semaphore)
+      │  concepts::agents runs the role prompt via the active LlmBackend (under the semaphore)
       ▼
 AgentResult {
   role:     <role>
@@ -57,5 +57,7 @@ and consuming `AgentResult`s; the agent module only knows how to *run one role w
 ## Mapping to code
 
 - Role definitions + `AgentTask`/`AgentResult`: `concepts::agents`.
-- Execution boundary: `ai::ollama` (all calls acquire the concurrency semaphore, [ADR-0006](../adr/0006-bounded-concurrency-swarm.md)).
+- Execution boundary: `ai::backend::LlmBackend` — the live router over Ollama/claude-code
+  ([ADR-0011](../adr/0011-live-switchable-llm-backend.md)); all calls acquire the concurrency
+  semaphore ([ADR-0006](../adr/0006-bounded-concurrency-swarm.md)).
 - Orchestration: `concepts::swarm`, `concepts::workflows`.

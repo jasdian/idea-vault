@@ -24,35 +24,46 @@ parallelism thrashes it. So swarming is governed by two limits, both in `config.
 
 ## D14 — Swarm: fan-out → converge / synthesize
 
+The whole run happens inside one **detached background job**
+([ADR-0010](../adr/0010-ai-turns-as-background-jobs.md)) started by `POST /idea/:slug/swarm`: the
+route claims the per-idea job slot and returns a "thinking" indicator immediately; the owner sees
+the converged result only once polling (`GET /idea/:slug/pending`) reports the job done. Every
+agent/judge/synthesizer call below goes through the live `LlmBackend` router
+([ADR-0011](../adr/0011-live-switchable-llm-backend.md)), not a fixed Ollama client — whichever
+backend is active answers every call in the fan-out.
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as Owner ("swarm this")
+    participant J as web::jobs (background job)
     participant D as swarm::dispatcher
     participant S as semaphore (K slots)
     participant W as agent workers
-    participant J as judge
+    participant Jg as judge
     participant Y as synthesizer
-    participant O as ai::ollama
+    participant L as ai::backend::LlmBackend
 
-    U->>D: swarm(idea, angles=[premortem, disproof, constraints, 2nd-order])
+    U->>J: POST /idea/:slug/swarm — claim job, return indicator immediately
+    J->>D: swarm(idea, angles=[premortem, disproof, constraints, 2nd-order])
     D->>D: build N AgentTasks (role + skill + budgeted context)
     par bounded fan-out (only K run at once)
         D->>S: acquire
         S-->>W: slot
-        W->>O: run agent role prompt
-        O-->>W: AgentResult
+        W->>L: run agent role prompt
+        L-->>W: AgentResult
         W->>S: release
     and queued tasks wait for a slot
         Note over S,W: N-K tasks queue (backpressure, D21)
     end
-    W-->>J: all AgentResults
-    J->>J: rank / dedupe findings
-    J-->>Y: shortlisted findings
-    Y->>O: synthesize into one position
-    O-->>Y: converged result
-    Y-->>U: single result (appended as assistant turn)
-    Note over W,J: a failed agent → null result, skipped by judge (degrade, don't abort)
+    W-->>Jg: all AgentResults
+    Jg->>Jg: rank / dedupe findings
+    Jg-->>Y: shortlisted findings
+    Y->>L: synthesize into one position
+    L-->>Y: converged result
+    Y-->>J: single result — appended as assistant turn only if non-empty
+    J-->>U: mark_done; next poll returns the finished transcript
+    Note over W,Jg: a failed agent → null result, skipped by judge (degrade, don't abort)
 ```
 
 ## D21 — Concurrency & context-budget model
@@ -66,7 +77,7 @@ sequenceDiagram
     participant D as dispatcher
     participant Sem as semaphore (limit=K)
     participant Bud as ai::budget
-    participant Ol as Ollama
+    participant L as LlmBackend (active backend)
 
     Note over D: N tasks created (N may be ≫ K)
     loop for each task
@@ -74,11 +85,11 @@ sequenceDiagram
         Sem-->>D: permit
         D->>Bud: build prompt ≤ budget (body + top memory + trimmed convo)
         Bud-->>D: budgeted prompt
-        D->>Ol: call (counts toward the K in flight)
-        Ol-->>D: result
+        D->>L: call (counts toward the K in flight)
+        L-->>D: result
         D->>Sem: release (wakes a queued task)
     end
-    Note over D,Ol: steady state = K concurrent Ollama calls; rest queued (bounded latency)
+    Note over D,L: steady state = K concurrent calls to the active backend; rest queued (bounded latency)
 ```
 
 Budget composition per agent (priority order when trimming to fit):
@@ -108,5 +119,7 @@ Budget composition per agent (priority order when trimming to fit):
 ## Related
 
 - [workflows](./workflows.md) — D19 uses this fan-out as its parallel stage.
-- [05-ai-integration](../05-ai-integration.md) — D3 component view, D11 streaming.
+- [05-ai-integration](../05-ai-integration.md) — D3 component view, D11 background-job flow.
 - [ADR-0006](../adr/0006-bounded-concurrency-swarm.md) — the bounding decision.
+- [ADR-0010](../adr/0010-ai-turns-as-background-jobs.md) — swarm runs as a background job, polled.
+- [ADR-0011](../adr/0011-live-switchable-llm-backend.md) — the `LlmBackend` router every call goes through.

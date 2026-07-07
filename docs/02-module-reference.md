@@ -38,8 +38,8 @@ flowchart TB
         subgraph ai["ai/ (LLM backend boundary)"]
             A_OLL["ollama.rs — Ollama client + health (D20)"]
             A_CC["claude_code.rs — claude CLI backend (ADR-0009)"]
-            A_BK["backend.rs — LlmBackend enum (ADR-0009)"]
-            A_STREAM["stream.rs — tokens → SSE (D11)"]
+            A_BK["backend.rs — LlmBackend live router + LlmSettings (ADR-0009/0011)"]
+            A_STREAM["stream.rs — Ollama NDJSON → token stream"]
             A_BUDGET["budget.rs — context budgeting (D21)"]
         end
 
@@ -57,8 +57,8 @@ flowchart TB
         end
 
         subgraph web["web/ (HTTP surface)"]
-            W_ROUTES["routes/ — ideas, chat, memory, admin"]
-            W_SSE["sse.rs — shared SSE plumbing"]
+            W_ROUTES["routes/ — ideas, chat, memory, settings, admin"]
+            W_JOBS["jobs.rs — background job registry + poll (ADR-0010)"]
             W_TMPL["templates.rs — Askama structs"]
         end
 
@@ -139,12 +139,17 @@ flowchart TD
   from [03-data-model](./03-data-model.md). Append-only for `conversation.md`.
 - **`index`** — owns `index.db`: schema + FTS5, query functions, and `reindex` (the rebuild-from-disk
   that upholds the reindex invariant, [D15](./03-data-model.md)).
-- **`ai`** — the sole LLM-backend boundary (ADR-0009): the `LlmBackend` enum over an Ollama HTTP client or the `claude` CLI, health probe, token-stream→SSE adapter, and
-  context budgeting. Provider-swap would be localized here (out of scope, [ADR-0003](./adr/0003-ollama-local-only-ai.md)).
+- **`ai`** — the sole LLM-backend boundary (ADR-0009): `LlmBackend`, a **live router** over an
+  Ollama HTTP client and the `claude` CLI backend, dispatching per call from runtime-tunable
+  `LlmSettings` ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)); also health probe and
+  context budgeting. Provider-swap is localized here (out of scope beyond these two,
+  [ADR-0003](./adr/0003-ollama-local-only-ai.md)).
 - **`memory`** — the memory feature: extract facts at Store ([D12](./06-concepts/memory.md)), load
   them at Reopen ([D13](./06-concepts/memory.md)), resolve backlinks ([D23](./06-concepts/memory.md)).
 - **`concepts`** — skills, agents, workflows, and the swarm orchestrator ([06-concepts](./06-concepts/)).
-- **`web`** — axum router, handlers, Askama rendering, SSE plumbing. The top of the graph.
+- **`web`** — axum router, handlers, Askama rendering, and the background job registry (`web::jobs`,
+  [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) that every AI-driven route spawns into and
+  polls. The top of the graph.
 - **`import`** — a bin-level driver (used only by `main`, like `web`): converts a directory of flat
   Obsidian `.md` notes into ideas, then reindexes ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)).
   Depends on `domain` + `vault` + `index`; nothing depends on it.
