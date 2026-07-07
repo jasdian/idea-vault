@@ -5,7 +5,7 @@
   {% for hit in hits %}
   <li>
     <a href="/idea/{{ hit.slug }}">{{ hit.title }}</a>
-    <span class="muted">{{ hit.snippet|safe }}</span>
+    <span class="muted">{{ hit.snippet }}</span>
   </li>
   {% endfor %}
 </ul>

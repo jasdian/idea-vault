@@ -22,11 +22,28 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({ "status": "ok", "ollama": ollama }))
 }
 
-/// R10 — `POST /admin/reindex` — rebuild the derived index from the vault (D15).
-pub async fn reindex(State(_state): State<AppState>) -> Result<Json<serde_json::Value>, WebError> {
-    // TODO(D15): see docs/03-data-model.md D15 — run `index::reindex::reindex` against the vault
-    // under the db lock and return the resulting counts.
-    Err(WebError::NotImplemented("web::routes::admin::reindex"))
+/// R10 — `POST /admin/reindex` — rebuild the derived index from the vault (D15), returning the
+/// counts for verification. This is the manual reconcile for edits the boot drift-check cannot
+/// see (hand-edited conversations/memory files); the index is always rebuildable (ADR-0002).
+pub async fn reindex(State(state): State<AppState>) -> Result<Json<serde_json::Value>, WebError> {
+    let counts = {
+        let mut conn = state
+            .db
+            .lock()
+            .map_err(|e| WebError::Internal(format!("db mutex poisoned: {e}")))?;
+        crate::index::reindex::reindex(&mut conn, &state.config.vault_dir)?
+    };
+    tracing::info!(
+        ideas = counts.ideas,
+        facts = counts.facts,
+        links = counts.links,
+        "manual reindex complete"
+    );
+    Ok(Json(json!({
+        "ideas": counts.ideas,
+        "facts": counts.facts,
+        "links": counts.links,
+    })))
 }
 
 /// Embedded static assets (single-binary — ADR-0001): `static/` is baked into the binary.

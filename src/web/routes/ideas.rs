@@ -245,10 +245,17 @@ pub struct SearchQuery {
 
 /// R8 — `GET /search?q=` — full-text search results fragment.
 pub async fn search(
-    State(_state): State<AppState>,
-    Query(_query): Query<SearchQuery>,
+    State(state): State<AppState>,
+    Query(query): Query<SearchQuery>,
 ) -> Result<SearchResults, WebError> {
-    // TODO(R8): see docs/09-web-ui.md D17 & docs/03-data-model.md D6 — run `index::queries::search`
-    // and render the `_search_results.html` partial.
-    Err(WebError::NotImplemented("web::routes::ideas::search"))
+    let hits = {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|e| WebError::Internal(format!("db mutex poisoned: {e}")))?;
+        // queries::search compiles any input to an injection-proof FTS MATCH expression;
+        // empty/whitespace input yields no hits (the fragment renders its empty state).
+        queries::search(&conn, &query.q)?
+    };
+    Ok(SearchResults { hits })
 }

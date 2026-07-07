@@ -99,8 +99,10 @@ async fn static_htmx_is_embedded() {
 }
 
 #[tokio::test]
-async fn unimplemented_route_answers_501_and_create_validates_input() {
-    // A still-stubbed route keeps answering an honest 501 …
+async fn last_stub_route_is_real_and_create_validates_input() {
+    // The former last stub (/admin/reindex) now runs a real rebuild and returns counts on an
+    // empty vault. (A code-level grep confirms no NotImplemented is constructed anywhere —
+    // this test only spot-checks the route that held out longest.)
     let app = build_router(test_state());
     let resp = app
         .oneshot(
@@ -112,9 +114,10 @@ async fn unimplemented_route_answers_501_and_create_validates_input() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("\"ideas\":0"));
 
-    // … while the now-real create route validates instead (empty form → 400, not 501).
+    // Input validation stands in for the old honest-501 canary (empty form → 400).
     let app = build_router(test_state());
     let resp = app
         .oneshot(
