@@ -2,13 +2,17 @@
 //!
 //! This is the operation that enforces the *reindex invariant* (ADR-0002): the whole index is
 //! reconstructable from markdown alone. It runs inside a single transaction and returns counts so
-//! callers (and the property test in docs/10-testing-strategy.md) can verify the rebuild.
+//! callers (and the property test from docs/10-testing-strategy.md, below) can verify the rebuild.
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use chrono::{DateTime, SecondsFormat, Utc};
+use rusqlite::{params, Connection};
 
 use super::IndexError;
+use crate::domain::links;
+use crate::domain::slug as domain_slug;
+use crate::vault::{store, walk};
 
 /// Row counts produced by a reindex, used for verification (D15).
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -18,29 +22,524 @@ pub struct ReindexCounts {
     pub links: usize,
 }
 
-/// Cheap staleness check: does the vault differ from what the index reflects?
-///
-/// Used for startup-if-drift (D25). The scaffold conservatively reports "no drift".
-pub fn check_drift(_conn: &Connection, _vault_dir: &Path) -> Result<bool, IndexError> {
-    // TODO(reindex): see docs/03-data-model.md §D15 and §D25 — compare vault mtimes/slug set (or a
-    // content hash) against the indexed ideas and return true when a rebuild is warranted.
-    Ok(false)
+/// Canonical TEXT form for timestamps in the index: RFC3339, whole seconds, `Z` suffix — the
+/// same shape the frontmatter examples use (D8), so drift comparison is byte-stable.
+fn ts(dt: &DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// Rebuild the entire derived index from the vault, transactionally.
+/// Cheap staleness check: does the vault differ from what the index reflects? Used for
+/// startup-if-drift (D25).
 ///
-/// D15 sequence (must stay transactional + idempotent — `reindex(V) == reindex(reindex(V))`):
-/// 1. BEGIN transaction.
-/// 2. Clear derived tables (ideas, tags, idea_tags, memory_facts, backlinks, search_fts).
-/// 3. Enumerate `vault/<slug>/` via `vault::walk`.
-/// 4. For each idea dir, read idea.md / conversation.md / memory/*.md.
-/// 5. Parse frontmatter + bodies via `domain`.
-/// 6. Upsert `ideas`, `tags`, `idea_tags`.
-/// 7. Upsert `memory_facts`.
-/// 8. Insert `search_fts` rows (idea body + conversation).
-/// 9. Insert `backlinks` for every `[[slug]]` found (target_idea_id left NULL for now).
-/// 10. Resolve `backlinks.target_idea_id` by slug, then COMMIT and return counts.
-pub fn reindex(_conn: &mut Connection, _vault_dir: &Path) -> Result<ReindexCounts, IndexError> {
-    // TODO(reindex): see docs/03-data-model.md §D15 — implement the 10-step sequence above.
-    Err(IndexError::NotImplemented("index::reindex::reindex"))
+/// Compares the per-idea tuple (slug, title, state, created, updated, tags) between disk
+/// frontmatter and the `ideas`/`idea_tags` tables. This catches missing/extra/edited ideas —
+/// the boot-relevant drift. It deliberately does not diff conversations or fact bodies
+/// (post-write upserts keep those fresh; `POST /admin/reindex` is the manual override), and it
+/// skips unparsable idea dirs the same way `reindex` does, so a malformed file never wedges boot.
+pub fn check_drift(conn: &Connection, vault_dir: &Path) -> Result<bool, IndexError> {
+    let mut disk: Vec<String> = Vec::new();
+    for entry in walk::walk_ideas(vault_dir)? {
+        let idea = match store::read_idea(vault_dir, &entry.slug) {
+            Ok(idea) => idea,
+            Err(e) => {
+                tracing::warn!(slug = %entry.slug, error = %e, "skipping unparsable idea in drift check");
+                continue;
+            }
+        };
+        let fm = &idea.frontmatter;
+        let mut tags = fm.tags.clone();
+        tags.sort();
+        disk.push(format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            entry.slug,
+            fm.title,
+            fm.state.as_str(),
+            ts(&fm.created),
+            ts(&fm.updated),
+            tags.join(",")
+        ));
+    }
+    disk.sort();
+
+    let mut stmt = conn.prepare(
+        "SELECT i.slug, i.title, i.state, i.created_at, i.updated_at,
+                COALESCE((SELECT GROUP_CONCAT(t.name, ',' ORDER BY t.name)
+                          FROM tags t
+                          JOIN idea_tags it ON it.tag_id = t.id
+                          WHERE it.idea_id = i.id), '')
+         FROM ideas i ORDER BY i.slug",
+    )?;
+    let indexed: Vec<String> = stmt
+        .query_map([], |row| {
+            Ok(format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    Ok(disk != indexed)
+}
+
+/// Rebuild the entire derived index from the vault, transactionally (the D15 sequence).
+///
+/// Full rebuild is the canonical path (incremental post-write upserts are an optimization layered
+/// on top later); it must stay idempotent — `reindex(V) == reindex(reindex(V))` — and equal to a
+/// rebuild into an empty database (ADR-0002). Unparsable idea dirs are skipped with a warning
+/// (D24: parse errors surface but never take the whole rebuild down — the markdown truth is
+/// intact either way); skipped ideas simply have no rows until fixed.
+///
+/// `[[slug]]` link sources (D23): the idea body, each memory-fact body, and each fact's
+/// frontmatter `links:` list — deduplicated per source idea, first-occurrence order. The
+/// conversation transcript is indexed for search but deliberately not mined for backlinks
+/// (chat text mentioning an idea is not a curated cross-reference).
+pub fn reindex(conn: &mut Connection, vault_dir: &Path) -> Result<ReindexCounts, IndexError> {
+    let tx = conn.transaction()?;
+    let mut counts = ReindexCounts::default();
+
+    // 2. Clear every derived table — full rebuild semantics.
+    tx.execute_batch(
+        "DELETE FROM idea_tags;
+         DELETE FROM memory_facts;
+         DELETE FROM backlinks;
+         DELETE FROM search_fts;
+         DELETE FROM tags;
+         DELETE FROM ideas;",
+    )?;
+
+    // 3–9. Walk the vault and repopulate.
+    for entry in walk::walk_ideas(vault_dir)? {
+        let idea = match store::read_idea(vault_dir, &entry.slug) {
+            Ok(idea) => idea,
+            Err(e) => {
+                tracing::warn!(slug = %entry.slug, error = %e, "skipping unparsable idea during reindex");
+                continue;
+            }
+        };
+        let fm = &idea.frontmatter;
+        if fm.slug != entry.slug {
+            // D22: the folder name is the identity. A mismatched frontmatter slug is a malformed
+            // vault edit — index under the folder name and surface the inconsistency.
+            tracing::warn!(folder = %entry.slug, frontmatter = %fm.slug,
+                "idea.md frontmatter slug differs from folder name; indexing under folder name");
+        }
+
+        tx.execute(
+            "INSERT INTO ideas (slug, title, state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                entry.slug,
+                fm.title,
+                fm.state.as_str(),
+                ts(&fm.created),
+                ts(&fm.updated)
+            ],
+        )?;
+        let idea_id = tx.last_insert_rowid();
+        counts.ideas += 1;
+
+        // 6. Tags.
+        for tag in &fm.tags {
+            tx.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", [tag])?;
+            tx.execute(
+                "INSERT OR IGNORE INTO idea_tags (idea_id, tag_id)
+                 SELECT ?1, id FROM tags WHERE name = ?2",
+                params![idea_id, tag],
+            )?;
+        }
+
+        // 8. Search content: idea body + conversation transcript.
+        tx.execute(
+            "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'idea_body', ?2)",
+            params![idea_id, idea.body],
+        )?;
+        let conversation = store::read_conversation(vault_dir, &entry.slug)?;
+        if !conversation.is_empty() {
+            tx.execute(
+                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'conversation', ?2)",
+                params![idea_id, conversation],
+            )?;
+        }
+
+        // 7 + 9. Memory facts and `[[slug]]` link targets.
+        let mut targets: Vec<String> = links::extract_links(&idea.body);
+        let facts = match store::read_memory_facts(vault_dir, &entry.slug) {
+            Ok(facts) => facts,
+            Err(e) => {
+                tracing::warn!(slug = %entry.slug, error = %e,
+                    "skipping unparsable memory facts during reindex");
+                Vec::new()
+            }
+        };
+        for fact in &facts {
+            tx.execute(
+                "INSERT INTO memory_facts (idea_id, slug, title, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    idea_id,
+                    fact.frontmatter.slug,
+                    fact.frontmatter.title,
+                    ts(&fact.frontmatter.created)
+                ],
+            )?;
+            counts.facts += 1;
+
+            for target in links::extract_links(&fact.body) {
+                targets.push(target);
+            }
+            for target in &fact.frontmatter.links {
+                // Frontmatter `links:` entries are author-provided strings — hold them to the
+                // same canonical-slug bar as `[[slug]]` tokens.
+                if domain_slug::is_valid(target) {
+                    targets.push(target.clone());
+                }
+            }
+        }
+
+        let mut seen: Vec<String> = Vec::new();
+        for target in targets {
+            if seen.contains(&target) {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO backlinks (source_idea_id, target_slug, target_idea_id)
+                 VALUES (?1, ?2, NULL)",
+                params![idea_id, target],
+            )?;
+            counts.links += 1;
+            seen.push(target);
+        }
+    }
+
+    // 10. Resolve targets by slug — NULL stays for forward/dangling references (D23), and a
+    // later reindex re-resolves once the target idea exists.
+    tx.execute(
+        "UPDATE backlinks
+         SET target_idea_id = (SELECT id FROM ideas WHERE slug = target_slug)",
+        [],
+    )?;
+
+    tx.commit()?;
+    Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+    use crate::domain::{Idea, IdeaFrontmatter, IdeaState, MemoryFact, MemoryFactFrontmatter};
+    use crate::index::schema;
+
+    fn dt(h: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 7, h, 0, 0).unwrap()
+    }
+
+    fn idea(slug: &str, title: &str, state: IdeaState, tags: &[&str], body: &str) -> Idea {
+        Idea {
+            frontmatter: IdeaFrontmatter {
+                title: title.into(),
+                slug: slug.into(),
+                state,
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                created: dt(10),
+                updated: dt(11),
+            },
+            body: body.into(),
+        }
+    }
+
+    fn fact(slug: &str, title: &str, links: &[&str], body: &str) -> MemoryFact {
+        MemoryFact {
+            frontmatter: MemoryFactFrontmatter {
+                slug: slug.into(),
+                title: title.into(),
+                tags: vec![],
+                created: dt(12),
+                links: links.iter().map(|l| l.to_string()).collect(),
+            },
+            body: body.into(),
+        }
+    }
+
+    /// Fixture per docs/10-testing-strategy.md: mixed states, tags, facts, `[[slug]]` links
+    /// including dangling and forward references, plus a conversation transcript.
+    fn build_fixture_vault(vault: &Path) {
+        store::write_idea(
+            vault,
+            &idea(
+                "alpha",
+                "Alpha",
+                IdeaState::InDiscussion,
+                &["markets", "risk"],
+                "Alpha builds on [[beta]] but also on [[ghost-idea]] (not created yet).\n",
+            ),
+        )
+        .unwrap();
+        store::append_conversation(vault, "alpha", "## user\nrun it into the ground\n").unwrap();
+
+        store::write_idea(
+            vault,
+            &idea(
+                "beta",
+                "Beta",
+                IdeaState::Stored,
+                &["risk"],
+                "Beta statement mentions [[alpha]].\n",
+            ),
+        )
+        .unwrap();
+        store::write_memory_fact(
+            vault,
+            "beta",
+            &fact(
+                "durable-one",
+                "Durable one",
+                &["alpha", "Not A Slug"],
+                "Conclusion referencing [[alpha]] again and [[gamma]].\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Normalized, id-free snapshot of every derived table. Row ids are allocation order and may
+    /// differ between rebuilds — equality must be judged on natural keys only.
+    fn snapshot(conn: &Connection) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push_query = |sql: &str| {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                let mut line = String::new();
+                for i in 0..row.as_ref().column_count() {
+                    let v: Option<String> = row.get(i).unwrap();
+                    line.push_str(v.as_deref().unwrap_or("<NULL>"));
+                    line.push('\u{1f}');
+                }
+                out.push(line);
+            }
+        };
+        push_query(
+            "SELECT 'idea', slug, title, state, created_at, updated_at FROM ideas ORDER BY slug",
+        );
+        push_query(
+            "SELECT 'tag', i.slug, t.name FROM idea_tags it
+             JOIN ideas i ON i.id = it.idea_id JOIN tags t ON t.id = it.tag_id
+             ORDER BY i.slug, t.name",
+        );
+        push_query(
+            "SELECT 'fact', i.slug, f.slug, f.title, f.created_at FROM memory_facts f
+             JOIN ideas i ON i.id = f.idea_id ORDER BY i.slug, f.slug",
+        );
+        push_query(
+            "SELECT 'backlink', s.slug, b.target_slug, t.slug FROM backlinks b
+             JOIN ideas s ON s.id = b.source_idea_id
+             LEFT JOIN ideas t ON t.id = b.target_idea_id
+             ORDER BY s.slug, b.target_slug",
+        );
+        push_query(
+            "SELECT 'fts', i.slug, s.kind, s.content FROM search_fts s
+             JOIN ideas i ON i.id = s.idea_id ORDER BY i.slug, s.kind",
+        );
+        out
+    }
+
+    fn mem_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::apply_schema(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn keystone_reindex_is_idempotent_and_rebuildable_from_disk_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+
+        // reindex(V) …
+        let mut conn = mem_conn();
+        let counts1 = reindex(&mut conn, tmp.path()).unwrap();
+        let snap1 = snapshot(&conn);
+
+        // … == reindex(reindex(V)) (idempotent, same connection)
+        let counts2 = reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(counts1, counts2);
+        assert_eq!(snap1, snapshot(&conn));
+
+        // drop(index); reindex(V) == index(V) (rebuildable from the vault alone)
+        let mut fresh = mem_conn();
+        reindex(&mut fresh, tmp.path()).unwrap();
+        assert_eq!(snap1, snapshot(&fresh));
+    }
+
+    #[test]
+    fn counts_and_backlink_resolution_match_the_fixture() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+
+        let counts = reindex(&mut conn, tmp.path()).unwrap();
+        // alpha: [[beta]], [[ghost-idea]] — beta: [[alpha]] (body + fact, deduped) + [[gamma]]
+        // (fact body); the fact's frontmatter "Not A Slug" entry is rejected.
+        assert_eq!(
+            counts,
+            ReindexCounts {
+                ideas: 2,
+                facts: 1,
+                links: 4
+            }
+        );
+
+        // Resolution: existing targets get target_idea_id, dangling/forward stay NULL.
+        let resolved: Vec<(String, String, Option<String>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT s.slug, b.target_slug, t.slug FROM backlinks b
+                     JOIN ideas s ON s.id = b.source_idea_id
+                     LEFT JOIN ideas t ON t.id = b.target_idea_id
+                     ORDER BY s.slug, b.target_slug",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            resolved,
+            vec![
+                ("alpha".into(), "beta".into(), Some("beta".into())),
+                ("alpha".into(), "ghost-idea".into(), None),
+                ("beta".into(), "alpha".into(), Some("alpha".into())),
+                ("beta".into(), "gamma".into(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn forward_reference_resolves_on_a_later_reindex() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        // The dangling [[ghost-idea]] target gets created later …
+        store::write_idea(
+            tmp.path(),
+            &idea("ghost-idea", "Ghost", IdeaState::Draft, &[], "now real\n"),
+        )
+        .unwrap();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        // … and the next reindex re-resolves it (D23).
+        let resolved: Option<String> = conn
+            .query_row(
+                "SELECT t.slug FROM backlinks b
+                 JOIN ideas s ON s.id = b.source_idea_id
+                 LEFT JOIN ideas t ON t.id = b.target_idea_id
+                 WHERE s.slug = 'alpha' AND b.target_slug = 'ghost-idea'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved, Some("ghost-idea".into()));
+    }
+
+    #[test]
+    fn deleted_target_reverts_backlink_to_unresolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        // alpha -> beta resolves while beta exists; deleting `vault/beta/` must revert it to
+        // NULL on the next rebuild (D23 re-resolution works in both directions).
+        std::fs::remove_dir_all(tmp.path().join("beta")).unwrap();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let resolved: Option<String> = conn
+            .query_row(
+                "SELECT t.slug FROM backlinks b
+                 JOIN ideas s ON s.id = b.source_idea_id
+                 LEFT JOIN ideas t ON t.id = b.target_idea_id
+                 WHERE s.slug = 'alpha' AND b.target_slug = 'beta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn fts_covers_idea_body_and_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM search_fts WHERE search_fts MATCH 'ground'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "conversation");
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM search_fts WHERE search_fts MATCH 'statement'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "idea_body");
+    }
+
+    #[test]
+    fn check_drift_false_after_reindex_true_after_edit_or_on_empty_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+
+        // Empty index + non-empty vault = drift.
+        assert!(check_drift(&conn, tmp.path()).unwrap());
+
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert!(!check_drift(&conn, tmp.path()).unwrap());
+
+        // Edit an idea (bump `updated`) — drift until the next reindex.
+        let mut edited = idea(
+            "alpha",
+            "Alpha",
+            IdeaState::InDiscussion,
+            &["markets", "risk"],
+            "edited body\n",
+        );
+        edited.frontmatter.updated = dt(23);
+        store::write_idea(tmp.path(), &edited).unwrap();
+        assert!(check_drift(&conn, tmp.path()).unwrap());
+
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert!(!check_drift(&conn, tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn unparsable_idea_is_skipped_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        // A malformed idea dir: has idea.md, but no valid frontmatter fence.
+        std::fs::create_dir_all(tmp.path().join("broken")).unwrap();
+        std::fs::write(tmp.path().join("broken/idea.md"), "no fence at all\n").unwrap();
+
+        let mut conn = mem_conn();
+        let counts = reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(counts.ideas, 2); // broken is skipped, the rest indexed
+
+        // And the skip is stable: drift check ignores it the same way.
+        assert!(!check_drift(&conn, tmp.path()).unwrap());
+    }
 }
