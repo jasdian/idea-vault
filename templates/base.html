@@ -4,9 +4,42 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>idea-vault</title>
+    <script>
+      // No-flash theme init: apply the saved theme to <html> BEFORE the stylesheet paints.
+      // With no saved choice, data-theme is absent and the CSS follows prefers-color-scheme.
+      (function () {
+        try {
+          var t = localStorage.getItem("idea-vault-theme");
+          if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+        } catch (e) {}
+      })();
+    </script>
     <link rel="stylesheet" href="/static/app.css" />
     <script src="/static/htmx.min.js"></script>
     <script>
+      // Light/dark toggle. A stamped data-theme overrides the system preference; the icon shows
+      // the mode you'd switch TO. Persisted in localStorage and re-applied by the head script.
+      (function () {
+        var KEY = "idea-vault-theme";
+        function systemDark() {
+          return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        }
+        function effective() {
+          return document.documentElement.getAttribute("data-theme") || (systemDark() ? "dark" : "light");
+        }
+        function updateIcon() {
+          var b = document.getElementById("theme-toggle");
+          if (b) b.textContent = effective() === "dark" ? "☀" : "☾";
+        }
+        window.__toggleTheme = function () {
+          var next = effective() === "dark" ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", next);
+          try { localStorage.setItem(KEY, next); } catch (e) {}
+          updateIcon();
+        };
+        document.addEventListener("DOMContentLoaded", updateIcon);
+      })();
+
       // Progressive enhancement: give every code block (e.g. a generated build prompt) a Copy
       // button. Delegated + idempotent, and re-run after each HTMX swap so polled-in blocks get one.
       function addCopyButtons() {
@@ -33,8 +66,13 @@
     <div class="wrap">
       <nav class="topbar">
         <a class="brand" href="/">idea·<b>vault</b></a>
-        <a class="meta" href="/settings">settings</a>
-        <a class="meta" href="/admin/health">health</a>
+        <span class="topbar__right">
+          <a class="meta" href="/settings">settings</a>
+          <a class="meta" href="/admin/health">health</a>
+          <button id="theme-toggle" class="theme-toggle" type="button"
+                  onclick="__toggleTheme()" aria-label="Toggle light or dark theme"
+                  title="Toggle light / dark">☾</button>
+        </span>
       </nav>
       {% block content %}{% endblock %}
     </div>

@@ -321,21 +321,26 @@ h1.title {
   border-top: 1px dashed var(--rule);
 }
 
-/* ---- auto-compact: the summary the model actually sees (ADR-0012) ------- */
+/* ---- auto-compact: the summary the model actually sees (ADR-0012) -------
+   Highlighted as a DERIVED synthesis (indigo-tinted, dashed left spine), so it
+   never reads as raw verbatim turns — the full transcript stays below it. */
 .summary-disclosure {
-  margin: .75rem 0 .25rem; border: 1px solid var(--rule);
-  border-radius: var(--radius); background: var(--surface);
+  margin: .75rem 0 1rem; border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--rule-strong));
+  border-left-width: 2px; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
 }
 .summary-disclosure > summary {
-  font-family: var(--mono); font-size: .72rem; color: var(--faint);
+  font-family: var(--mono); font-size: .72rem; color: var(--accent);
   letter-spacing: .04em; padding: .5rem .7rem; cursor: pointer; list-style: none;
 }
-.summary-disclosure > summary::before { content: "⤵ "; color: var(--faint); }
-.summary-disclosure[open] > summary { border-bottom: 1px dashed var(--rule); color: var(--ink); }
+.summary-disclosure > summary::before { content: "⟢ "; color: var(--accent); }
+.summary-disclosure[open] > summary { border-bottom: 1px dashed color-mix(in srgb, var(--accent) 30%, transparent); }
 .summary-disclosure__body {
-  padding: .35rem .85rem .6rem; font-size: .92rem;
-  color: color-mix(in srgb, var(--ink) 88%, var(--paper));
+  padding: .5rem .85rem .7rem; font-size: .92rem;
+  color: color-mix(in srgb, var(--ink) 90%, var(--paper));
 }
+.summary-disclosure__body > :first-child { margin-top: .25rem; }
+.summary-disclosure__body > :last-child { margin-bottom: 0; }
 .chip--compact { border-color: var(--rule-strong); color: var(--muted); }
 .chip--compact::before { content: ""; }
 .chip--compact:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
@@ -422,3 +427,12 @@ h1.title {
   color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent);
   background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
+
+/* ---- topbar right group + theme toggle -------------------------------- */
+.topbar__right { display: inline-flex; align-items: baseline; gap: 1rem; }
+.theme-toggle {
+  font-family: var(--mono); font-size: 1rem; line-height: 1; padding: 0;
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  transition: color .12s ease;
+}
+.theme-toggle:hover { color: var(--accent); }
