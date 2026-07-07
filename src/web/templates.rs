@@ -6,7 +6,21 @@
 use askama::Template;
 use askama_web::WebTemplate;
 
+use crate::domain::memory::MemoryIndexEntry;
 use crate::index::queries::{IdeaSummary, SearchHit};
+
+/// Render markdown to sanitized HTML (docs/09-web-ui.md: "the browser only receives HTML").
+/// Sanitization is unconditional — idea bodies, memory facts, and conversation turns all carry
+/// AI- or owner-authored text, and none of it may smuggle script into the page.
+pub fn render_markdown(markdown: &str) -> String {
+    let mut options = pulldown_cmark::Options::empty();
+    options.insert(pulldown_cmark::Options::ENABLE_TABLES);
+    options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
+    let parser = pulldown_cmark::Parser::new_ext(markdown, options);
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, parser);
+    ammonia::clean(&html)
+}
 
 /// Full page: idea list + search box + new-idea form (R1, `templates/list.html`).
 #[derive(Template, WebTemplate)]
@@ -23,6 +37,11 @@ pub struct IdeaPage {
     pub slug: String,
     pub state: String,
     pub body_html: String,
+    /// The always-on memory panel: MEMORY.md index entries (empty until first Store).
+    pub memory_entries: Vec<MemoryIndexEntry>,
+    /// The state-dependent lower panel, pre-rendered (`_discussion.html` or `_stored.html`) so
+    /// the partials stay the single source for both full-page and HTMX-swap rendering.
+    pub panel_html: String,
 }
 
 /// Partial: a single idea row in the list (R3, `templates/_idea_row.html`).
@@ -46,6 +65,11 @@ pub struct Turn {
 pub struct Discussion {
     pub slug: String,
     pub ai_available: bool,
+    /// The D20 per-state remedy shown in the banner when AI is unavailable
+    /// (`ollama serve` for Unreachable, `ollama pull <model>` for ModelMissing).
+    pub unavailable_hint: String,
+    /// Existing transcript turns, each pre-rendered via [`Turn`] (single source: `_turn.html`).
+    pub turns_html: Vec<String>,
 }
 
 /// Partial: stored view (consolidated body + memory) (R4, `templates/_stored.html`).

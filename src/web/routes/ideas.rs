@@ -25,14 +25,99 @@ pub async fn list_page(State(state): State<AppState>) -> Result<ListPage, WebErr
     Ok(ListPage { ideas })
 }
 
-/// R2 — `GET /idea/{slug}` — one idea's view (body, conversation, memory).
+/// Split one transcript turn into (role, markdown content): the first line's `## <role>`
+/// heading names the speaker; text without a heading reads as a bare note.
+fn turn_role_and_content(turn: &str) -> (String, String) {
+    match turn.split_once('\n') {
+        Some((first, rest)) if first.starts_with("## ") => (
+            first.trim_start_matches("## ").trim().to_string(),
+            rest.to_string(),
+        ),
+        _ => ("note".to_string(), turn.to_string()),
+    }
+}
+
+/// Render the state-dependent lower panel: `_stored.html` for a Stored idea (reopen button),
+/// `_discussion.html` (transcript + compose box, disabled when AI is unavailable — D20) for
+/// every discussion state. Pre-rendered so the partials stay the single source of truth for
+/// both this full page and the HTMX swaps that replace `#discussion` later.
+fn render_panel(
+    idea: &Idea,
+    conversation: &str,
+    health: crate::ai::AiHealth,
+    model: &str,
+) -> Result<String, WebError> {
+    use askama::Template as _;
+
+    if idea.frontmatter.state == IdeaState::Stored {
+        return crate::web::templates::Stored {
+            slug: idea.frontmatter.slug.clone(),
+            body_html: crate::web::templates::render_markdown(&idea.body),
+        }
+        .render()
+        .map_err(|e| WebError::Internal(format!("template render: {e}")));
+    }
+
+    // D20 per-state remedy copy (docs/05-ai-integration.md).
+    let (ai_available, unavailable_hint) = match health {
+        crate::ai::AiHealth::Available => (true, String::new()),
+        crate::ai::AiHealth::ModelMissing => {
+            (false, format!("pull a model: `ollama pull {model}`"))
+        }
+        crate::ai::AiHealth::Unreachable => (
+            false,
+            "Ollama is not reachable — start it with `ollama serve`".to_string(),
+        ),
+    };
+
+    let turns_html = store::split_turns(conversation)
+        .iter()
+        .map(|turn| {
+            let (role, content) = turn_role_and_content(turn);
+            crate::web::templates::Turn {
+                role,
+                content_html: crate::web::templates::render_markdown(&content),
+            }
+            .render()
+            .map_err(|e| WebError::Internal(format!("template render: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    crate::web::templates::Discussion {
+        slug: idea.frontmatter.slug.clone(),
+        ai_available,
+        unavailable_hint,
+        turns_html,
+    }
+    .render()
+    .map_err(|e| WebError::Internal(format!("template render: {e}")))
+}
+
+/// R2 — `GET /idea/{slug}` — one idea's view: rendered body, memory panel, and the
+/// state-dependent discussion/stored panel (docs/09-web-ui.md).
 pub async fn idea_page(
-    State(_state): State<AppState>,
-    Path(_slug): Path<String>,
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
 ) -> Result<IdeaPage, WebError> {
-    // TODO(D10/D9): see docs/09-web-ui.md D17 & docs/04-state-machine.md — read the idea via
-    // `vault::store::read_idea`, render its markdown body to sanitized HTML, and template it.
-    Err(WebError::NotImplemented("web::routes::ideas::idea_page"))
+    let vault_dir = &state.config.vault_dir;
+    let idea = store::read_idea(vault_dir, &slug)?; // IdeaNotFound → 404
+    let conversation = store::read_conversation(vault_dir, &slug)?;
+    let memory_entries = store::read_memory_index(vault_dir, &slug)?.entries;
+
+    // D20: the compose box is disabled (with a per-state remedy banner) unless the model is
+    // ready; probing is bounded by the client's 1s hard timeout, so a down Ollama costs at
+    // most that per page view.
+    let health = state.ollama.probe().await;
+
+    let panel_html = render_panel(&idea, &conversation, health, state.ollama.model())?;
+    Ok(IdeaPage {
+        title: idea.frontmatter.title.clone(),
+        slug: idea.frontmatter.slug.clone(),
+        state: idea.frontmatter.state.as_str().to_string(),
+        body_html: crate::web::templates::render_markdown(&idea.body),
+        memory_entries,
+        panel_html,
+    })
 }
 
 /// Form body for R3 (the `list.html` new-idea form posts `title`; a seed body is optional).

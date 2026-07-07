@@ -7,5 +7,16 @@
 
 <article>{{ body_html|safe }}</article>
 
-<div id="discussion" data-slug="{{ slug }}"></div>
+{% if !memory_entries.is_empty() %}
+<aside class="memory-panel">
+  <h2>Memory</h2>
+  <ul>
+    {% for entry in memory_entries %}
+    <li><code>[[{{ entry.slug }}]]</code> — {{ entry.summary }}</li>
+    {% endfor %}
+  </ul>
+</aside>
+{% endif %}
+
+<div id="discussion" data-slug="{{ slug }}">{{ panel_html|safe }}</div>
 {% endblock %}
