@@ -1,0 +1,17 @@
+<aside class="memory" id="memory">
+  {% if !entries.is_empty() %}
+  <h2>memory <span class="memory__hint">— reloaded on reopen; delete to shrink context</span></h2>
+  <ul>
+    {% for entry in entries %}
+    <li>
+      <span class="memory__fact"><code>[[{{ entry.slug }}]]</code> — {{ entry.summary }}</span>
+      <form hx-post="/idea/{{ idea_slug }}/memory/{{ entry.slug }}/delete"
+            hx-target="#memory" hx-swap="outerHTML"
+            hx-confirm="Delete this memory permanently? It will no longer be carried into a reopen.">
+        <button type="submit" class="mem-del" title="Delete this memory" aria-label="Delete this memory">✕</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</aside>

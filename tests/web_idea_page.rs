@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use chrono::{TimeZone, Utc};
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState, MemoryFact, MemoryFactFrontmatter};
 use idea_vault::vault::store;
-use support::web::{get, test_state, test_state_with_ollama};
+use support::web::{get, post_form, test_state, test_state_with_ollama};
 use support::{spawn, ChatScript};
 
 fn seed(vault: &std::path::Path, state: IdeaState, body: &str) {
@@ -63,11 +63,12 @@ async fn idea_page_renders_sanitized_body_transcript_and_memory() {
     let (status, body) = get(state, "/idea/sharp-idea").await;
     assert_eq!(status, StatusCode::OK);
 
-    // Body: markdown rendered, script stripped (sanitized server-side).
+    // Body: markdown rendered, the injected script stripped (sanitized server-side). The page's
+    // own trusted <script> (copy-button JS in base.html) is fine — assert the XSS payload is gone.
     assert!(body.contains("<strong>bold</strong>"));
     assert!(
-        !body.contains("<script>"),
-        "scripts must never reach the browser"
+        !body.contains("alert('xss')"),
+        "injected scripts must never reach the browser"
     );
     // Transcript: both turns rendered with roles and markdown.
     assert!(body.contains("<em>probing</em>"));
@@ -143,4 +144,38 @@ async fn model_missing_disables_compose_with_pull_hint() {
         !body.contains("/idea/sharp-idea/chat"),
         "compose box absent when offline"
     );
+}
+
+#[tokio::test]
+async fn deleting_a_memory_fact_removes_it_and_shrinks_reopen_context() {
+    let (state, vault_dir) = test_state();
+    seed(&vault_dir, IdeaState::Stored, "A stored idea.\n");
+    for (slug, title) in [("keep-me", "Keep me"), ("drop-me", "Drop me")] {
+        store::write_memory_fact(
+            &vault_dir,
+            "sharp-idea",
+            &MemoryFact {
+                frontmatter: MemoryFactFrontmatter {
+                    slug: slug.into(),
+                    title: title.into(),
+                    tags: vec![],
+                    created: Utc.with_ymd_and_hms(2026, 7, 7, 11, 0, 0).unwrap(),
+                    links: vec![],
+                },
+                body: format!("Body of {title}.\n"),
+            },
+        )
+        .unwrap();
+    }
+    store::rebuild_memory_index(&vault_dir, "sharp-idea").unwrap();
+
+    let (status, body) = post_form(state, "/idea/sharp-idea/memory/drop-me/delete", "").await;
+    assert_eq!(status, StatusCode::OK);
+    // The re-rendered panel keeps the other fact and drops the deleted one.
+    assert!(body.contains("keep-me") && !body.contains("drop-me"));
+    // On disk: the fact file is gone and MEMORY.md no longer references it (reopen loads less).
+    assert!(!vault_dir.join("sharp-idea/memory/drop-me.md").is_file());
+    assert!(vault_dir.join("sharp-idea/memory/keep-me.md").is_file());
+    let idx = store::read_memory_index(&vault_dir, "sharp-idea").unwrap();
+    assert_eq!(idx.entries.len(), 1);
 }

@@ -37,11 +37,20 @@ pub struct IdeaPage {
     pub slug: String,
     pub state: String,
     pub body_html: String,
-    /// The always-on memory panel: MEMORY.md index entries (empty until first Store).
-    pub memory_entries: Vec<MemoryIndexEntry>,
+    /// The always-on memory panel, pre-rendered (`_memory.html`) so a fact deletion can swap it.
+    pub memory_html: String,
     /// The state-dependent lower panel, pre-rendered (`_discussion.html` or `_stored.html`) so
     /// the partials stay the single source for both full-page and HTMX-swap rendering.
     pub panel_html: String,
+}
+
+/// Partial: the memory panel (`templates/_memory.html`) — the MEMORY.md index with a per-fact
+/// delete control. Re-rendered on its own after a fact deletion (swapped into `#memory`).
+#[derive(Template, WebTemplate)]
+#[template(path = "_memory.html")]
+pub struct MemoryPanel {
+    pub idea_slug: String,
+    pub entries: Vec<MemoryIndexEntry>,
 }
 
 /// Partial: a single idea row in the list (R3, `templates/_idea_row.html`).

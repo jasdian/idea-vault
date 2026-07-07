@@ -45,6 +45,10 @@ pub fn build_router(state: AppState) -> Router {
             "/idea/{slug}/turn/{index}/delete",
             post(memory::delete_turn),
         )
+        .route(
+            "/idea/{slug}/memory/{fact}/delete",
+            post(memory::delete_memory_fact),
+        )
         // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))
         .route("/idea/{slug}/pending", get(ideas::pending))

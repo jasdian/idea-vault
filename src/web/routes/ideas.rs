@@ -165,6 +165,21 @@ pub(crate) fn respond_with_transcript(
     )?))
 }
 
+/// Render the memory panel (`_memory.html`) — the always-on MEMORY.md index with per-fact delete.
+/// Shared by the idea page and the fact-delete route (which swaps `#memory`).
+pub(crate) fn render_memory_panel(
+    idea_slug: &str,
+    entries: Vec<crate::domain::memory::MemoryIndexEntry>,
+) -> Result<String, WebError> {
+    use askama::Template as _;
+    crate::web::templates::MemoryPanel {
+        idea_slug: idea_slug.to_string(),
+        entries,
+    }
+    .render()
+    .map_err(|e| WebError::Internal(format!("template render: {e}")))
+}
+
 /// `GET /idea/{slug}/pending` — the poll target: return the current transcript, still carrying the
 /// indicator while the job runs, an error once it fails, or the finished transcript when done.
 pub async fn pending(
@@ -260,7 +275,8 @@ pub async fn idea_page(
     let vault_dir = &state.config.vault_dir;
     let idea = store::read_idea(vault_dir, &slug)?; // IdeaNotFound → 404
     let conversation = store::read_conversation(vault_dir, &slug)?;
-    let memory_entries = store::read_memory_index(vault_dir, &slug)?.entries;
+    let memory_html =
+        render_memory_panel(&slug, store::read_memory_index(vault_dir, &slug)?.entries)?;
 
     // D20: the compose box is disabled (with a per-state remedy banner) unless the model is
     // ready; probing is bounded by the client's 1s hard timeout, so a down Ollama costs at
@@ -283,7 +299,7 @@ pub async fn idea_page(
         slug: idea.frontmatter.slug.clone(),
         state: idea.frontmatter.state.as_str().to_string(),
         body_html: crate::web::templates::render_markdown(&idea.body),
-        memory_entries,
+        memory_html,
         panel_html,
     })
 }

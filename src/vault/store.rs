@@ -202,6 +202,31 @@ pub fn write_memory_fact(
     )
 }
 
+/// Delete one memory fact (`memory/<fact-slug>.md`) and rebuild MEMORY.md. Returns whether a fact
+/// was removed. A deliberate human cleanup — trimming accumulated facts lowers the context a
+/// reopen reloads (D13). Facts are otherwise never auto-dropped (D9), so this is the only removal.
+pub fn delete_memory_fact(
+    vault_dir: &Path,
+    idea_slug: &str,
+    fact_slug: &str,
+) -> Result<bool, VaultError> {
+    if !crate::domain::slug::is_valid(fact_slug) {
+        return Err(VaultError::InvalidSlug(fact_slug.to_string()));
+    }
+    let idea_dir = checked_idea_dir(vault_dir, idea_slug)?;
+    if !idea_dir.join("idea.md").is_file() {
+        return Err(VaultError::IdeaNotFound(idea_slug.to_string()));
+    }
+    let path = idea_dir.join("memory").join(format!("{fact_slug}.md"));
+    let removed = match fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e.into()),
+    };
+    rebuild_memory_index(vault_dir, idea_slug)?;
+    Ok(removed)
+}
+
 /// Read and parse every `vault/<idea_slug>/memory/*.md` fact, sorted by fact slug (deterministic
 /// order for MEMORY.md rebuilds and reindex). A missing `memory/` dir is an empty fact set.
 pub fn read_memory_facts(vault_dir: &Path, idea_slug: &str) -> Result<Vec<MemoryFact>, VaultError> {

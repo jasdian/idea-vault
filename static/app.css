@@ -324,3 +324,17 @@ h1.title {
 }
 .turn__body pre:hover .copy-btn, .copy-btn:focus { opacity: 1; }
 .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---- memory panel: per-fact delete (cleanup to shrink reopen context) --- */
+.memory__hint { font-family: var(--serif); font-size: .78rem; font-style: italic;
+  letter-spacing: 0; text-transform: none; color: var(--faint); font-weight: 400; }
+.memory li { display: flex; align-items: baseline; gap: .5rem; }
+.memory__fact { flex: 1; }
+.memory li form { margin: 0; }
+.mem-del {
+  border: none; background: none; cursor: pointer; color: var(--faint);
+  font-size: .78rem; line-height: 1; padding: .1rem .3rem; border-radius: 4px;
+  font-family: var(--mono); opacity: 0; transition: opacity .12s ease;
+}
+.memory li:hover .mem-del, .mem-del:focus { opacity: 1; }
+.mem-del:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }

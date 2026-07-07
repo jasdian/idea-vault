@@ -272,6 +272,20 @@ async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Re
     Ok(())
 }
 
+/// `POST /idea/{slug}/memory/{fact}/delete` — delete one accumulated memory fact (cleanup to
+/// shrink the context a reopen reloads); returns the re-rendered memory panel.
+pub async fn delete_memory_fact(
+    State(state): State<AppState>,
+    Path((slug, fact)): Path<(String, String)>,
+) -> Result<axum::response::Html<String>, WebError> {
+    store::delete_memory_fact(&state.config.vault_dir, &slug, &fact)?; // 404 if idea missing
+    reindex_logged(&state);
+    let entries = store::read_memory_index(&state.config.vault_dir, &slug)?.entries;
+    Ok(axum::response::Html(
+        crate::web::routes::ideas::render_memory_panel(&slug, entries)?,
+    ))
+}
+
 /// `POST /idea/{slug}/turn/{index}/delete` — remove one transcript turn (the deliberate-edit
 /// exception to append-only, see `vault::store::delete_turn`); returns the re-rendered transcript.
 pub async fn delete_turn(
