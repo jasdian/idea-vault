@@ -31,6 +31,17 @@ pub fn slugify(title: &str) -> String {
     }
 }
 
+/// True if `slug` has the canonical shape `slugify` produces: non-empty, only `[a-z0-9-]`.
+/// This is the filesystem-boundary check — a slug is used verbatim as a vault path component,
+/// so anything outside this charset (separators, `..`, unicode) must be rejected before any
+/// path join (docs/03-data-model.md D22: slug == folder name).
+pub fn is_valid(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+}
+
 /// Given a candidate base slug and a predicate telling whether a slug is already taken, return
 /// `base` if free, else `base-2`, `base-3`, … until a free slug is found (docs/03-data-model.md D22).
 pub fn disambiguate(base: &str, exists: impl Fn(&str) -> bool) -> String {
@@ -92,6 +103,29 @@ mod tests {
     fn slugify_symbol_only_input_falls_back_to_idea() {
         assert_eq!(slugify("!!!@@@###"), "idea");
         assert_eq!(slugify("   "), "idea");
+    }
+
+    #[test]
+    fn is_valid_accepts_canonical_slugs() {
+        assert!(is_valid("distributed-idea-market"));
+        assert!(is_valid("idea-2"));
+    }
+
+    #[test]
+    fn is_valid_rejects_traversal_separators_and_empties() {
+        assert!(!is_valid(""));
+        assert!(!is_valid("../etc"));
+        assert!(!is_valid("a/b"));
+        assert!(!is_valid("a\\b"));
+        assert!(!is_valid("Idea"));
+        assert!(!is_valid("café"));
+    }
+
+    #[test]
+    fn slugify_output_is_always_valid() {
+        for title in ["Distributed Idea Market", "Café Idée! #1", "", "!!!"] {
+            assert!(is_valid(&slugify(title)), "title: {title:?}");
+        }
     }
 
     #[test]

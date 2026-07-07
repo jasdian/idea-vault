@@ -15,6 +15,14 @@ pub use store::ensure_vault_dir;
 pub enum VaultError {
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
+    /// No `vault/<slug>/` idea on disk (distinct from a transport-level IO failure so `web` can
+    /// answer 404 rather than 500).
+    #[error("idea not found: {0}")]
+    IdeaNotFound(String),
+    /// A slug that fails `domain::slug::is_valid` — rejected before any path join so a malformed
+    /// or hostile slug (`../`, separators) can never escape the vault directory.
+    #[error("invalid slug: {0:?}")]
+    InvalidSlug(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("domain error: {0}")]
