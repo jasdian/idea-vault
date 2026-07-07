@@ -31,9 +31,12 @@ pub struct Config {
     /// Hard inactivity timeout for Ollama calls (D20): the initial response and every token gap
     /// must arrive within this window or the call aborts (docs/05 "per-request timeout").
     pub ollama_timeout: std::time::Duration,
-    /// Which LLM backend answers chat/skills/swarm (docs/adr/0009).
+    /// Ollama sampling temperature (initial value; the Settings page can retune it live).
+    pub ollama_temperature: f32,
+    /// Which LLM backend answers chat/skills/swarm at boot (docs/adr/0009). The Settings page can
+    /// toggle this live without a restart.
     pub llm_backend: LlmBackendKind,
-    /// claude-code backend settings (used only when `llm_backend == ClaudeCode`).
+    /// claude-code backend settings (both backends are always constructed so the toggle is live).
     pub claude: ClaudeSettings,
 }
 
@@ -55,6 +58,8 @@ pub struct ClaudeSettings {
     pub model: Option<String>,
     pub skip_permissions: bool,
     pub timeout: std::time::Duration,
+    /// Reasoning effort (`low`/`medium`/`high`) — initial value, retunable on the Settings page.
+    pub effort: String,
 }
 
 const DEFAULT_BIND: &str = "127.0.0.1:3000";
@@ -67,6 +72,8 @@ const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_CLAUDE_BIN: &str = "claude";
 // Agentic turns (process spawn + tool use) run longer than a hot local model.
 const DEFAULT_CLAUDE_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_OLLAMA_TEMPERATURE: f32 = 0.7;
+const DEFAULT_CLAUDE_EFFORT: &str = "high";
 
 impl Config {
     /// Build configuration from the real process environment.
@@ -134,6 +141,14 @@ impl Config {
             Some(raw) => raw.parse::<u64>().unwrap_or(DEFAULT_CLAUDE_TIMEOUT_SECS),
         };
 
+        let ollama_temperature = lookup("IDEA_VAULT_OLLAMA_TEMPERATURE")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|t| (0.0..=2.0).contains(t))
+            .unwrap_or(DEFAULT_OLLAMA_TEMPERATURE);
+        let claude_effort = lookup("IDEA_VAULT_CLAUDE_EFFORT")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_CLAUDE_EFFORT.to_string());
+
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
                 .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
@@ -150,6 +165,7 @@ impl Config {
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
             timeout: std::time::Duration::from_secs(claude_timeout_secs),
+            effort: claude_effort,
         };
 
         Self {
@@ -160,6 +176,7 @@ impl Config {
             ollama_model,
             ai_concurrency,
             ollama_timeout: std::time::Duration::from_secs(ollama_timeout_secs),
+            ollama_temperature,
             llm_backend,
             claude,
         }

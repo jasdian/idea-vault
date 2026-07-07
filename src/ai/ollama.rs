@@ -134,7 +134,16 @@ impl OllamaClient {
     /// tokens; the same hard-timeout and persist-boundary guarantees apply — any stream error
     /// aborts the whole call, a partial response is never returned as if complete.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
-        let mut stream = self.chat_stream(messages).await?;
+        self.chat_with(None, messages).await
+    }
+
+    /// Non-streaming completion with an optional sampling temperature (runtime setting).
+    pub async fn chat_with(
+        &self,
+        temperature: Option<f32>,
+        messages: Vec<ChatMessage>,
+    ) -> Result<String, AiError> {
+        let mut stream = self.chat_stream_with(temperature, messages).await?;
         let mut out = String::new();
         while let Some(item) = stream.next().await {
             out.push_str(&item?);
@@ -152,12 +161,25 @@ impl OllamaClient {
     /// Concurrency note: acquiring the process-wide semaphore (ADR-0006) is the caller's job —
     /// this module has no access to `AppState`. Dropping the returned stream aborts the request.
     pub async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<TokenStream, AiError> {
+        self.chat_stream_with(None, messages).await
+    }
+
+    /// Stream a chat completion with an optional sampling temperature (runtime setting): when set,
+    /// it goes in Ollama's `options.temperature`. `None` sends no options (the model default).
+    pub async fn chat_stream_with(
+        &self,
+        temperature: Option<f32>,
+        messages: Vec<ChatMessage>,
+    ) -> Result<TokenStream, AiError> {
         let url = format!("{}/api/chat", self.base_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
         });
+        if let Some(t) = temperature {
+            body["options"] = serde_json::json!({ "temperature": t });
+        }
 
         let response =
             tokio::time::timeout(self.token_timeout, self.http.post(&url).json(&body).send())

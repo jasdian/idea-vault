@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::web::routes::{admin, chat, ideas, memory};
+use crate::web::routes::{admin, chat, ideas, memory, settings};
 
 /// Cloneable shared state injected into handlers (docs/01-architecture.md "Cross-cutting concerns").
 #[derive(Clone)]
@@ -54,6 +54,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/idea/{slug}/pending", get(ideas::pending))
         // Search.
         .route("/search", get(ideas::search))
+        // Live LLM settings (backend toggle + params).
+        .route("/settings", get(settings::settings_page))
+        .route("/settings", post(settings::update_settings))
         // Admin.
         .route("/admin/health", get(admin::health))
         .route("/admin/reindex", post(admin::reindex))

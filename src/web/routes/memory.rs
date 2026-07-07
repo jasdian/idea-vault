@@ -109,7 +109,7 @@ pub async fn reopen_idea(
         &slug,
         &conversation,
         health,
-        state.llm.model(),
+        &state.llm.model(),
         true,
         skill_names,
         pending,

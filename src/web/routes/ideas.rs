@@ -159,7 +159,7 @@ pub(crate) fn respond_with_transcript(
     let pending = crate::web::jobs::peek(&state.jobs, slug);
     Ok(axum::response::Html(transcript_inner(
         slug,
-        state.llm.model(),
+        &state.llm.model(),
         &conversation,
         pending,
     )?))
@@ -290,7 +290,7 @@ pub async fn idea_page(
         &idea,
         &conversation,
         health,
-        state.llm.model(),
+        &state.llm.model(),
         skill_names,
         pending,
     )?;

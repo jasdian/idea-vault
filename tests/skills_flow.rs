@@ -44,7 +44,7 @@ async fn invoke_hydrates_context_and_appends_assistant_turn() {
         ChatScript::Tokens(vec!["Failure cause one.".into()]),
     )
     .await;
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(2));
     let registry = SkillRegistry::builtin();
     let skill = registry.get("premortem").unwrap();
@@ -102,7 +102,8 @@ async fn failed_skill_call_appends_nothing() {
     seed_idea(tmp.path(), "i");
     let convo_before = store::read_conversation(tmp.path(), "i").unwrap();
 
-    let client = LlmBackend::Ollama(OllamaClient::new(refused_url().await, "llama3.2").unwrap());
+    let client =
+        LlmBackend::ollama_only(OllamaClient::new(refused_url().await, "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
     let registry = SkillRegistry::builtin();
 
@@ -128,7 +129,7 @@ async fn invoke_waits_on_the_shared_semaphore() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
     let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["ok".into()])).await;
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
 
     // Hold the only permit: invoke must block until it is released (shared bound, ADR-0006).
     let semaphore = Arc::new(Semaphore::new(1));

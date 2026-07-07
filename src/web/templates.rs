@@ -53,6 +53,27 @@ pub struct MemoryPanel {
     pub entries: Vec<MemoryIndexEntry>,
 }
 
+/// The settings page shell (`templates/settings.html`); the form is pre-rendered so a save can
+/// swap just the form.
+#[derive(Template, WebTemplate)]
+#[template(path = "settings.html")]
+pub struct SettingsPage {
+    pub form_html: String,
+}
+
+/// Partial: the live LLM controls form (`templates/_settings.html`), returned on save with
+/// `saved = true` for the confirmation.
+#[derive(Template, WebTemplate)]
+#[template(path = "_settings.html")]
+pub struct SettingsForm {
+    pub is_ollama: bool,
+    pub ollama_model: String,
+    pub temperature: String,
+    pub claude_model: String,
+    pub effort: String,
+    pub saved: bool,
+}
+
 /// Partial: a single idea row in the list (R3, `templates/_idea_row.html`).
 #[derive(Template, WebTemplate)]
 #[template(path = "_idea_row.html")]

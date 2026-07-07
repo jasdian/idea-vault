@@ -1,0 +1,40 @@
+<form id="settings" class="settings" hx-post="/settings" hx-target="#settings" hx-swap="outerHTML"
+      hx-disabled-elt="find button">
+  {% if saved %}<p class="settings__saved">Saved — effective on your next message.</p>{% endif %}
+
+  <fieldset class="settings__group">
+    <legend>backend</legend>
+    <label class="opt">
+      <input type="radio" name="backend" value="ollama" {% if is_ollama %}checked{% endif %} />
+      <span><strong>Local</strong> · Ollama <span class="muted">({{ ollama_model }})</span> — offline, private</span>
+    </label>
+    <label class="opt">
+      <input type="radio" name="backend" value="claude-code" {% if !is_ollama %}checked{% endif %} />
+      <span><strong>Claude Code</strong> — agentic; reads your vaults</span>
+    </label>
+  </fieldset>
+
+  <div class="settings__params">
+    <label class="field">
+      <span class="field__label">local temperature</span>
+      <input type="number" name="temperature" min="0" max="2" step="0.05" value="{{ temperature }}" />
+      <span class="field__hint">0 = focused · 2 = wild</span>
+    </label>
+    <label class="field">
+      <span class="field__label">claude model</span>
+      <input type="text" name="claude_model" value="{{ claude_model }}" placeholder="(CLI default)" />
+      <span class="field__hint">e.g. sonnet, opus, haiku — blank uses the CLI default</span>
+    </label>
+    <label class="field">
+      <span class="field__label">claude effort</span>
+      <select name="effort">
+        <option value="low"{% if effort == "low" %} selected{% endif %}>low</option>
+        <option value="medium"{% if effort == "medium" %} selected{% endif %}>medium</option>
+        <option value="high"{% if effort == "high" %} selected{% endif %}>high</option>
+      </select>
+      <span class="field__hint">depth of reasoning</span>
+    </label>
+  </div>
+
+  <button type="submit" class="btn">Save settings</button>
+</form>

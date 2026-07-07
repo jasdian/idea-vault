@@ -338,3 +338,29 @@ h1.title {
 }
 .memory li:hover .mem-del, .mem-del:focus { opacity: 1; }
 .mem-del:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* ---- settings (live LLM controls) ------------------------------------- */
+.settings__intro { color: var(--muted); margin: .5rem 0 1.5rem; max-width: 34rem; }
+.settings { display: flex; flex-direction: column; gap: 1.25rem; max-width: 34rem; }
+.settings__saved {
+  font-family: var(--mono); font-size: .82rem; color: var(--ok);
+  background: var(--ok-soft); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+  border-radius: var(--radius); padding: .55rem .75rem; margin: 0;
+}
+.settings__group { border: 1px solid var(--rule-strong); border-radius: var(--radius); padding: .75rem 1rem 1rem; }
+.settings__group legend {
+  font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--faint); padding: 0 .4rem;
+}
+.opt { display: flex; gap: .6rem; align-items: baseline; padding: .35rem 0; cursor: pointer; }
+.opt input { margin-top: .15rem; accent-color: var(--accent); }
+.settings__params { display: flex; flex-direction: column; gap: 1rem; }
+.field { display: flex; flex-direction: column; gap: .3rem; }
+.field__label { font-family: var(--mono); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.field__hint { font-size: .78rem; color: var(--faint); font-style: italic; }
+.settings input[type="number"], .settings input[type="text"], .settings select {
+  font: inherit; font-size: .95rem; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--rule-strong); border-radius: 6px; padding: .45rem .6rem; max-width: 20rem;
+}
+.settings input:focus, .settings select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.settings .btn { align-self: flex-start; }

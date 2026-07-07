@@ -20,7 +20,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         AiHealth::ModelMissing => "model-missing",
         AiHealth::Unreachable => "unreachable",
     };
-    let backend = match state.config.llm_backend {
+    let backend = match state.llm.settings().backend {
         crate::config::LlmBackendKind::Ollama => "ollama",
         crate::config::LlmBackendKind::ClaudeCode => "claude-code",
     };

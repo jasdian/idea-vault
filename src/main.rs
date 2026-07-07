@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use idea_vault::ai::claude_code::ClaudeCodeConfig;
-use idea_vault::ai::{ClaudeCodeClient, LlmBackend, OllamaClient};
+use idea_vault::ai::{LlmBackend, OllamaClient};
 use idea_vault::app::{build_router, AppState};
 use idea_vault::config::{ClaudeSettings, Config, LlmBackendKind};
 use idea_vault::{import, index, vault};
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. LLM backend + non-blocking health probe (boot must not wait on the model — D20/D25).
     let llm = build_llm(&config)?;
-    tracing::info!(backend = %backend_label(&config), model = llm.model(), "llm backend selected");
+    tracing::info!(backend = %backend_label(&config), model = %llm.model(), "llm backend selected");
     {
         let probe_backend = llm.clone();
         tokio::spawn(async move {
@@ -119,40 +119,42 @@ fn backend_label(config: &Config) -> &'static str {
     }
 }
 
-/// Construct the LLM backend selected in config (docs/adr/0009).
+/// Build the live LLM router: both backends are always constructed so the Settings page can toggle
+/// between them at runtime (docs/adr/0009). The initial active backend + params come from config.
 fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
-    match config.llm_backend {
-        LlmBackendKind::Ollama => {
-            let client = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
-                .context("failed to build the Ollama HTTP client (check proxy/TLS)")?
-                .with_token_timeout(config.ollama_timeout);
-            Ok(LlmBackend::Ollama(client))
-        }
-        LlmBackendKind::ClaudeCode => {
-            let ClaudeSettings {
-                binary,
-                cwd,
-                add_dirs,
-                allowed_tools,
-                model,
-                skip_permissions,
-                timeout,
-            } = config.claude.clone();
-            let system_prompt = claude_system_prompt(&add_dirs);
-            Ok(LlmBackend::ClaudeCode(ClaudeCodeClient::new(
-                ClaudeCodeConfig {
-                    binary,
-                    cwd,
-                    add_dirs,
-                    allowed_tools,
-                    model,
-                    system_prompt,
-                    skip_permissions,
-                    token_timeout: timeout,
-                },
-            )))
-        }
-    }
+    let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
+        .context("failed to build the Ollama HTTP client (check proxy/TLS)")?
+        .with_token_timeout(config.ollama_timeout);
+
+    let ClaudeSettings {
+        binary,
+        cwd,
+        add_dirs,
+        allowed_tools,
+        model,
+        skip_permissions,
+        timeout,
+        effort,
+    } = config.claude.clone();
+    let system_prompt = claude_system_prompt(&add_dirs);
+    let claude_base = ClaudeCodeConfig {
+        binary,
+        cwd,
+        add_dirs,
+        allowed_tools,
+        model: model.clone(),
+        system_prompt,
+        skip_permissions,
+        token_timeout: timeout,
+    };
+
+    let settings = idea_vault::ai::LlmSettings {
+        backend: config.llm_backend,
+        temperature: config.ollama_temperature,
+        claude_model: model.unwrap_or_default(),
+        claude_effort: effort,
+    };
+    Ok(LlmBackend::new(ollama, claude_base, settings))
 }
 
 /// A system-prompt addendum telling the agentic foil where the owner's reference material lives, so

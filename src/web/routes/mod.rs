@@ -2,6 +2,7 @@ pub mod admin;
 pub mod chat;
 pub mod ideas;
 pub mod memory;
+pub mod settings;
 
 use crate::app::AppState;
 

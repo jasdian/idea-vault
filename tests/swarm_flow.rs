@@ -42,7 +42,7 @@ async fn run_swarm(
     k: usize,
     angles: &[&str],
 ) -> Result<idea_vault::concepts::swarm::SwarmOutcome, ConceptError> {
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(k));
     let registry = SkillRegistry::builtin();
     swarm(

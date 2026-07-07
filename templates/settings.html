@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="crumb" href="/">← all ideas</a>
+<h1 class="title">Settings</h1>
+<p class="settings__intro">Which mind interrogates your ideas, and how hard it thinks. Changes take
+  effect on the next message — no restart.</p>
+{{ form_html|safe }}
+{% endblock %}

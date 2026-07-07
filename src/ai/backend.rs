@@ -1,55 +1,153 @@
 //! The LLM backend seam (docs/adr/0009). Callers hold an [`LlmBackend`] and never care which
 //! concrete client answers — the persist boundaries, the shared concurrency semaphore (ADR-0006),
-//! and the SSE pump all sit *above* this enum, so they are identical for either backend.
+//! and the SSE pump all sit *above* it, so they are identical for either backend.
 //!
-//! An enum (not a `dyn` trait) keeps this zero-cost and dependency-free: the backend set is closed
-//! and small, and `async fn`-in-trait behind `dyn` would need `async-trait`'s boxing. Each method
-//! matches and delegates to the concrete client, which already exposes exactly these four methods.
+//! Live-switchable (2026-07): rather than one fixed backend chosen at boot, `LlmBackend` holds an
+//! Ollama client, the claude-code config, and an `Arc<RwLock<LlmSettings>>`. Each call reads the
+//! current settings to pick the backend and apply its params (Ollama temperature; claude-code
+//! model + effort), so the Settings page can toggle backends and tune them with no restart.
 
-use crate::ai::claude_code::ClaudeCodeClient;
+use std::sync::{Arc, RwLock};
+
+use crate::ai::claude_code::{ClaudeCodeClient, ClaudeCodeConfig};
 use crate::ai::ollama::{ChatMessage, OllamaClient, TokenStream};
 use crate::ai::{AiError, AiHealth};
+use crate::config::LlmBackendKind;
 
-/// The active LLM backend, selected at boot from `IDEA_VAULT_LLM_BACKEND` (`config.rs`).
+/// Runtime-tunable LLM settings (the Settings page writes these; every call reads them).
+#[derive(Clone, Debug)]
+pub struct LlmSettings {
+    /// Which backend answers right now.
+    pub backend: LlmBackendKind,
+    /// Ollama sampling temperature.
+    pub temperature: f32,
+    /// claude-code `--model` (empty = the CLI's default model).
+    pub claude_model: String,
+    /// claude-code reasoning effort (`low`/`medium`/`high`) — injected as a system-prompt hint,
+    /// since the CLI has no per-call effort flag.
+    pub claude_effort: String,
+}
+
+/// The live LLM router: both backends available, dispatch chosen per-call from [`LlmSettings`].
 #[derive(Clone)]
-pub enum LlmBackend {
-    /// Local Ollama over HTTP (offline, no file access).
-    Ollama(OllamaClient),
-    /// The local `claude` CLI (agentic — can read the owner's vaults/artifacts).
-    ClaudeCode(ClaudeCodeClient),
+pub struct LlmBackend {
+    ollama: OllamaClient,
+    /// Base claude-code config (dirs/tools/cwd/system-prompt); model+effort are applied per call.
+    claude_base: ClaudeCodeConfig,
+    settings: Arc<RwLock<LlmSettings>>,
 }
 
 impl LlmBackend {
-    /// Health probe for the degraded-AI UI (D20).
-    pub async fn probe(&self) -> AiHealth {
-        match self {
-            LlmBackend::Ollama(c) => c.probe().await,
-            LlmBackend::ClaudeCode(c) => c.probe().await,
+    pub fn new(ollama: OllamaClient, claude_base: ClaudeCodeConfig, settings: LlmSettings) -> Self {
+        Self {
+            ollama,
+            claude_base,
+            settings: Arc::new(RwLock::new(settings)),
         }
     }
 
-    /// A human-facing model label (used in the "pull a model" degraded hint and logs).
-    pub fn model(&self) -> &str {
-        match self {
-            LlmBackend::Ollama(c) => c.model(),
-            LlmBackend::ClaudeCode(c) => c.model(),
+    /// One-backend constructor for tests and Ollama-only runs: Ollama active, with a placeholder
+    /// claude config that is never invoked unless the settings toggle to claude-code.
+    pub fn ollama_only(ollama: OllamaClient) -> Self {
+        let claude_base = ClaudeCodeConfig {
+            binary: "claude".to_string(),
+            cwd: std::path::PathBuf::from("."),
+            add_dirs: Vec::new(),
+            allowed_tools: Vec::new(),
+            model: None,
+            system_prompt: None,
+            skip_permissions: true,
+            token_timeout: std::time::Duration::from_secs(300),
+        };
+        Self::new(
+            ollama,
+            claude_base,
+            LlmSettings {
+                backend: LlmBackendKind::Ollama,
+                temperature: 0.7,
+                claude_model: String::new(),
+                claude_effort: "high".to_string(),
+            },
+        )
+    }
+
+    /// A snapshot of the current settings (for the Settings page + health).
+    pub fn settings(&self) -> LlmSettings {
+        self.settings
+            .read()
+            .expect("llm settings lock poisoned")
+            .clone()
+    }
+
+    /// Replace the settings (the Settings page save) — effective on the next call.
+    pub fn set_settings(&self, next: LlmSettings) {
+        *self.settings.write().expect("llm settings lock poisoned") = next;
+    }
+
+    /// Build a claude-code client for the current settings: apply the model override and append the
+    /// effort hint to the system prompt (the CLI has no effort flag).
+    fn claude(&self) -> ClaudeCodeClient {
+        let s = self.settings();
+        let mut cfg = self.claude_base.clone();
+        if !s.claude_model.trim().is_empty() {
+            cfg.model = Some(s.claude_model.trim().to_string());
+        }
+        if !s.claude_effort.trim().is_empty() {
+            let hint = format!(
+                "Reasoning effort: {}. Match the depth of your analysis to it.",
+                s.claude_effort.trim()
+            );
+            cfg.system_prompt = Some(match cfg.system_prompt {
+                Some(p) => format!("{p}\n\n{hint}"),
+                None => hint,
+            });
+        }
+        ClaudeCodeClient::new(cfg)
+    }
+
+    /// Health probe for the degraded-AI UI (D20) — probes whichever backend is active.
+    pub async fn probe(&self) -> AiHealth {
+        match self.settings().backend {
+            LlmBackendKind::Ollama => self.ollama.probe().await,
+            LlmBackendKind::ClaudeCode => self.claude().probe().await,
+        }
+    }
+
+    /// A human-facing model label for the active backend (degraded hint, meter, logs).
+    pub fn model(&self) -> String {
+        let s = self.settings();
+        match s.backend {
+            LlmBackendKind::Ollama => self.ollama.model().to_string(),
+            LlmBackendKind::ClaudeCode => {
+                if s.claude_model.trim().is_empty() {
+                    "claude-code".to_string()
+                } else {
+                    s.claude_model.trim().to_string()
+                }
+            }
         }
     }
 
     /// Non-streaming completion (extraction, skills, agents).
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
-        match self {
-            LlmBackend::Ollama(c) => c.chat(messages).await,
-            LlmBackend::ClaudeCode(c) => c.chat(messages).await,
+        let s = self.settings();
+        match s.backend {
+            LlmBackendKind::Ollama => self.ollama.chat_with(Some(s.temperature), messages).await,
+            LlmBackendKind::ClaudeCode => self.claude().chat(messages).await,
         }
     }
 
-    /// Streaming completion (the SSE chat turn, D11). The returned stream is terminal on error and
-    /// aborts its backend when dropped, so a partial reply is never persisted.
+    /// Streaming completion (D11). Terminal on error; aborts its backend when dropped, so a partial
+    /// reply is never persisted.
     pub async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<TokenStream, AiError> {
-        match self {
-            LlmBackend::Ollama(c) => c.chat_stream(messages).await,
-            LlmBackend::ClaudeCode(c) => c.chat_stream(messages).await,
+        let s = self.settings();
+        match s.backend {
+            LlmBackendKind::Ollama => {
+                self.ollama
+                    .chat_stream_with(Some(s.temperature), messages)
+                    .await
+            }
+            LlmBackendKind::ClaudeCode => self.claude().chat_stream(messages).await,
         }
     }
 }

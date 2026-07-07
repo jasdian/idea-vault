@@ -19,7 +19,7 @@ pub mod claude_code;
 pub mod ollama;
 pub mod stream;
 
-pub use backend::LlmBackend;
+pub use backend::{LlmBackend, LlmSettings};
 pub use claude_code::ClaudeCodeClient;
 pub use ollama::{AiHealth, OllamaClient};
 

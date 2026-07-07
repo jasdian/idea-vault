@@ -56,7 +56,7 @@ async fn store_consolidates_extracts_and_rebuilds_memory_index() {
         ],
     )
     .await;
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
 
     let convo_before = store::read_conversation(tmp.path(), "i").unwrap();
     let outcome =
@@ -99,7 +99,7 @@ async fn restore_merges_and_dedupes_memory_only_grows() {
         ],
     )
     .await;
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
         .await
         .unwrap();
@@ -116,7 +116,7 @@ async fn restore_merges_and_dedupes_memory_only_grows() {
         ],
     )
     .await;
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let outcome =
         extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
             .await
@@ -147,7 +147,8 @@ async fn unreachable_model_aborts_store_with_truth_untouched() {
     seed_idea(tmp.path(), "i");
     let before_idea = store::read_idea(tmp.path(), "i").unwrap();
 
-    let client = LlmBackend::Ollama(OllamaClient::new(refused_url().await, "llama3.2").unwrap());
+    let client =
+        LlmBackend::ollama_only(OllamaClient::new(refused_url().await, "llama3.2").unwrap());
     let err =
         extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
             .await;
@@ -175,7 +176,7 @@ async fn load_context_is_memory_first_and_truth_idempotent() {
         ],
     )
     .await;
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
         .await
         .unwrap();

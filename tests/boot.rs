@@ -28,6 +28,7 @@ fn test_state() -> AppState {
         ollama_model: "llama3.2".to_string(),
         ai_concurrency: 1,
         ollama_timeout: std::time::Duration::from_secs(5),
+        ollama_temperature: 0.7,
         llm_backend: idea_vault::config::LlmBackendKind::Ollama,
         claude: idea_vault::config::ClaudeSettings {
             binary: "claude".to_string(),
@@ -37,6 +38,7 @@ fn test_state() -> AppState {
             model: None,
             skip_permissions: true,
             timeout: std::time::Duration::from_secs(5),
+            effort: "high".to_string(),
         },
     };
 
@@ -50,7 +52,7 @@ fn test_state() -> AppState {
     AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
-        llm: idea_vault::ai::LlmBackend::Ollama(ollama),
+        llm: idea_vault::ai::LlmBackend::ollama_only(ollama),
         ai_semaphore: Arc::new(Semaphore::new(1)),
         skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
         jobs: idea_vault::web::jobs::new_registry(),

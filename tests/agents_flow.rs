@@ -19,7 +19,7 @@ async fn run_role(role: AgentRole, skill: Option<&str>) -> (String, Vec<String>)
         ChatScript::Tokens(vec![format!("{} output", role.as_str())]),
     )
     .await;
-    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(2));
     let registry = SkillRegistry::builtin();
 
@@ -70,7 +70,8 @@ async fn skill_lens_hydrates_into_the_agent_prompt() {
 
 #[tokio::test]
 async fn failed_agent_surfaces_an_error_for_the_judge_to_skip() {
-    let client = LlmBackend::Ollama(OllamaClient::new(refused_url().await, "llama3.2").unwrap());
+    let client =
+        LlmBackend::ollama_only(OllamaClient::new(refused_url().await, "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
     let registry = SkillRegistry::builtin();
 
