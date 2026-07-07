@@ -12,14 +12,19 @@ use crate::ai::AiHealth;
 use crate::app::AppState;
 use crate::web::WebError;
 
-/// R11 — `GET /admin/health` — probe Ollama; always `200`, encoding health in the body (D20).
+/// R11 — `GET /admin/health` — probe the LLM backend; always `200`, encoding health in the body
+/// (D20 — absence is a valid state; the Docker HEALTHCHECK must pass on a model-less stack).
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let ollama = match state.ollama.probe().await {
+    let llm = match state.llm.probe().await {
         AiHealth::Available => "ok",
         AiHealth::ModelMissing => "model-missing",
         AiHealth::Unreachable => "unreachable",
     };
-    Json(json!({ "status": "ok", "ollama": ollama }))
+    let backend = match state.config.llm_backend {
+        crate::config::LlmBackendKind::Ollama => "ollama",
+        crate::config::LlmBackendKind::ClaudeCode => "claude-code",
+    };
+    Json(json!({ "status": "ok", "backend": backend, "llm": llm }))
 }
 
 /// R10 — `POST /admin/reindex` — rebuild the derived index from the vault (D15), returning the

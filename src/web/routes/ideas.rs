@@ -135,16 +135,10 @@ pub async fn idea_page(
     // D20: the compose box is disabled (with a per-state remedy banner) unless the model is
     // ready; probing is bounded by the client's 1s hard timeout, so a down Ollama costs at
     // most that per page view.
-    let health = state.ollama.probe().await;
+    let health = state.llm.probe().await;
 
     let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
-    let panel_html = render_panel(
-        &idea,
-        &conversation,
-        health,
-        state.ollama.model(),
-        skill_names,
-    )?;
+    let panel_html = render_panel(&idea, &conversation, health, state.llm.model(), skill_names)?;
     Ok(IdeaPage {
         title: idea.frontmatter.title.clone(),
         slug: idea.frontmatter.slug.clone(),

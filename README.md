@@ -29,14 +29,14 @@ Requires Docker + Compose v2. Everything (the app **and** Ollama) runs in contai
 cp .env.example .env          # set IDEA_VAULT_UID/GID to your `id -u` / `id -g`
 mkdir -p vault                # the source-of-truth directory you own & back up
 
+# First run: pull a model into the shared ollama volume (multi-GB, minutes)
+docker compose --profile tools run --rm ollama-pull
+
 # --- CPU mode (default, portable, no host GPU tooling) ---
 docker compose up -d --build
 
 # --- GPU mode (nvidia) instead — see prerequisites below ---
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
-
-# First run: pull a model into the shared ollama volume (multi-GB, minutes)
-docker compose --profile tools run --rm ollama-pull
 
 # open the app
 xdg-open http://localhost:3000     # or just browse to it

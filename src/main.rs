@@ -1,16 +1,19 @@
 //! Binary entry point: the D25 boot sequence (docs/01-architecture.md).
 //!
 //! Load config → ensure the vault dir → open the index (create if missing) → reindex if drifted →
-//! spawn a non-blocking Ollama probe (absence is valid, D20) → build state + router → bind and
-//! serve. Boot must never block on Ollama and must not crash on a reindex error.
+//! spawn a non-blocking LLM-backend probe (absence is valid, D20) → build state + router → bind and
+//! serve. Boot must never block on the model and must not crash on a reindex error. A `import
+//! <dir>` subcommand runs the Obsidian importer instead of the server (docs/adr/0009).
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use idea_vault::ai::OllamaClient;
+use idea_vault::ai::claude_code::ClaudeCodeConfig;
+use idea_vault::ai::{ClaudeCodeClient, LlmBackend, OllamaClient};
 use idea_vault::app::{build_router, AppState};
-use idea_vault::config::Config;
-use idea_vault::{index, vault};
+use idea_vault::config::{ClaudeSettings, Config, LlmBackendKind};
+use idea_vault::{import, index, vault};
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
 
@@ -24,6 +27,29 @@ async fn main() -> anyhow::Result<()> {
 
     // 1. Config.
     let config = Config::from_env();
+
+    // Subcommand: `idea-vault import <source-dir>` bulk-imports flat markdown notes as ideas and
+    // exits, without starting the server (docs/adr/0009 Phase 3).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("import") {
+        let Some(source) = args.get(2) else {
+            anyhow::bail!("usage: idea-vault import <source-dir>");
+        };
+        let summary = import::import_dir(
+            &PathBuf::from(source),
+            &config.vault_dir,
+            &config.index_path,
+        )
+        .with_context(|| format!("importing markdown from {source}"))?;
+        println!(
+            "imported {} new idea(s), skipped {} existing, {} unreadable — vault: {}",
+            summary.imported,
+            summary.skipped,
+            summary.errored,
+            config.vault_dir.display()
+        );
+        return Ok(());
+    }
 
     // 2. Vault dir (source of truth).
     vault::ensure_vault_dir(&config.vault_dir)
@@ -50,15 +76,14 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "drift check failed; continuing without reindex"),
     }
 
-    // 5. AI client + non-blocking health probe (boot must not wait on Ollama — D20/D25).
-    let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
-        .context("failed to build the Ollama HTTP client (check proxy/TLS environment)")?
-        .with_token_timeout(config.ollama_timeout);
+    // 5. LLM backend + non-blocking health probe (boot must not wait on the model — D20/D25).
+    let llm = build_llm(&config)?;
+    tracing::info!(backend = %backend_label(&config), model = llm.model(), "llm backend selected");
     {
-        let probe_client = ollama.clone();
+        let probe_backend = llm.clone();
         tokio::spawn(async move {
-            let health = probe_client.probe().await;
-            tracing::info!(?health, "ollama boot probe");
+            let health = probe_backend.probe().await;
+            tracing::info!(?health, "llm boot probe");
         });
     }
 
@@ -69,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
-        ollama,
+        llm,
         ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
         skills,
     };
@@ -83,4 +108,67 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await.context("axum serve")?;
 
     Ok(())
+}
+
+/// A short label for the active backend, for the boot log.
+fn backend_label(config: &Config) -> &'static str {
+    match config.llm_backend {
+        LlmBackendKind::Ollama => "ollama",
+        LlmBackendKind::ClaudeCode => "claude-code",
+    }
+}
+
+/// Construct the LLM backend selected in config (docs/adr/0009).
+fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
+    match config.llm_backend {
+        LlmBackendKind::Ollama => {
+            let client = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
+                .context("failed to build the Ollama HTTP client (check proxy/TLS)")?
+                .with_token_timeout(config.ollama_timeout);
+            Ok(LlmBackend::Ollama(client))
+        }
+        LlmBackendKind::ClaudeCode => {
+            let ClaudeSettings {
+                binary,
+                cwd,
+                add_dirs,
+                allowed_tools,
+                model,
+                skip_permissions,
+                timeout,
+            } = config.claude.clone();
+            let system_prompt = claude_system_prompt(&add_dirs);
+            Ok(LlmBackend::ClaudeCode(ClaudeCodeClient::new(
+                ClaudeCodeConfig {
+                    binary,
+                    cwd,
+                    add_dirs,
+                    allowed_tools,
+                    model,
+                    system_prompt,
+                    skip_permissions,
+                    token_timeout: timeout,
+                },
+            )))
+        }
+    }
+}
+
+/// A system-prompt addendum telling the agentic foil where the owner's reference material lives, so
+/// it knows to grep/read those dirs when interrogating an idea (docs/adr/0009 Phase 2).
+fn claude_system_prompt(add_dirs: &[PathBuf]) -> Option<String> {
+    if add_dirs.is_empty() {
+        return None;
+    }
+    let dirs = add_dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "You are a rigorous ideation foil. The owner's reference material (markdown notes, \
+         Obsidian vault, prior Claude Code artifacts) lives at: {dirs}. When it helps interrogate \
+         the idea, Grep/Read those directories for relevant prior thinking and cite what you find. \
+         Do not modify the owner's files unless they explicitly ask."
+    ))
 }

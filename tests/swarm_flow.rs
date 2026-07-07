@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use idea_vault::ai::budget::ContextBudget;
-use idea_vault::ai::OllamaClient;
+use idea_vault::ai::{LlmBackend, OllamaClient};
 use idea_vault::concepts::skills::SkillRegistry;
 use idea_vault::concepts::{swarm::swarm, ConceptError};
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState};
@@ -42,7 +42,7 @@ async fn run_swarm(
     k: usize,
     angles: &[&str],
 ) -> Result<idea_vault::concepts::swarm::SwarmOutcome, ConceptError> {
-    let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
+    let client = LlmBackend::Ollama(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(k));
     let registry = SkillRegistry::builtin();
     swarm(

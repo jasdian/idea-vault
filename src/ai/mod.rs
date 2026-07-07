@@ -7,13 +7,20 @@
 //! Submodules:
 //! - [`ollama`] — HTTP client + health probe against `http://localhost:11434` (never hardcoded
 //!   outside `config.rs`; the base URL is always passed in).
-//! - [`stream`] — adapts Ollama's NDJSON token stream into SSE events (D11).
-//! - [`budget`] — assembles a prompt within the local model's context limit (D21).
+//! - [`claude_code`] — a second backend that shells out to the local `claude` CLI and streams its
+//!   `stream-json` output (docs/adr/0009). Brings agentic file tools to the foil.
+//! - [`backend`] — the [`LlmBackend`] enum that lets callers target either backend behind one API.
+//! - [`stream`] — adapts a backend's token stream into SSE events (D11).
+//! - [`budget`] — assembles a prompt within the model's context limit (D21).
 
+pub mod backend;
 pub mod budget;
+pub mod claude_code;
 pub mod ollama;
 pub mod stream;
 
+pub use backend::LlmBackend;
+pub use claude_code::ClaudeCodeClient;
 pub use ollama::{AiHealth, OllamaClient};
 
 /// Errors produced at the `ai` boundary (docs/05-ai-integration.md D24 — AI errors degrade,
@@ -35,4 +42,10 @@ pub enum AiError {
     /// ended before `done: true`). Treated like an aborted call — nothing partial becomes truth.
     #[error("ollama protocol error: {0}")]
     Protocol(String),
+
+    /// A non-Ollama backend (e.g. the `claude` CLI) failed to spawn, exited abnormally, failed to
+    /// authenticate, or produced output that did not parse. Terminal like the others — a partial
+    /// reply is never persisted (D24 degrade-not-crash).
+    #[error("llm backend error: {0}")]
+    Backend(String),
 }

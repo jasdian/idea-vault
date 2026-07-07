@@ -13,7 +13,7 @@ use futures::future::join_all;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::ContextBudget;
-use crate::ai::ollama::OllamaClient;
+use crate::ai::LlmBackend;
 use crate::concepts::agents::{run_agent, AgentResult, AgentRole, AgentTask};
 use crate::concepts::skills::{hydrate_context, SkillRegistry};
 use crate::concepts::ConceptError;
@@ -32,7 +32,7 @@ pub struct SwarmOutcome {
 /// each `run_agent` acquires its own permit, so in-flight calls never exceed K. A failed agent
 /// becomes `None` (degrade, don't abort).
 pub(crate) async fn fan_out(
-    ollama: &OllamaClient,
+    ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     registry: &SkillRegistry,
     tasks: Vec<AgentTask>,
@@ -58,7 +58,7 @@ pub(crate) async fn fan_out(
 
 /// Converge a judged shortlist with one Synthesizer call (shared with `workflows`).
 pub(crate) async fn synthesize(
-    ollama: &OllamaClient,
+    ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     registry: &SkillRegistry,
     shortlist: &[&AgentResult],
@@ -107,7 +107,7 @@ pub(crate) fn judge(results: &[Option<AgentResult>]) -> Vec<&AgentResult> {
 /// Unknown angles fail fast before any model call. If every agent fails the swarm errors with
 /// [`ConceptError::NothingToSynthesize`] and nothing is appended.
 pub async fn swarm(
-    ollama: &OllamaClient,
+    ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     registry: &SkillRegistry,
     vault_dir: &Path,

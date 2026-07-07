@@ -12,7 +12,8 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::ai::budget::{assemble_context, ContextBudget, ContextInput};
-use crate::ai::ollama::{ChatMessage, OllamaClient};
+use crate::ai::ollama::ChatMessage;
+use crate::ai::LlmBackend;
 use crate::domain::{links, slug as domain_slug};
 use crate::domain::{IdeaState, MemoryFact, MemoryFactFrontmatter, MemoryIndex};
 use crate::memory::load::split_turns;
@@ -79,7 +80,7 @@ fn parse_facts(raw: &str) -> Vec<(String, String)> {
 /// The conversation itself is never touched (append-only invariant). Guard conditions ("≥1 turn
 /// exists", D9) are the caller's job. The caller must reindex afterwards — truth first.
 pub async fn extract_and_store(
-    ollama: &OllamaClient,
+    ollama: &LlmBackend,
     ai_semaphore: &tokio::sync::Semaphore,
     vault_dir: &Path,
     slug: &str,

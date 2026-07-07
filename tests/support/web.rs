@@ -31,6 +31,8 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         ollama_model: "llama3.2".to_string(),
         ai_concurrency,
         ollama_timeout: std::time::Duration::from_secs(5),
+        llm_backend: idea_vault::config::LlmBackendKind::Ollama,
+        claude: default_claude_settings(&vault_dir),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
@@ -43,12 +45,25 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         AppState {
             config: Arc::new(config),
             db: Arc::new(Mutex::new(conn)),
-            ollama,
+            llm: idea_vault::ai::LlmBackend::Ollama(ollama),
             ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
             skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
         },
         vault_dir,
     )
+}
+
+/// A benign claude-code settings block for test `Config`s (unused by Ollama-backed tests).
+pub fn default_claude_settings(vault_dir: &std::path::Path) -> idea_vault::config::ClaudeSettings {
+    idea_vault::config::ClaudeSettings {
+        binary: "claude".to_string(),
+        cwd: vault_dir.to_path_buf(),
+        add_dirs: Vec::new(),
+        allowed_tools: Vec::new(),
+        model: None,
+        skip_permissions: true,
+        timeout: std::time::Duration::from_secs(5),
+    }
 }
 
 /// Default harness: Ollama refused fast (port 9), concurrency 1.
