@@ -1,0 +1,1 @@
+- [Core insight](memory/core-insight.md) — The one durable conclusion, linking [[in-discussion]].

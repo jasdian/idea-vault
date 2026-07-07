@@ -1,0 +1,29 @@
+[ideas]
+  caf-ber-ide | Café Über Idée | draft | 2026-07-07T15:00:00Z | 2026-07-07T15:00:00Z
+  draft-idea | A Fresh Draft | draft | 2026-07-07T09:00:00Z | 2026-07-07T09:00:00Z
+  in-discussion | Under Active Discussion | in_discussion | 2026-07-07T10:00:00Z | 2026-07-07T10:30:00Z
+  reopened-merged | Reopened With Merged Memory | reopened | 2026-07-05T08:00:00Z | 2026-07-07T14:00:00Z
+  stored-idea | A Consolidated Idea | stored | 2026-07-06T08:00:00Z | 2026-07-06T12:00:00Z
+[tags]
+  in-discussion | incentives
+  in-discussion | markets
+  reopened-merged | incentives
+  stored-idea | markets
+[memory_facts]
+  reopened-merged | first-fact | First fact | 2026-07-05T12:00:00Z
+  reopened-merged | second-fact | Second fact | 2026-07-07T13:00:00Z
+  stored-idea | core-insight | Core insight | 2026-07-06T12:00:00Z
+[backlinks]
+  draft-idea | never-created | ∅
+  draft-idea | stored-idea | stored-idea
+  reopened-merged | stored-idea | stored-idea
+  stored-idea | in-discussion | in-discussion
+[search_fts]
+  caf-ber-ide | idea_body
+  draft-idea | idea_body
+  in-discussion | conversation
+  in-discussion | idea_body
+  reopened-merged | conversation
+  reopened-merged | idea_body
+  stored-idea | conversation
+  stored-idea | idea_body

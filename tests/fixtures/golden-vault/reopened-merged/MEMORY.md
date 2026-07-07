@@ -1,0 +1,2 @@
+- [First fact](memory/first-fact.md) — The original durable fact.
+- [Second fact](memory/second-fact.md) — The fact added on re-store, linking [[stored-idea]].
