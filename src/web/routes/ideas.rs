@@ -37,6 +37,40 @@ fn turn_role_and_content(turn: &str) -> (String, String) {
     }
 }
 
+/// Render every transcript turn as HTML (role-labelled, markdown → sanitized), each carrying its
+/// 0-based index for the per-turn remove control. Shared by the discussion pane and every action
+/// that mutates the transcript (chat/skill/swarm/delete all re-render and swap `#transcript`).
+fn render_turns(vault_dir: &std::path::Path, slug: &str) -> Result<Vec<String>, WebError> {
+    use askama::Template as _;
+    let conversation = store::read_conversation(vault_dir, slug)?;
+    store::split_turns(&conversation)
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| {
+            let (role, content) = turn_role_and_content(turn);
+            crate::web::templates::Turn {
+                role,
+                content_html: crate::web::templates::render_markdown(&content),
+                slug: slug.to_string(),
+                index,
+            }
+            .render()
+            .map_err(|e| WebError::Internal(format!("template render: {e}")))
+        })
+        .collect()
+}
+
+/// The full `#transcript` inner HTML for an idea — what chat/skill/swarm/delete return so the
+/// browser swaps the whole transcript (indices stay correct after any add/remove).
+pub(crate) fn render_transcript(
+    vault_dir: &std::path::Path,
+    slug: &str,
+) -> Result<axum::response::Html<String>, WebError> {
+    Ok(axum::response::Html(
+        render_turns(vault_dir, slug)?.concat(),
+    ))
+}
+
 /// Build the discussion pane for any discussion-state idea: rendered transcript turns plus the
 /// D20 availability state with its per-state remedy copy. Shared with the reopen route (R5),
 /// which returns this partial directly.
@@ -48,8 +82,6 @@ pub(crate) fn build_discussion(
     can_store: bool,
     skill_names: Vec<String>,
 ) -> Result<crate::web::templates::Discussion, WebError> {
-    use askama::Template as _;
-
     // D20 per-state remedy copy (docs/05-ai-integration.md).
     let (ai_available, unavailable_hint) = match health {
         crate::ai::AiHealth::Available => (true, String::new()),
@@ -62,18 +94,26 @@ pub(crate) fn build_discussion(
         ),
     };
 
-    let turns_html = store::split_turns(conversation)
-        .iter()
-        .map(|turn| {
-            let (role, content) = turn_role_and_content(turn);
-            crate::web::templates::Turn {
-                role,
-                content_html: crate::web::templates::render_markdown(&content),
-            }
-            .render()
-            .map_err(|e| WebError::Internal(format!("template render: {e}")))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // `build_discussion` receives the conversation text directly (not a vault dir), so render its
+    // turns here with the same indexed shape `render_turns` produces.
+    let turns_html = {
+        use askama::Template as _;
+        store::split_turns(conversation)
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                let (role, content) = turn_role_and_content(turn);
+                crate::web::templates::Turn {
+                    role,
+                    content_html: crate::web::templates::render_markdown(&content),
+                    slug: slug.to_string(),
+                    index,
+                }
+                .render()
+                .map_err(|e| WebError::Internal(format!("template render: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),

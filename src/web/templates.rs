@@ -51,12 +51,15 @@ pub struct IdeaRow {
     pub idea: IdeaSummary,
 }
 
-/// Partial: one conversation turn (R6/R7/R9, `templates/_turn.html`).
+/// Partial: one conversation turn (R6/R7/R9, `templates/_turn.html`). Carries its slug + 0-based
+/// transcript index so the template can offer a per-turn remove control.
 #[derive(Template, WebTemplate)]
 #[template(path = "_turn.html")]
 pub struct Turn {
     pub role: String,
     pub content_html: String,
+    pub slug: String,
+    pub index: usize,
 }
 
 /// Partial: the discussion pane (compose box + SSE target) (R5, `templates/_discussion.html`).

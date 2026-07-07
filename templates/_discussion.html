@@ -1,20 +1,25 @@
-<div class="discussion" hx-ext="sse">
+<div class="discussion">
   <div id="transcript">
     {% for t in turns_html %}{{ t|safe }}{% endfor %}
   </div>
   {% if ai_available %}
-  <form hx-post="/idea/{{ slug }}/chat" hx-target="#transcript" hx-swap="beforeend">
+  <form hx-post="/idea/{{ slug }}/chat" hx-target="#transcript" hx-swap="innerHTML"
+        hx-disabled-elt="find button, find textarea"
+        hx-on::after-request="if(event.detail.successful) this.reset()">
     <textarea name="message" placeholder="Push the idea…" rows="3"></textarea>
     <button type="submit">Send</button>
+    <span class="htmx-indicator muted">thinking…</span>
   </form>
   {% if can_store %}
   <div class="moves">
     {% for name in skill_names %}
-    <form hx-post="/idea/{{ slug }}/skill/{{ name }}" hx-target="#transcript" hx-swap="beforeend">
+    <form hx-post="/idea/{{ slug }}/skill/{{ name }}" hx-target="#transcript" hx-swap="innerHTML"
+          hx-disabled-elt="find button">
       <button type="submit" title="Run the {{ name }} move (D18)">{{ name }}</button>
     </form>
     {% endfor %}
-    <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="beforeend">
+    <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML"
+          hx-disabled-elt="find button">
       <button type="submit" title="Fan out subagents and converge (D14)">swarm</button>
     </form>
   </div>

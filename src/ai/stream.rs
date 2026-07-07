@@ -1,7 +1,7 @@
 //! Adapts Ollama's streaming NDJSON `/api/chat` response into the crate's token stream
 //! (docs/05-ai-integration.md D11): one `Ok(content)` item per NDJSON chunk until `done: true`.
-//! The axum-facing SSE eventing lives in `web::sse` (this module stays free of HTTP-framework
-//! types per D4 — `ai` depends on `domain` only).
+//! `LlmBackend::chat` consumes this to build a full reply; the browser chat route is a blocking
+//! POST (no SSE). This module stays free of HTTP-framework types per D4 — `ai` depends on `domain`.
 
 use std::time::Duration;
 

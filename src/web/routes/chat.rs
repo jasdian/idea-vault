@@ -1,8 +1,14 @@
-//! Chat route (docs/09-web-ui.md D17 R9): the discussion turn that streams AI tokens over SSE
-//! (docs/adr/0004, D11). Chat shares `web::sse` and the process-wide AI semaphore with swarm.
+//! Chat route (docs/09-web-ui.md D17 R9): one discussion turn.
+//!
+//! Design note (2026-07): the original SSE token-streaming approach never worked in a browser —
+//! the htmx SSE extension wasn't vendored, so a plain `hx-post` received a `text/event-stream`
+//! it couldn't render. This handler is a normal blocking POST that returns the re-rendered
+//! transcript HTML (the same model the skill/swarm buttons use). No orphan turns: the model is
+//! called *before* anything is persisted, so a failed call saves nothing (the D11 "partial turn
+//! never becomes truth" boundary, achieved by ordering rather than streaming).
 
 use axum::extract::{Path, State};
-use axum::response::sse::Event;
+use axum::response::Html;
 use axum::Form;
 use chrono::Utc;
 use serde::Deserialize;
@@ -13,7 +19,8 @@ use crate::app::AppState;
 use crate::domain::IdeaState;
 use crate::memory;
 use crate::vault::store;
-use crate::web::sse::{pump_tokens, sse_response, EventSender};
+use crate::web::routes::ideas::render_transcript;
+use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
 use crate::web::WebError;
 
 /// The rigorous-foil persona for free chat (CLAUDE.md: steelman, then stress-test).
@@ -27,20 +34,16 @@ pub struct ChatForm {
     pub message: String,
 }
 
-use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
-
-/// R9 — `POST /idea/{slug}/chat` — one discussion turn, streamed token-by-token over SSE (D11).
+/// R9 — `POST /idea/{slug}/chat` — one discussion turn; returns the re-rendered transcript.
 ///
-/// Persist boundaries: the user turn is appended (and a Draft transitions to InDiscussion)
-/// BEFORE the stream opens; the assistant turn is appended only AFTER the model stream
-/// completes — an aborted/timed-out/disconnected stream persists nothing of the reply.
+/// Persist ordering (no orphans): the model is called first with the assembled context plus the
+/// new message; only on success are the user turn and the assistant turn appended together and
+/// the Draft→InDiscussion transition made. A model failure persists nothing and returns 503.
 pub async fn chat(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     Form(form): Form<ChatForm>,
-) -> Result<axum::response::Response, WebError> {
-    use axum::response::IntoResponse;
-
+) -> Result<Html<String>, WebError> {
     let message = form.message.trim().to_string();
     if message.is_empty() {
         return Err(WebError::BadRequest("message must not be empty".into()));
@@ -54,9 +57,39 @@ pub async fn chat(
         ));
     }
 
-    // Truth first, before any streaming (D11): user turn (heading-escaped), then the D9
-    // transition — the first turn moves Draft→InDiscussion; Reopened/InDiscussion stay put.
+    // Budgeted context (D21) from the transcript so far, plus the owner's new message appended —
+    // nothing is written yet, so a failed model call leaves no orphan user turn.
+    let context =
+        memory::load::load_context(&vault_dir, &slug, ContextBudget::new(AI_BUDGET_BYTES))?;
+    let prompt = format!(
+        "{FOIL_INSTRUCTION}\n\n{}\n\n## Owner's latest message\n{message}",
+        context.text
+    );
+
+    let reply = {
+        let _permit = state
+            .ai_semaphore
+            .acquire()
+            .await
+            .map_err(|_| WebError::Internal("ai semaphore closed".into()))?;
+        state
+            .llm
+            .chat(vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+            }])
+            .await?
+        // permit released before the vault writes below
+    };
+    let reply = reply.trim();
+
+    // Success — now (and only now) persist both turns and make the D9 transition.
     store::append_turn(&vault_dir, &slug, "user", &message)?;
+    if !reply.is_empty() {
+        store::append_turn(&vault_dir, &slug, "assistant", reply)?;
+    } else {
+        tracing::warn!(slug, "model returned an empty reply");
+    }
     if idea.frontmatter.state == IdeaState::Draft {
         idea.frontmatter.state = IdeaState::InDiscussion;
         idea.frontmatter.updated = Utc::now();
@@ -64,73 +97,5 @@ pub async fn chat(
     }
     reindex_logged(&state);
 
-    // Budgeted context (D21) — includes the just-appended user turn as the newest turn.
-    let context =
-        memory::load::load_context(&vault_dir, &slug, ContextBudget::new(AI_BUDGET_BYTES))?;
-    let messages = vec![ChatMessage {
-        role: "user".to_string(),
-        content: format!("{FOIL_INSTRUCTION}\n\n{}", context.text),
-    }];
-
-    // Stream: headers go out immediately; the spawned task acquires the shared semaphore
-    // (ADR-0006), pumps tokens, and persists the assistant turn only on completion.
-    let (tx, rx): (EventSender, _) = tokio::sync::mpsc::channel(32);
-    let ollama = state.llm.clone();
-    let semaphore = state.ai_semaphore.clone();
-    let task_state = state.clone();
-    let task_slug = slug.clone();
-
-    tokio::spawn(async move {
-        // The permit covers exactly the model call (ADR-0006); it is released before any
-        // persistence/reindex work so a queued request never waits on unrelated disk latency.
-        let pump_result = {
-            let Ok(_permit) = semaphore.acquire().await else {
-                tracing::warn!("ai semaphore closed during chat");
-                return;
-            };
-            match ollama.chat_stream(messages).await {
-                Ok(tokens) => pump_tokens(tokens, &tx).await,
-                Err(e) => {
-                    tracing::warn!(error = %e, slug = %task_slug, "chat stream failed to open");
-                    let event = Event::default()
-                        .event("error")
-                        .data("the model is unavailable; nothing was saved");
-                    let _ = tx.send(Ok(event)).await;
-                    return;
-                }
-            }
-        };
-
-        match pump_result {
-            Ok(Some(full)) => {
-                let reply = full.trim();
-                if reply.is_empty() {
-                    tracing::warn!(slug = %task_slug, "model returned empty chat reply");
-                } else if let Err(e) =
-                    store::append_turn(&vault_dir, &task_slug, "assistant", reply)
-                {
-                    tracing::error!(error = %e, slug = %task_slug, "failed to persist assistant turn");
-                    let event = Event::default()
-                        .event("error")
-                        .data("failed to save the reply");
-                    let _ = tx.send(Ok(event)).await;
-                    return;
-                }
-                reindex_logged(&task_state);
-                let _ = tx
-                    .send(Ok(Event::default().event("done").data("done")))
-                    .await;
-            }
-            Ok(None) => {
-                // Client disconnected: model call aborted by drop, nothing persisted (D11).
-                tracing::debug!(slug = %task_slug, "client disconnected mid-stream");
-            }
-            Err(e) => {
-                // pump already emitted the error event; the partial reply is discarded.
-                tracing::warn!(error = %e, slug = %task_slug, "chat stream aborted mid-reply");
-            }
-        }
-    });
-
-    Ok(sse_response(rx).into_response())
+    render_transcript(&vault_dir, &slug)
 }

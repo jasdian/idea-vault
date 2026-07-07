@@ -6,7 +6,6 @@
 //! streams (docs/09-web-ui.md D16/D17).
 
 pub mod routes;
-pub mod sse;
 pub mod templates;
 
 use axum::http::StatusCode;

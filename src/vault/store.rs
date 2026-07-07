@@ -142,6 +142,29 @@ pub fn append_turn(
     append_conversation(vault_dir, slug, &turn)
 }
 
+/// Delete the `index`-th turn (0-based, in `split_turns` order) from `conversation.md` by
+/// rewriting the file without it. Returns whether a turn was removed.
+///
+/// This is the ONE deliberate exception to the append-only rule (docs/04-state-machine.md): a
+/// human explicitly removing a message they don't want, not a streaming partial. It rewrites the
+/// whole file atomically (tmp + rename), so a crash mid-write can't corrupt the transcript.
+pub fn delete_turn(vault_dir: &Path, slug: &str, index: usize) -> Result<bool, VaultError> {
+    let dir = checked_idea_dir(vault_dir, slug)?;
+    if !dir.is_dir() {
+        return Err(VaultError::IdeaNotFound(slug.to_string()));
+    }
+    let convo = read_conversation(vault_dir, slug)?;
+    let mut turns = split_turns(&convo);
+    if index >= turns.len() {
+        return Ok(false);
+    }
+    turns.remove(index);
+    // Each turn from `split_turns` already ends in a newline, so concatenation reproduces the
+    // file minus the removed turn.
+    write_atomic(&dir.join("conversation.md"), &turns.concat())?;
+    Ok(true)
+}
+
 /// Read `vault/<slug>/conversation.md`. An idea that has not entered discussion yet has no
 /// conversation file — that reads as the empty transcript, not an error.
 pub fn read_conversation(vault_dir: &Path, slug: &str) -> Result<String, VaultError> {

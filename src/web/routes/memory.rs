@@ -11,9 +11,9 @@ use crate::concepts;
 use crate::domain::IdeaState;
 use crate::memory;
 use crate::vault::store;
-use crate::web::routes::ideas::build_discussion;
+use crate::web::routes::ideas::{build_discussion, render_transcript};
 use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
-use crate::web::templates::{render_markdown, Discussion, Stored, Turn};
+use crate::web::templates::{render_markdown, Discussion, Stored};
 use crate::web::WebError;
 
 /// R4 — `POST /idea/{slug}/store` — consolidate + extract memory, transition to `Stored` (D12).
@@ -129,14 +129,13 @@ fn guard_discussion_state(state: IdeaState) -> Result<(), WebError> {
     }
 }
 
-/// R6 — `POST /idea/{slug}/skill/{name}` — apply a named ideation skill, returning a turn (D18).
-///
-/// Stateless: the output appends as an assistant turn (inside `invoke`, post-completion) and
-/// idea state never changes. `invoke` gates its own AI call on the shared semaphore.
+/// R6 — `POST /idea/{slug}/skill/{name}` — apply a named ideation skill; returns the re-rendered
+/// transcript (D18). Stateless: `invoke` appends the assistant turn post-completion and does not
+/// change idea state; it gates its own AI call on the shared semaphore.
 pub async fn run_skill(
     State(state): State<AppState>,
     Path((slug, name)): Path<(String, String)>,
-) -> Result<Turn, WebError> {
+) -> Result<axum::response::Html<String>, WebError> {
     let vault_dir = state.config.vault_dir.clone();
     let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
     guard_discussion_state(idea.frontmatter.state)?;
@@ -145,7 +144,7 @@ pub async fn run_skill(
         return Err(WebError::NotFound(format!("skill: {name}")));
     };
 
-    let output = concepts::skills::invoke(
+    concepts::skills::invoke(
         &state.llm,
         &state.ai_semaphore,
         &vault_dir,
@@ -155,16 +154,7 @@ pub async fn run_skill(
     )
     .await?;
     reindex_logged(&state);
-
-    let content = if output.is_empty() {
-        "*(the model returned nothing)*".to_string()
-    } else {
-        output
-    };
-    Ok(Turn {
-        role: format!("assistant (skill: {name})"),
-        content_html: render_markdown(&content),
-    })
+    render_transcript(&vault_dir, &slug)
 }
 
 /// Form body for R7: optional comma-separated angle list; defaults to the canonical D14 set.
@@ -188,15 +178,14 @@ const DEFAULT_ANGLES: [&str; 4] = [
     "second-order-effects",
 ];
 
-/// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge, return one turn (D14).
-///
-/// The swarm orchestrator bounds itself on the shared semaphore (max K in flight, N−K queue)
-/// and persists only the converged synthesis; this route renders it as the returned turn.
+/// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge; returns the re-rendered
+/// transcript (D14). The swarm bounds itself on the shared semaphore and persists only the
+/// converged synthesis as one turn.
 pub async fn run_swarm(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     axum::Form(form): axum::Form<SwarmForm>,
-) -> Result<Turn, WebError> {
+) -> Result<axum::response::Html<String>, WebError> {
     let vault_dir = state.config.vault_dir.clone();
     let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
     guard_discussion_state(idea.frontmatter.state)?;
@@ -217,7 +206,7 @@ pub async fn run_swarm(
         )));
     }
 
-    let outcome = concepts::swarm::swarm(
+    concepts::swarm::swarm(
         &state.llm,
         &state.ai_semaphore,
         &state.skills,
@@ -228,16 +217,17 @@ pub async fn run_swarm(
     )
     .await?;
     reindex_logged(&state);
+    render_transcript(&vault_dir, &slug)
+}
 
-    // Parity with run_skill: an Ok-but-empty synthesis is surfaced as a placeholder turn
-    // (nothing was persisted for it — a reload drops the bubble, which the text explains).
-    let content = if outcome.synthesis.is_empty() {
-        "*(the model returned nothing)*".to_string()
-    } else {
-        outcome.synthesis
-    };
-    Ok(Turn {
-        role: "assistant (swarm)".to_string(),
-        content_html: render_markdown(&content),
-    })
+/// `POST /idea/{slug}/turn/{index}/delete` — remove one transcript turn (the deliberate-edit
+/// exception to append-only, see `vault::store::delete_turn`); returns the re-rendered transcript.
+pub async fn delete_turn(
+    State(state): State<AppState>,
+    Path((slug, index)): Path<(String, usize)>,
+) -> Result<axum::response::Html<String>, WebError> {
+    let vault_dir = state.config.vault_dir.clone();
+    store::delete_turn(&vault_dir, &slug, index)?; // 404 if the idea is missing
+    reindex_logged(&state);
+    render_transcript(&vault_dir, &slug)
 }
