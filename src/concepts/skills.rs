@@ -66,6 +66,13 @@ impl SkillRegistry {
                     // second-order-effects prompt template; {context} is filled by ai::budget (D21).
                     prompt: "Assume this idea succeeds as stated. Trace the second-order and knock-on effects, good and bad.\n{context}".to_string(),
                 },
+                Skill {
+                    name: "build-prompt".to_string(),
+                    description: "Fold the whole discussion into a ready-to-run build prompt for a coding agent.".to_string(),
+                    // The capstone move: turn the interrogation into an actionable spec another
+                    // agent (e.g. Claude Code) can execute. Output is one copy-pasteable prompt.
+                    prompt: "Synthesize the ENTIRE discussion below into a single, self-contained BUILD PROMPT that a coding agent (such as Claude Code) can execute to actually build this idea.\n\nReturn ONLY the prompt itself, wrapped in one fenced ```markdown code block, ready to copy and paste. The prompt must:\n- Open with the goal and the concrete deliverable in the first sentence.\n- Fold in what the discussion SETTLED — the decisions, constraints, and disproofs — rather than restating the chat; extract, don't transcribe.\n- Lay out an ordered plan: understand → design → implement → verify.\n- Say explicitly where the agent should fan out parallel subagents or a workflow (independent modules, multi-angle review) versus work sequentially, and why.\n- State the acceptance criteria and how to verify them.\nWrite it as direct instructions to the agent, specific and imperative — not prose about the idea.\n{context}".to_string(),
+                },
             ],
         }
     }

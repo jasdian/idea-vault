@@ -24,6 +24,9 @@ pub struct AppState {
     pub ai_semaphore: Arc<Semaphore>,
     /// Built-in skill registry, populated at boot (docs/06-concepts/skills.md "Registry").
     pub skills: Arc<crate::concepts::skills::SkillRegistry>,
+    /// In-flight background AI jobs, one per idea, so a slow model call survives the browser
+    /// navigating away (`web::jobs`).
+    pub jobs: crate::web::jobs::Jobs,
 }
 
 /// Build the full axum router (D17 route map) with the tracing middleware layer (D16).
@@ -42,8 +45,9 @@ pub fn build_router(state: AppState) -> Router {
             "/idea/{slug}/turn/{index}/delete",
             post(memory::delete_turn),
         )
-        // Chat (SSE).
+        // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))
+        .route("/idea/{slug}/pending", get(ideas::pending))
         // Search.
         .route("/search", get(ideas::search))
         // Admin.

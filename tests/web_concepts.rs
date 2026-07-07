@@ -40,10 +40,10 @@ async fn run_skill_returns_turn_partial_and_appends_it() {
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
     seed(&vault_dir, IdeaState::InDiscussion);
 
-    let (status, body) = post_form(state, "/idea/movable/skill/premortem", "").await;
+    let (status, _) = post_form(state.clone(), "/idea/movable/skill/premortem", "").await;
     assert_eq!(status, StatusCode::OK);
-    // The _turn.html partial with the labelled role and rendered content.
-    assert!(body.contains("foil · premortem"));
+    // The skill runs as a background job; its labelled turn arrives via /pending.
+    let body = support::web::poll_until(state, "/idea/movable/pending", "foil · premortem").await;
     assert!(body.contains("Ranked failure causes."));
 
     // Persisted as a labelled assistant turn; the skill template reached the model.
@@ -82,9 +82,9 @@ async fn run_swarm_defaults_to_the_canonical_angles_and_persists_only_synthesis(
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 2);
     seed(&vault_dir, IdeaState::InDiscussion);
 
-    let (status, body) = post_form(state, "/idea/movable/swarm", "").await;
+    let (status, _) = post_form(state.clone(), "/idea/movable/swarm", "").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("foil · swarm"));
+    let body = support::web::poll_until(state, "/idea/movable/pending", "foil · swarm").await;
     assert!(body.contains("converged finding"));
 
     // Canonical D14 set: 4 angles + 1 synthesizer = 5 model calls.
@@ -102,8 +102,10 @@ async fn run_swarm_custom_angles_and_unknown_angle_400() {
 
     let (status, _) = post_form(state.clone(), "/idea/movable/swarm", "angles=premortem").await;
     assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state.clone(), "/idea/movable/pending", "foil · swarm").await;
     assert_eq!(mock.chat_bodies().len(), 2, "1 angle + 1 synthesizer");
 
+    // Unknown angle is rejected synchronously (validated in the handler before any job starts).
     let (status, _) = post_form(state, "/idea/movable/swarm", "angles=nope").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -153,14 +155,16 @@ async fn oversized_angle_list_is_400_with_no_ai_calls() {
 }
 
 #[tokio::test]
-async fn run_swarm_all_agents_failed_is_503_and_persists_nothing() {
+async fn run_swarm_all_agents_failed_surfaces_error_and_persists_nothing() {
     let mock = spawn(&["llama3.2"], ChatScript::EofAfter(vec![])).await;
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
     seed(&vault_dir, IdeaState::InDiscussion);
     let convo_before = store::read_conversation(&vault_dir, "movable").unwrap();
 
-    let (status, _) = post_form(state, "/idea/movable/swarm", "").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, _) = post_form(state.clone(), "/idea/movable/swarm", "").await;
+    assert_eq!(status, StatusCode::OK);
+    // Every agent fails → the job errors and the failure surfaces via /pending; nothing persisted.
+    support::web::poll_until(state, "/idea/movable/pending", "could not respond").await;
     assert_eq!(
         store::read_conversation(&vault_dir, "movable").unwrap(),
         convo_before

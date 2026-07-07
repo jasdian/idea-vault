@@ -78,8 +78,9 @@ pub struct Discussion {
     pub unavailable_hint: String,
     /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
     pub skill_names: Vec<String>,
-    /// Existing transcript turns, each pre-rendered via [`Turn`] (single source: `_turn.html`).
-    pub turns_html: Vec<String>,
+    /// The full `#transcript` inner HTML (turns + any job indicator/error + usage meter),
+    /// produced by `routes::ideas::transcript_inner` — the single source for page + swap + poll.
+    pub transcript_html: String,
 }
 
 /// Partial: stored view (consolidated body + memory) (R4, `templates/_stored.html`).

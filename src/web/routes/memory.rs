@@ -11,7 +11,8 @@ use crate::concepts;
 use crate::domain::IdeaState;
 use crate::memory;
 use crate::vault::store;
-use crate::web::routes::ideas::{build_discussion, render_transcript};
+use crate::web::jobs;
+use crate::web::routes::ideas::{build_discussion, respond_with_transcript};
 use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
 use crate::web::templates::{render_markdown, Discussion, Stored};
 use crate::web::WebError;
@@ -103,6 +104,7 @@ pub async fn reopen_idea(
     let conversation = store::read_conversation(&vault_dir, &slug)?;
     let health = state.llm.probe().await;
     let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
+    let pending = crate::web::jobs::peek(&state.jobs, &slug);
     build_discussion(
         &slug,
         &conversation,
@@ -110,6 +112,7 @@ pub async fn reopen_idea(
         state.llm.model(),
         true,
         skill_names,
+        pending,
     )
 }
 
@@ -129,9 +132,9 @@ fn guard_discussion_state(state: IdeaState) -> Result<(), WebError> {
     }
 }
 
-/// R6 — `POST /idea/{slug}/skill/{name}` — apply a named ideation skill; returns the re-rendered
-/// transcript (D18). Stateless: `invoke` appends the assistant turn post-completion and does not
-/// change idea state; it gates its own AI call on the shared semaphore.
+/// R6 — `POST /idea/{slug}/skill/{name}` — apply a named ideation skill as a background job (D18).
+/// Stateless: `invoke` appends the assistant turn post-completion and does not change idea state;
+/// it gates its own AI call on the shared semaphore. Returns the transcript with the indicator.
 pub async fn run_skill(
     State(state): State<AppState>,
     Path((slug, name)): Path<(String, String)>,
@@ -143,18 +146,42 @@ pub async fn run_skill(
     let Some(skill) = state.skills.get(&name) else {
         return Err(WebError::NotFound(format!("skill: {name}")));
     };
+    let skill = skill.clone();
 
-    concepts::skills::invoke(
+    if !jobs::try_claim(&state.jobs, &slug) {
+        return respond_with_transcript(&state, &slug);
+    }
+    let ts = state.clone();
+    let tslug = slug.clone();
+    tokio::spawn(async move {
+        match run_skill_work(&ts, &tslug, skill).await {
+            Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
+            Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
+        }
+    });
+    respond_with_transcript(&state, &slug)
+}
+
+async fn run_skill_work(
+    state: &AppState,
+    slug: &str,
+    skill: concepts::skills::Skill,
+) -> Result<(), String> {
+    let out = concepts::skills::invoke(
         &state.llm,
         &state.ai_semaphore,
-        &vault_dir,
-        &slug,
-        skill,
+        &state.config.vault_dir,
+        slug,
+        &skill,
         ContextBudget::new(AI_BUDGET_BYTES),
     )
-    .await?;
-    reindex_logged(&state);
-    render_transcript(&vault_dir, &slug)
+    .await
+    .map_err(|e| e.to_string())?;
+    if out.trim().is_empty() {
+        return Err("the foil returned nothing — try again".to_string());
+    }
+    reindex_logged(state);
+    Ok(())
 }
 
 /// Form body for R7: optional comma-separated angle list; defaults to the canonical D14 set.
@@ -178,9 +205,8 @@ const DEFAULT_ANGLES: [&str; 4] = [
     "second-order-effects",
 ];
 
-/// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge; returns the re-rendered
-/// transcript (D14). The swarm bounds itself on the shared semaphore and persists only the
-/// converged synthesis as one turn.
+/// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge, as a background job (D14). The
+/// swarm bounds itself on the shared semaphore and persists only the converged synthesis.
 pub async fn run_swarm(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -205,19 +231,45 @@ pub async fn run_swarm(
             angles.len()
         )));
     }
+    // Reject unknown angles synchronously (they map to skills) — `swarm` checks this too, but that
+    // now runs in the background task, so validate here to keep a bad request a 400 not an error turn.
+    for angle in &angles {
+        if state.skills.get(angle).is_none() {
+            return Err(WebError::BadRequest(format!("unknown angle: {angle}")));
+        }
+    }
 
-    concepts::swarm::swarm(
+    if !jobs::try_claim(&state.jobs, &slug) {
+        return respond_with_transcript(&state, &slug);
+    }
+    let ts = state.clone();
+    let tslug = slug.clone();
+    tokio::spawn(async move {
+        match run_swarm_work(&ts, &tslug, angles).await {
+            Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
+            Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
+        }
+    });
+    respond_with_transcript(&state, &slug)
+}
+
+async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Result<(), String> {
+    let outcome = concepts::swarm::swarm(
         &state.llm,
         &state.ai_semaphore,
         &state.skills,
-        &vault_dir,
-        &slug,
+        &state.config.vault_dir,
+        slug,
         angles,
         ContextBudget::new(AI_BUDGET_BYTES),
     )
-    .await?;
-    reindex_logged(&state);
-    render_transcript(&vault_dir, &slug)
+    .await
+    .map_err(|e| e.to_string())?;
+    if outcome.synthesis.trim().is_empty() {
+        return Err("the swarm produced nothing — try again".to_string());
+    }
+    reindex_logged(state);
+    Ok(())
 }
 
 /// `POST /idea/{slug}/turn/{index}/delete` — remove one transcript turn (the deliberate-edit
@@ -226,8 +278,7 @@ pub async fn delete_turn(
     State(state): State<AppState>,
     Path((slug, index)): Path<(String, usize)>,
 ) -> Result<axum::response::Html<String>, WebError> {
-    let vault_dir = state.config.vault_dir.clone();
-    store::delete_turn(&vault_dir, &slug, index)?; // 404 if the idea is missing
+    store::delete_turn(&state.config.vault_dir, &slug, index)?; // 404 if the idea is missing
     reindex_logged(&state);
-    render_transcript(&vault_dir, &slug)
+    respond_with_transcript(&state, &slug)
 }

@@ -6,6 +6,28 @@
     <title>idea-vault</title>
     <link rel="stylesheet" href="/static/app.css" />
     <script src="/static/htmx.min.js"></script>
+    <script>
+      // Progressive enhancement: give every code block (e.g. a generated build prompt) a Copy
+      // button. Delegated + idempotent, and re-run after each HTMX swap so polled-in blocks get one.
+      function addCopyButtons() {
+        document.querySelectorAll(".turn__body pre").forEach(function (pre) {
+          if (pre.querySelector(".copy-btn")) return;
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "copy-btn";
+          btn.textContent = "copy";
+          btn.addEventListener("click", function () {
+            navigator.clipboard.writeText(pre.innerText).then(function () {
+              btn.textContent = "copied";
+              setTimeout(function () { btn.textContent = "copy"; }, 1500);
+            });
+          });
+          pre.appendChild(btn);
+        });
+      }
+      document.addEventListener("DOMContentLoaded", addCopyButtons);
+      document.body.addEventListener("htmx:afterSwap", addCopyButtons);
+    </script>
   </head>
   <body>
     <div class="wrap">

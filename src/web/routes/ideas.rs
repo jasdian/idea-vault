@@ -82,16 +82,97 @@ fn turns_to_html(slug: &str, conversation: &str) -> Result<Vec<String>, WebError
         .collect()
 }
 
-/// The full `#transcript` inner HTML for an idea — what chat/skill/swarm/delete return so the
-/// browser swaps the whole transcript (indices stay correct after any add/remove).
-pub(crate) fn render_transcript(
-    vault_dir: &std::path::Path,
+/// Minimal HTML-escape for text dropped into server-built markup (error text, model name).
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The quiet usage line: turns, approximate context vs budget, and the model in use. Answers
+/// "what is being sent and to whom" at a glance.
+fn meter_line(model: &str, turns: usize, bytes: usize) -> String {
+    let kb = bytes.div_ceil(1024);
+    let budget_kb = crate::web::routes::AI_BUDGET_BYTES / 1024;
+    let plural = if turns == 1 { "" } else { "s" };
+    format!(
+        r#"<div class="meter">{turns} turn{plural} · ~{kb} KB of ~{budget_kb} KB context · {model}</div>"#,
+        model = esc(model)
+    )
+}
+
+/// The server-driven "thinking" indicator. It self-polls `/pending` 1.5s after it lands in the
+/// DOM, so it keeps refreshing (and the elapsed count keeps climbing) until the job finishes —
+/// and it re-appears on a fresh page load while a job runs, so navigating away never loses it.
+fn pending_block(slug: &str, secs: u64) -> String {
+    format!(
+        r##"<div class="foil-pending" role="status" aria-live="polite" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="#transcript" hx-swap="innerHTML"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>the foil is thinking — {secs}s</span></div>"##
+    )
+}
+
+fn error_block(message: &str) -> String {
+    format!(
+        r#"<div class="foil-error" role="alert"><strong>The foil could not respond.</strong> {}</div>"#,
+        esc(message)
+    )
+}
+
+/// The complete inner HTML of `#transcript`: the turns, then a job indicator / error block if a
+/// job is active, then the usage meter. This is the single renderer every transcript response
+/// goes through — the idea page, the poll endpoint, and chat/skill/swarm/delete all emit it, so
+/// the view is identical whether freshly loaded or swapped in.
+pub(crate) fn transcript_inner(
+    slug: &str,
+    model: &str,
+    conversation: &str,
+    pending: crate::web::jobs::Pending,
+) -> Result<String, WebError> {
+    use crate::web::jobs::Pending;
+    let turns = turns_to_html(slug, conversation)?;
+    let mut html = String::new();
+    if turns.is_empty() && matches!(pending, Pending::Idle) {
+        html.push_str(
+            r#"<p class="empty-thread">No exchange yet. Push the idea below and let the foil break it.</p>"#,
+        );
+    }
+    html.push_str(&turns.concat());
+    match pending {
+        Pending::Running(secs) => html.push_str(&pending_block(slug, secs)),
+        Pending::Failed(msg) => html.push_str(&error_block(&msg)),
+        Pending::Idle => {}
+    }
+    html.push_str(&meter_line(
+        model,
+        store::split_turns(conversation).len(),
+        conversation.len(),
+    ));
+    Ok(html)
+}
+
+/// Read the current transcript + job state and render it — the response chat/skill/swarm/delete
+/// and the poll endpoint return.
+pub(crate) fn respond_with_transcript(
+    state: &AppState,
     slug: &str,
 ) -> Result<axum::response::Html<String>, WebError> {
-    let conversation = store::read_conversation(vault_dir, slug)?;
-    Ok(axum::response::Html(
-        turns_to_html(slug, &conversation)?.concat(),
-    ))
+    let conversation = store::read_conversation(&state.config.vault_dir, slug)?;
+    let pending = crate::web::jobs::peek(&state.jobs, slug);
+    Ok(axum::response::Html(transcript_inner(
+        slug,
+        state.llm.model(),
+        &conversation,
+        pending,
+    )?))
+}
+
+/// `GET /idea/{slug}/pending` — the poll target: return the current transcript, still carrying the
+/// indicator while the job runs, an error once it fails, or the finished transcript when done.
+pub async fn pending(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<axum::response::Html<String>, WebError> {
+    store::read_idea(&state.config.vault_dir, &slug)?; // 404 if the idea is gone
+    respond_with_transcript(&state, &slug)
 }
 
 /// Build the discussion pane for any discussion-state idea: rendered transcript turns plus the
@@ -104,6 +185,7 @@ pub(crate) fn build_discussion(
     model: &str,
     can_store: bool,
     skill_names: Vec<String>,
+    pending: crate::web::jobs::Pending,
 ) -> Result<crate::web::templates::Discussion, WebError> {
     // D20 per-state remedy copy (docs/05-ai-integration.md).
     let (ai_available, unavailable_hint) = match health {
@@ -117,8 +199,9 @@ pub(crate) fn build_discussion(
         ),
     };
 
-    // `build_discussion` has the conversation text directly; render turns with the shared helper.
-    let turns_html = turns_to_html(slug, conversation)?;
+    // The #transcript inner is the one shared renderer — so a fresh page load carries the same
+    // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
+    let transcript_html = transcript_inner(slug, model, conversation, pending)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),
@@ -126,7 +209,7 @@ pub(crate) fn build_discussion(
         can_store,
         unavailable_hint,
         skill_names,
-        turns_html,
+        transcript_html,
     })
 }
 
@@ -140,6 +223,7 @@ fn render_panel(
     health: crate::ai::AiHealth,
     model: &str,
     skill_names: Vec<String>,
+    pending: crate::web::jobs::Pending,
 ) -> Result<String, WebError> {
     use askama::Template as _;
 
@@ -161,6 +245,7 @@ fn render_panel(
         model,
         can_store,
         skill_names,
+        pending,
     )?
     .render()
     .map_err(|e| WebError::Internal(format!("template render: {e}")))
@@ -183,7 +268,16 @@ pub async fn idea_page(
     let health = state.llm.probe().await;
 
     let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
-    let panel_html = render_panel(&idea, &conversation, health, state.llm.model(), skill_names)?;
+    // If a background job is running for this idea, this resumes its indicator on the fresh page.
+    let pending = crate::web::jobs::peek(&state.jobs, &slug);
+    let panel_html = render_panel(
+        &idea,
+        &conversation,
+        health,
+        state.llm.model(),
+        skill_names,
+        pending,
+    )?;
     Ok(IdeaPage {
         title: idea.frontmatter.title.clone(),
         slug: idea.frontmatter.slug.clone(),

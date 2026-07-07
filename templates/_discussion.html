@@ -1,17 +1,8 @@
 <div class="discussion">
-  <div id="transcript">
-    {% for t in turns_html %}{{ t|safe }}{% endfor %}
-  </div>
-
-  <div class="foil-status" role="status" aria-live="polite">
-    <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span>the foil is thinking — this can take a moment</span>
-  </div>
+  <div id="transcript">{{ transcript_html|safe }}</div>
 
   {% if ai_available %}
-  <form class="composer" hx-post="/idea/{{ slug }}/chat"
-        hx-target="#transcript" hx-swap="innerHTML" hx-indicator=".discussion"
-        hx-disabled-elt="find button, find textarea"
+  <form class="composer" hx-post="/idea/{{ slug }}/chat" hx-target="#transcript" hx-swap="innerHTML"
         hx-on::after-request="if(event.detail.successful) this.reset()">
     <textarea name="message" rows="3"
               placeholder="Push the idea — steelman it, then break it."></textarea>
@@ -23,23 +14,24 @@
   {% if can_store %}
   <div class="moves">
     <span class="moves__label">moves</span>
-    {% for name in skill_names %}
-    <form hx-post="/idea/{{ slug }}/skill/{{ name }}"
-          hx-target="#transcript" hx-swap="innerHTML" hx-indicator=".discussion"
-          hx-disabled-elt="find button">
+    {% for name in skill_names %}{% if name != "build-prompt" %}
+    <form hx-post="/idea/{{ slug }}/skill/{{ name }}" hx-target="#transcript" hx-swap="innerHTML">
       <button type="submit" class="chip" title="Run the {{ name }} move">{{ name }}</button>
     </form>
-    {% endfor %}
-    <form hx-post="/idea/{{ slug }}/swarm"
-          hx-target="#transcript" hx-swap="innerHTML" hx-indicator=".discussion"
-          hx-disabled-elt="find button">
+    {% endif %}{% endfor %}
+    <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML">
       <button type="submit" class="chip chip--swarm"
               title="Fan out subagents from many angles, then converge">swarm</button>
     </form>
   </div>
-  <div class="commit">
-    <form hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
-          hx-indicator=".discussion" hx-disabled-elt="find button">
+
+  <div class="capstones">
+    <form hx-post="/idea/{{ slug }}/skill/build-prompt" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip chip--build"
+              title="Fold the whole discussion into a ready-to-run build prompt for a coding agent">⌁ generate build prompt</button>
+    </form>
+    <form class="commit" hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
+          hx-disabled-elt="find button">
       <button type="submit" class="btn"
               title="Consolidate the idea and extract durable memory">Store in the vault</button>
     </form>

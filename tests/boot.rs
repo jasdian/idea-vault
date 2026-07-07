@@ -53,6 +53,7 @@ fn test_state() -> AppState {
         llm: idea_vault::ai::LlmBackend::Ollama(ollama),
         ai_semaphore: Arc::new(Semaphore::new(1)),
         skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
+        jobs: idea_vault::web::jobs::new_registry(),
     }
 }
 

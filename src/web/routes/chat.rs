@@ -1,11 +1,10 @@
-//! Chat route (docs/09-web-ui.md D17 R9): one discussion turn.
+//! Chat route (docs/09-web-ui.md D17 R9): one discussion turn, run as a background job.
 //!
-//! Design note (2026-07): the original SSE token-streaming approach never worked in a browser —
-//! the htmx SSE extension wasn't vendored, so a plain `hx-post` received a `text/event-stream`
-//! it couldn't render. This handler is a normal blocking POST that returns the re-rendered
-//! transcript HTML (the same model the skill/swarm buttons use). No orphan turns: the model is
-//! called *before* anything is persisted, so a failed call saves nothing (the D11 "partial turn
-//! never becomes truth" boundary, achieved by ordering rather than streaming).
+//! The model call is a *detached* task, not the request future — so navigating away (or a dropped
+//! connection) can't cancel the generation, and the reply lands in `conversation.md` regardless of
+//! who is watching (`web::jobs`). The user turn is persisted up front so it survives navigation and
+//! shows beneath the "thinking" indicator; the assistant turn is appended when the task completes.
+//! One job per idea: a second Send while busy just re-shows the in-flight state.
 
 use axum::extract::{Path, State};
 use axum::response::Html;
@@ -19,7 +18,8 @@ use crate::app::AppState;
 use crate::domain::IdeaState;
 use crate::memory;
 use crate::vault::store;
-use crate::web::routes::ideas::render_transcript;
+use crate::web::jobs;
+use crate::web::routes::ideas::respond_with_transcript;
 use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
 use crate::web::WebError;
 
@@ -34,11 +34,8 @@ pub struct ChatForm {
     pub message: String,
 }
 
-/// R9 — `POST /idea/{slug}/chat` — one discussion turn; returns the re-rendered transcript.
-///
-/// Persist ordering (no orphans): the model is called first with the assembled context plus the
-/// new message; only on success are the user turn and the assistant turn appended together and
-/// the Draft→InDiscussion transition made. A model failure persists nothing and returns 503.
+/// R9 — `POST /idea/{slug}/chat` — start one discussion turn; returns the transcript with the
+/// "thinking" indicator, which polls `/pending` to completion.
 pub async fn chat(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -57,45 +54,67 @@ pub async fn chat(
         ));
     }
 
-    // Budgeted context (D21) from the transcript so far, plus the owner's new message appended —
-    // nothing is written yet, so a failed model call leaves no orphan user turn.
-    let context =
-        memory::load::load_context(&vault_dir, &slug, ContextBudget::new(AI_BUDGET_BYTES))?;
-    let prompt = format!(
-        "{FOIL_INSTRUCTION}\n\n{}\n\n## Owner's latest message\n{message}",
-        context.text
-    );
+    // Busy already: don't queue a second turn — just re-show the in-flight state.
+    if !jobs::try_claim(&state.jobs, &slug) {
+        return respond_with_transcript(&state, &slug);
+    }
+
+    // Persist the user turn now (survives navigation, shows under the indicator) and make the D9
+    // Draft→InDiscussion transition. If this fails, release the slot so the idea isn't stuck busy.
+    if let Err(e) = store::append_turn(&vault_dir, &slug, "user", &message) {
+        jobs::mark_done(&state.jobs, &slug);
+        return Err(e.into());
+    }
+    if idea.frontmatter.state == IdeaState::Draft {
+        idea.frontmatter.state = IdeaState::InDiscussion;
+        idea.frontmatter.updated = Utc::now();
+        let _ = store::write_idea(&vault_dir, &idea);
+    }
+    reindex_logged(&state);
+
+    // Detached: the reply outlives this request.
+    let task_state = state.clone();
+    let task_slug = slug.clone();
+    tokio::spawn(async move {
+        match run_chat(&task_state, &task_slug).await {
+            Ok(()) => jobs::mark_done(&task_state.jobs, &task_slug),
+            Err(msg) => jobs::mark_failed(&task_state.jobs, &task_slug, msg),
+        }
+    });
+
+    respond_with_transcript(&state, &slug)
+}
+
+/// The background half: assemble the budgeted context (which already includes the just-persisted
+/// user turn), call the model under the shared semaphore, and append the assistant turn. Returns a
+/// human-readable message on failure for the indicator to surface.
+async fn run_chat(state: &AppState, slug: &str) -> Result<(), String> {
+    let vault_dir = &state.config.vault_dir;
+    let context = memory::load::load_context(vault_dir, slug, ContextBudget::new(AI_BUDGET_BYTES))
+        .map_err(|e| e.to_string())?;
+    let prompt = format!("{FOIL_INSTRUCTION}\n\n{}", context.text);
 
     let reply = {
         let _permit = state
             .ai_semaphore
             .acquire()
             .await
-            .map_err(|_| WebError::Internal("ai semaphore closed".into()))?;
+            .map_err(|_| "the AI queue is shutting down".to_string())?;
         state
             .llm
             .chat(vec![ChatMessage {
                 role: "user".to_string(),
                 content: prompt,
             }])
-            .await?
-        // permit released before the vault writes below
+            .await
+            .map_err(|e| e.to_string())?
     };
+
     let reply = reply.trim();
-
-    // Success — now (and only now) persist both turns and make the D9 transition.
-    store::append_turn(&vault_dir, &slug, "user", &message)?;
-    if !reply.is_empty() {
-        store::append_turn(&vault_dir, &slug, "assistant", reply)?;
-    } else {
-        tracing::warn!(slug, "model returned an empty reply");
+    if reply.is_empty() {
+        return Err("the model returned an empty reply — try again".to_string());
     }
-    if idea.frontmatter.state == IdeaState::Draft {
-        idea.frontmatter.state = IdeaState::InDiscussion;
-        idea.frontmatter.updated = Utc::now();
-        store::write_idea(&vault_dir, &idea)?;
-    }
-    reindex_logged(&state);
-
-    render_transcript(&vault_dir, &slug)
+    store::append_turn(vault_dir, slug, "assistant", reply).map_err(|e| e.to_string())?;
+    reindex_logged(state);
+    Ok(())
 }

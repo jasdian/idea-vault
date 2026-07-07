@@ -281,3 +281,46 @@ h1.title {
   h1.title { font-size: 1.75rem; }
   .wrap { padding: 1.25rem 1rem 4rem; }
 }
+
+/* ---- background-job indicator, error, usage meter (server-driven) ------ */
+.empty-thread { color: var(--faint); font-style: italic; padding: .5rem 0 1rem; }
+
+.foil-pending {
+  display: flex; align-items: center; gap: .6rem; margin: 1rem 0 .5rem;
+  font-family: var(--mono); font-size: .82rem; color: var(--accent);
+}
+.foil-error {
+  margin: 1rem 0 .5rem; padding: .7rem .85rem; border-radius: var(--radius);
+  font-size: .95rem; color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--paper));
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+}
+.foil-error strong { font-family: var(--mono); font-size: .8rem; }
+
+.meter {
+  font-family: var(--mono); font-size: .72rem; color: var(--faint);
+  letter-spacing: .01em; margin: 1rem 0 .25rem; padding-top: .5rem;
+  border-top: 1px dashed var(--rule);
+}
+
+/* ---- capstone actions: generate build prompt + store ------------------- */
+.capstones { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .75rem; }
+.capstones form { margin: 0; }
+.chip--build {
+  border-color: var(--accent); color: var(--accent);
+  background: var(--accent-soft); font-weight: 600;
+}
+.chip--build::before { content: ""; }
+.chip--build:hover { filter: brightness(1.03); }
+
+/* ---- copy button injected onto generated code blocks ------------------- */
+.turn__body pre { position: relative; }
+.copy-btn {
+  position: absolute; top: .4rem; right: .4rem;
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .04em;
+  color: var(--muted); background: var(--surface);
+  border: 1px solid var(--rule-strong); border-radius: 5px;
+  padding: .15rem .45rem; cursor: pointer; opacity: 0; transition: opacity .12s ease;
+}
+.turn__body pre:hover .copy-btn, .copy-btn:focus { opacity: 1; }
+.copy-btn:hover { border-color: var(--accent); color: var(--accent); }

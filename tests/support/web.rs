@@ -48,6 +48,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
             llm: idea_vault::ai::LlmBackend::Ollama(ollama),
             ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
             skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
+            jobs: idea_vault::web::jobs::new_registry(),
         },
         vault_dir,
     )
@@ -100,4 +101,19 @@ pub async fn get(state: AppState, uri: &str) -> (StatusCode, String) {
     let status = resp.status();
     let bytes = resp.into_body().collect().await.expect("body").to_bytes();
     (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
+}
+
+/// Poll a GET route until its body contains `needle`, then return that body. For the async
+/// background-job model: a POST kicks off the work and the transcript fills in via `/pending`.
+/// Panics with the last body if the needle never appears.
+pub async fn poll_until(state: AppState, uri: &str, needle: &str) -> String {
+    for _ in 0..300 {
+        let (_, body) = get(state.clone(), uri).await;
+        if body.contains(needle) {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, body) = get(state, uri).await;
+    panic!("'{needle}' not found after polling {uri}; last body:\n{body}");
 }

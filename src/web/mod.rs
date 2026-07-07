@@ -5,6 +5,7 @@
 //! there, not here. Response shapes are full pages, HTMX partials (`templates/_*.html`), or SSE
 //! streams (docs/09-web-ui.md D16/D17).
 
+pub mod jobs;
 pub mod routes;
 pub mod templates;
 
