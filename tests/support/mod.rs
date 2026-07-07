@@ -5,6 +5,7 @@
 #![allow(dead_code)] // compiled once per test binary; not every binary uses every helper
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +17,9 @@ use tokio::net::{TcpListener, TcpStream};
 pub enum ChatScript {
     /// Stream each token as one NDJSON line, then `{done:true}`.
     Tokens(Vec<String>),
+    /// Like `Tokens`, but hold the response open for `delay_ms` first — makes concurrent calls
+    /// overlap deterministically for max-in-flight instrumentation (docs/10).
+    TokensAfterDelay { tokens: Vec<String>, delay_ms: u64 },
     /// Stream N filler tokens (`tok0`, `tok1`, …) then go silent without ever finishing —
     /// exercises the hard inactivity timeout.
     StallAfter(usize),
@@ -29,11 +33,20 @@ pub struct MockOllama {
     /// Raw bodies of every `/api/chat` request received, in arrival order — lets tests assert
     /// what context/prompt actually reached the model.
     pub chat_requests: Arc<Mutex<Vec<String>>>,
+    /// Concurrency gauge over `/api/chat`: (currently in flight, max ever observed) — the
+    /// instrumentation behind the max-in-flight == K keystone test (docs/10, ADR-0006).
+    chat_in_flight: Arc<AtomicUsize>,
+    chat_max_in_flight: Arc<AtomicUsize>,
 }
 
 impl MockOllama {
     pub fn chat_bodies(&self) -> Vec<String> {
         self.chat_requests.lock().unwrap().clone()
+    }
+
+    /// Highest number of `/api/chat` requests the mock ever served simultaneously.
+    pub fn max_in_flight(&self) -> usize {
+        self.chat_max_in_flight.load(Ordering::SeqCst)
     }
 }
 
@@ -89,6 +102,9 @@ async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
     .to_string();
     let chat_requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let chat_requests_srv = chat_requests.clone();
+    let chat_in_flight = Arc::new(AtomicUsize::new(0));
+    let chat_max_in_flight = Arc::new(AtomicUsize::new(0));
+    let gauge_srv = (chat_in_flight.clone(), chat_max_in_flight.clone());
 
     tokio::spawn(async move {
         loop {
@@ -98,8 +114,9 @@ async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
             let tags_body = tags_body.clone();
             let scripts = scripts.clone();
             let chat_requests = chat_requests_srv.clone();
+            let gauge = gauge_srv.clone();
             tokio::spawn(async move {
-                let _ = handle(sock, tags_body, scripts, chat_requests).await;
+                let _ = handle(sock, tags_body, scripts, chat_requests, gauge).await;
             });
         }
     });
@@ -107,6 +124,17 @@ async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
     MockOllama {
         url: format!("http://{addr}"),
         chat_requests,
+        chat_in_flight,
+        chat_max_in_flight,
+    }
+}
+
+/// Decrements the in-flight gauge on drop, so early returns and errors can't leak a count.
+struct InFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -115,6 +143,7 @@ async fn handle(
     tags_body: String,
     scripts: Scripts,
     chat_requests: Arc<Mutex<Vec<String>>>,
+    gauge: (Arc<AtomicUsize>, Arc<AtomicUsize>),
 ) -> std::io::Result<()> {
     // Read until the end of headers.
     let mut req = Vec::new();
@@ -170,6 +199,13 @@ async fn handle(
             .lock()
             .unwrap()
             .push(String::from_utf8_lossy(&body).into_owned());
+
+        // Gauge: track how many chat requests are being served simultaneously.
+        let (in_flight, max_in_flight) = &gauge;
+        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        max_in_flight.fetch_max(now, Ordering::SeqCst);
+        let _guard = InFlightGuard(in_flight.clone());
+
         let script = scripts.next();
         sock.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n",
@@ -183,6 +219,22 @@ async fn handle(
             )
         };
         match script {
+            ChatScript::TokensAfterDelay { tokens, delay_ms } => {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                for t in &tokens {
+                    sock.write_all(token_line(t).as_bytes()).await?;
+                    sock.flush().await?;
+                }
+                sock.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"message": {"content": ""}, "done": true})
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+                sock.flush().await?;
+            }
             ChatScript::Tokens(tokens) => {
                 for t in &tokens {
                     sock.write_all(token_line(t).as_bytes()).await?;

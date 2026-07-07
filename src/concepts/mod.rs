@@ -20,4 +20,8 @@ pub enum ConceptError {
     /// The process-wide AI semaphore was closed — only happens during shutdown.
     #[error("ai concurrency semaphore closed")]
     SemaphoreClosed,
+    /// Every fan-out agent failed, so there is nothing for the synthesizer to converge
+    /// (degrade-don't-abort stops at the point where there is no signal left, D14).
+    #[error("swarm produced no usable agent results to synthesize")]
+    NothingToSynthesize,
 }

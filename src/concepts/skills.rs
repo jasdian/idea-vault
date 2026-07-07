@@ -70,7 +70,8 @@ impl SkillRegistry {
 /// and assemble them under `budget` with `ai::budget` directly — per D4, `concepts` composes
 /// `vault` + `ai` itself rather than reaching through `memory` (whose `load_context` is the
 /// D13 reopen path; the gathering logic is intentionally parallel, not shared).
-fn hydrate_context(
+/// `pub(crate)`: `swarm` hydrates the same budgeted block once per fan-out (D14/D21).
+pub(crate) fn hydrate_context(
     vault_dir: &Path,
     idea_slug: &str,
     budget: ContextBudget,
