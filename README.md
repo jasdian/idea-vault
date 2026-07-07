@@ -46,6 +46,26 @@ docker compose down            # stop; named volumes (index, models) persist
 
 Until the model is pulled, the app runs fine but shows a **degraded AI** banner — by design.
 
+## Choosing a model
+
+The model is config, not code: set `IDEA_VAULT_OLLAMA_MODEL` in `.env` and re-run the
+`ollama-pull` one-shot. The workload here is rigorous multi-turn critique, strict-format memory
+extraction, and a K-bounded parallel swarm — reasoning quality and per-token speed matter more
+than raw parameter count, which is why small-active-parameter MoE models fit unusually well.
+Recommendations as of July 2026:
+
+| Hardware | Model | Why |
+|---|---|---|
+| 8 GB, CPU-only (**default**) | `qwen3.5:4b` | Mar 2026; thinking mode, 256K context, ~3 GB — the modern successor to the old `llama3.2` 3B slot |
+| 16 GB (sweet spot) | `gpt-oss:20b` | MoE, 21B total / **3.6B active**: ~o3-mini-level reasoning, native structured output + tool calling, 14 GB; snappy streaming and cheap parallel swarm calls |
+| 24 GB+ GPU | `qwen3.6:27b` or `gemma4:26b` | Near-frontier critique quality on consumer hardware |
+| Tiny / experiments | `qwen3.5:2b`, `phi-4-mini` | Fast smoke-level chat; noticeably weaker as a critical foil |
+
+Caveats: thinking-mode models emit 3–5× more tokens (fine for streamed chat, costly inside the
+swarm's shared concurrency budget), and slow CPU inference can brush against the app's hard
+token-timeout. `llama3.2` still works — it's just 2024-era; nothing in the app hardcodes any
+model name.
+
 ### GPU mode prerequisites (nvidia)
 
 GPU acceleration benefits **only** Ollama; the Rust app is identical either way. On the host:

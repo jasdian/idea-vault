@@ -34,7 +34,7 @@ const DEFAULT_BIND: &str = "127.0.0.1:3000";
 const DEFAULT_VAULT_DIR: &str = "./vault";
 const DEFAULT_INDEX_PATH: &str = "./index.db";
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
-const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
+const DEFAULT_OLLAMA_MODEL: &str = "qwen3.5:4b";
 const DEFAULT_AI_CONCURRENCY: usize = 2;
 
 impl Config {
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(cfg.vault_dir, PathBuf::from("./vault"));
         assert_eq!(cfg.index_path, PathBuf::from("./index.db"));
         assert_eq!(cfg.ollama_url, "http://localhost:11434");
-        assert_eq!(cfg.ollama_model, "llama3.2");
+        assert_eq!(cfg.ollama_model, "qwen3.5:4b");
         assert_eq!(cfg.ai_concurrency, 2);
     }
 

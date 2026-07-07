@@ -22,7 +22,7 @@ services:
       IDEA_VAULT_INDEX_PATH: "/data/index.db"
       # Reach Ollama over the compose network by service name, NOT localhost.
       IDEA_VAULT_OLLAMA_URL: "http://ollama:11434"
-      IDEA_VAULT_OLLAMA_MODEL: "${IDEA_VAULT_OLLAMA_MODEL:-llama3.2}"
+      IDEA_VAULT_OLLAMA_MODEL: "${IDEA_VAULT_OLLAMA_MODEL:-qwen3.5:4b}"
       RUST_LOG: "${RUST_LOG:-info}"
     ports:
       # Loopback-only: open http://localhost:3000 on the host, not exposed to LAN.
@@ -80,7 +80,7 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: "http://ollama:11434"
-    command: ["pull", "${IDEA_VAULT_OLLAMA_MODEL:-llama3.2}"]
+    command: ["pull", "${IDEA_VAULT_OLLAMA_MODEL:-qwen3.5:4b}"]
     restart: "no"
 
 volumes:

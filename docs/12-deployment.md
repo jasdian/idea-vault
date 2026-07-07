@@ -64,7 +64,7 @@ Containerization requires the app to stop assuming `localhost`. `config.rs`
 | `IDEA_VAULT_VAULT_DIR` | `./vault` | `/vault` | vault root ([03-data-model](./03-data-model.md)). |
 | `IDEA_VAULT_INDEX_PATH` | `./index.db` | `/data/index.db` | SQLite index path. |
 | `IDEA_VAULT_OLLAMA_URL` | `http://localhost:11434` | `http://ollama:11434` | Ollama base URL ([05-ai-integration](./05-ai-integration.md)). **No code path hardcodes `localhost:11434`.** |
-| `IDEA_VAULT_OLLAMA_MODEL` | `llama3.2` | `${IDEA_VAULT_OLLAMA_MODEL}` | default model, shared with the `ollama-pull` one-shot. |
+| `IDEA_VAULT_OLLAMA_MODEL` | `qwen3.5:4b` | `${IDEA_VAULT_OLLAMA_MODEL}` | default model, shared with the `ollama-pull` one-shot. |
 
 > This is the one behavioral change containers impose on the app design. It updates the boot
 > ([D25](./01-architecture.md)) "bind localhost" step and the Ollama client construction
