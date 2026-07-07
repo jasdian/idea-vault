@@ -74,6 +74,16 @@ impl IntoResponse for WebError {
             WebError::BadRequest(reason) => {
                 (StatusCode::BAD_REQUEST, format!("bad request: {reason}")).into_response()
             }
+            // AI-rooted failures are a degraded state, not an internal fault (D20/D24):
+            // the local model is down/slow — tell the owner, don't masquerade as a server bug.
+            WebError::Ai(_)
+            | WebError::Memory(crate::memory::MemoryError::Ai(_))
+            | WebError::Concept(crate::concepts::ConceptError::Ai(_)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AI is unavailable — check that Ollama is running and the model is pulled"
+                    .to_string(),
+            )
+                .into_response(),
             WebError::NotFound(what)
             | WebError::Vault(crate::vault::VaultError::IdeaNotFound(what)) => {
                 (StatusCode::NOT_FOUND, format!("not found: {what}")).into_response()

@@ -15,4 +15,7 @@ pub enum MemoryError {
     Vault(#[from] crate::vault::VaultError),
     #[error("ai error: {0}")]
     Ai(#[from] crate::ai::AiError),
+    /// The process-wide AI semaphore was closed — only happens during shutdown.
+    #[error("ai concurrency semaphore closed")]
+    SemaphoreClosed,
 }

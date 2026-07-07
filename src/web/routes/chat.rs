@@ -11,7 +11,6 @@ use crate::ai::budget::ContextBudget;
 use crate::ai::ollama::ChatMessage;
 use crate::app::AppState;
 use crate::domain::IdeaState;
-use crate::index::reindex;
 use crate::memory;
 use crate::vault::store;
 use crate::web::sse::{pump_tokens, sse_response, EventSender};
@@ -22,28 +21,13 @@ const FOIL_INSTRUCTION: &str = "You are a rigorous ideation foil. Engage with th
 steelman the owner's latest point first, then stress-test it from the angle they are not \
 looking at. Be concrete and brief.";
 
-/// Byte budget for one chat prompt (D21). Sized for small local models; the idea body always
-/// survives, memory and older turns trim first.
-const CHAT_BUDGET_BYTES: usize = 16 * 1024;
-
 #[derive(Debug, Deserialize)]
 pub struct ChatForm {
     #[serde(default)]
     pub message: String,
 }
 
-/// Rebuild the index, logging instead of failing the request — truth already landed and the
-/// next reindex reconciles (docs/03 "Consistency & failure model").
-fn reindex_logged(state: &AppState) {
-    match state.db.lock() {
-        Ok(mut conn) => {
-            if let Err(e) = reindex::reindex(&mut conn, &state.config.vault_dir) {
-                tracing::warn!(error = %e, "reindex after chat write failed; truth intact");
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "db mutex poisoned; skipping reindex"),
-    }
-}
+use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
 
 /// R9 — `POST /idea/{slug}/chat` — one discussion turn, streamed token-by-token over SSE (D11).
 ///
@@ -82,7 +66,7 @@ pub async fn chat(
 
     // Budgeted context (D21) — includes the just-appended user turn as the newest turn.
     let context =
-        memory::load::load_context(&vault_dir, &slug, ContextBudget::new(CHAT_BUDGET_BYTES))?;
+        memory::load::load_context(&vault_dir, &slug, ContextBudget::new(AI_BUDGET_BYTES))?;
     let messages = vec![ChatMessage {
         role: "user".to_string(),
         content: format!("{FOIL_INSTRUCTION}\n\n{}", context.text),

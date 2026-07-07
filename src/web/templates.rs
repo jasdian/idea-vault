@@ -65,6 +65,9 @@ pub struct Turn {
 pub struct Discussion {
     pub slug: String,
     pub ai_available: bool,
+    /// Whether Store is a legal D9 transition from the idea's current state
+    /// (InDiscussion/Reopened yes; Draft no — the UI must not offer a guaranteed 400).
+    pub can_store: bool,
     /// The D20 per-state remedy shown in the banner when AI is unavailable
     /// (`ollama serve` for Unreachable, `ollama pull <model>` for ModelMissing).
     pub unavailable_hint: String,

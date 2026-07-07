@@ -7,6 +7,12 @@
     <textarea name="message" placeholder="Push the idea…" rows="3"></textarea>
     <button type="submit">Send</button>
   </form>
+  {% if can_store %}
+  <form hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
+        title="Consolidate the idea and extract memory (D12)">
+    <button type="submit">Store it in the vault</button>
+  </form>
+  {% endif %}
   {% else %}
   <p class="banner">AI is unavailable — {{ unavailable_hint }}. Browsing still works;
     the compose box is disabled until the model is ready.</p>

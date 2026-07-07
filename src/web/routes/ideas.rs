@@ -37,26 +37,17 @@ fn turn_role_and_content(turn: &str) -> (String, String) {
     }
 }
 
-/// Render the state-dependent lower panel: `_stored.html` for a Stored idea (reopen button),
-/// `_discussion.html` (transcript + compose box, disabled when AI is unavailable — D20) for
-/// every discussion state. Pre-rendered so the partials stay the single source of truth for
-/// both this full page and the HTMX swaps that replace `#discussion` later.
-fn render_panel(
-    idea: &Idea,
+/// Build the discussion pane for any discussion-state idea: rendered transcript turns plus the
+/// D20 availability state with its per-state remedy copy. Shared with the reopen route (R5),
+/// which returns this partial directly.
+pub(crate) fn build_discussion(
+    slug: &str,
     conversation: &str,
     health: crate::ai::AiHealth,
     model: &str,
-) -> Result<String, WebError> {
+    can_store: bool,
+) -> Result<crate::web::templates::Discussion, WebError> {
     use askama::Template as _;
-
-    if idea.frontmatter.state == IdeaState::Stored {
-        return crate::web::templates::Stored {
-            slug: idea.frontmatter.slug.clone(),
-            body_html: crate::web::templates::render_markdown(&idea.body),
-        }
-        .render()
-        .map_err(|e| WebError::Internal(format!("template render: {e}")));
-    }
 
     // D20 per-state remedy copy (docs/05-ai-integration.md).
     let (ai_available, unavailable_hint) = match health {
@@ -83,12 +74,45 @@ fn render_panel(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    crate::web::templates::Discussion {
-        slug: idea.frontmatter.slug.clone(),
+    Ok(crate::web::templates::Discussion {
+        slug: slug.to_string(),
         ai_available,
+        can_store,
         unavailable_hint,
         turns_html,
+    })
+}
+
+/// Render the state-dependent lower panel: `_stored.html` for a Stored idea (reopen button),
+/// `_discussion.html` (transcript + compose box, disabled when AI is unavailable — D20) for
+/// every discussion state. Pre-rendered so the partials stay the single source of truth for
+/// both this full page and the HTMX swaps that replace `#discussion` later.
+fn render_panel(
+    idea: &Idea,
+    conversation: &str,
+    health: crate::ai::AiHealth,
+    model: &str,
+) -> Result<String, WebError> {
+    use askama::Template as _;
+
+    if idea.frontmatter.state == IdeaState::Stored {
+        return crate::web::templates::Stored {
+            slug: idea.frontmatter.slug.clone(),
+            body_html: crate::web::templates::render_markdown(&idea.body),
+        }
+        .render()
+        .map_err(|e| WebError::Internal(format!("template render: {e}")));
     }
+
+    // Store is legal only from InDiscussion/Reopened (D9) — a Draft page must not offer it.
+    let can_store = idea.frontmatter.state != IdeaState::Draft;
+    build_discussion(
+        &idea.frontmatter.slug,
+        conversation,
+        health,
+        model,
+        can_store,
+    )?
     .render()
     .map_err(|e| WebError::Internal(format!("template render: {e}")))
 }

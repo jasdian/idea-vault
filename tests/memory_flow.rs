@@ -34,6 +34,10 @@ fn seed_idea(vault: &Path, slug: &str) {
     store::append_conversation(vault, slug, "## assistant\ndigging\n").unwrap();
 }
 
+fn sem() -> std::sync::Arc<tokio::sync::Semaphore> {
+    std::sync::Arc::new(tokio::sync::Semaphore::new(2))
+}
+
 fn tokens(text: &str) -> ChatScript {
     ChatScript::Tokens(vec![text.to_string()])
 }
@@ -55,9 +59,10 @@ async fn store_consolidates_extracts_and_rebuilds_memory_index() {
     let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
 
     let convo_before = store::read_conversation(tmp.path(), "i").unwrap();
-    let outcome = extract::extract_and_store(&client, tmp.path(), "i", ContextBudget::new(4096))
-        .await
-        .unwrap();
+    let outcome =
+        extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
+            .await
+            .unwrap();
 
     // Consolidated body written, state flipped to stored — canonical in frontmatter.
     let idea = store::read_idea(tmp.path(), "i").unwrap();
@@ -95,7 +100,7 @@ async fn restore_merges_and_dedupes_memory_only_grows() {
     )
     .await;
     let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
-    extract::extract_and_store(&client, tmp.path(), "i", ContextBudget::new(4096))
+    extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
         .await
         .unwrap();
     let first_body = store::read_memory_facts(tmp.path(), "i").unwrap()[0]
@@ -112,9 +117,10 @@ async fn restore_merges_and_dedupes_memory_only_grows() {
     )
     .await;
     let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
-    let outcome = extract::extract_and_store(&client, tmp.path(), "i", ContextBudget::new(4096))
-        .await
-        .unwrap();
+    let outcome =
+        extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
+            .await
+            .unwrap();
 
     // Dedupe by slug: the duplicate is skipped (existing body untouched), the new one added.
     assert_eq!(outcome.new_facts, 1);
@@ -142,7 +148,9 @@ async fn unreachable_model_aborts_store_with_truth_untouched() {
     let before_idea = store::read_idea(tmp.path(), "i").unwrap();
 
     let client = OllamaClient::new(refused_url().await, "llama3.2").unwrap();
-    let err = extract::extract_and_store(&client, tmp.path(), "i", ContextBudget::new(4096)).await;
+    let err =
+        extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
+            .await;
     assert!(err.is_err());
 
     // Nothing written: body, state, and (absence of) memory all unchanged.
@@ -168,7 +176,7 @@ async fn load_context_is_memory_first_and_truth_idempotent() {
     )
     .await;
     let client = OllamaClient::new(mock.url.clone(), "llama3.2").unwrap();
-    extract::extract_and_store(&client, tmp.path(), "i", ContextBudget::new(4096))
+    extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
         .await
         .unwrap();
     let idea_before = store::read_idea(tmp.path(), "i").unwrap();

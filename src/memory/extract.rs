@@ -80,6 +80,7 @@ fn parse_facts(raw: &str) -> Vec<(String, String)> {
 /// exists", D9) are the caller's job. The caller must reindex afterwards — truth first.
 pub async fn extract_and_store(
     ollama: &OllamaClient,
+    ai_semaphore: &tokio::sync::Semaphore,
     vault_dir: &Path,
     slug: &str,
     budget: ContextBudget,
@@ -98,19 +99,28 @@ pub async fn extract_and_store(
         },
     );
 
-    // Both AI calls happen BEFORE any write: a model failure aborts the store with truth intact.
-    let consolidated = ollama
-        .chat(vec![ChatMessage {
-            role: "user".to_string(),
-            content: format!("{CONSOLIDATE_INSTRUCTION}\n\n{}", context.text),
-        }])
-        .await?;
-    let facts_raw = ollama
-        .chat(vec![ChatMessage {
-            role: "user".to_string(),
-            content: format!("{EXTRACT_INSTRUCTION}\n\n{}", context.text),
-        }])
-        .await?;
+    // Both AI calls happen BEFORE any write: a model failure aborts the store with truth
+    // intact. One permit covers exactly the two sequential calls (one bounded operation,
+    // ADR-0006) and is released before parsing/writes — callers must NOT already hold one.
+    let (consolidated, facts_raw) = {
+        let _permit = ai_semaphore
+            .acquire()
+            .await
+            .map_err(|_| MemoryError::SemaphoreClosed)?;
+        let consolidated = ollama
+            .chat(vec![ChatMessage {
+                role: "user".to_string(),
+                content: format!("{CONSOLIDATE_INSTRUCTION}\n\n{}", context.text),
+            }])
+            .await?;
+        let facts_raw = ollama
+            .chat(vec![ChatMessage {
+                role: "user".to_string(),
+                content: format!("{EXTRACT_INSTRUCTION}\n\n{}", context.text),
+            }])
+            .await?;
+        (consolidated, facts_raw)
+    };
 
     // Consolidate-then-distil (D12): the body is rewritten to the best statement; an empty
     // model response falls back to keeping the current body rather than erasing truth.
