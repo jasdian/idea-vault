@@ -38,6 +38,7 @@ ammonia = "4"
 # streams (SSE plumbing, D11)
 futures = "0.3"
 tokio-stream = "0.1"
+bytes = "1"
 
 # assets (single-binary: htmx/CSS embedded — ADR-0001, docs/12)
 rust-embed = "8"

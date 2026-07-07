@@ -25,4 +25,14 @@ pub enum AiError {
 
     #[error("http error talking to Ollama: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// Hard timeout (D20): no token/response activity within the configured window. The caller
+    /// aborts, surfaces the degraded state, and must NOT persist a partial assistant turn.
+    #[error("ollama timed out (no activity within the hard-timeout window)")]
+    Timeout,
+
+    /// Ollama spoke something other than the expected NDJSON chat protocol (e.g. the stream
+    /// ended before `done: true`). Treated like an aborted call — nothing partial becomes truth.
+    #[error("ollama protocol error: {0}")]
+    Protocol(String),
 }

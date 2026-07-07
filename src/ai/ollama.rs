@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::ai::AiError;
@@ -16,6 +18,18 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Connect timeout applied to every request made by an [`OllamaClient`].
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Default hard timeout between token chunks (D20). Local models can be slow per token but a
+/// gap this long means the call is wedged — abort rather than hang the SSE stream forever.
+const DEFAULT_TOKEN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Upper bound on one buffered NDJSON line: a single chat chunk is tiny, so anything past this
+/// is a broken peer, not a token.
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// A live token stream from `/api/chat`: each item is one content chunk, in order. The stream
+/// ends after Ollama's `done: true`; an `Err` item (timeout/protocol/transport) is terminal.
+pub type TokenStream = BoxStream<'static, Result<String, AiError>>;
 
 /// Result of probing the local Ollama server (docs/05-ai-integration.md D20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +62,28 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// One NDJSON line of Ollama's streaming `/api/chat` response — only the fields we need.
+#[derive(Debug, Deserialize)]
+struct ChatChunk {
+    #[serde(default)]
+    message: Option<ChatChunkMessage>,
+    #[serde(default)]
+    done: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChunkMessage {
+    #[serde(default)]
+    content: String,
+}
+
 /// Client for the local Ollama server. Cheap to clone (wraps a pooled `reqwest::Client`).
 #[derive(Clone)]
 pub struct OllamaClient {
     http: reqwest::Client,
     base_url: String,
     model: String,
+    token_timeout: Duration,
 }
 
 impl OllamaClient {
@@ -70,7 +100,15 @@ impl OllamaClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             model: model.into(),
+            token_timeout: DEFAULT_TOKEN_TIMEOUT,
         })
+    }
+
+    /// Override the hard inactivity timeout applied to the initial response and to every
+    /// token gap of [`chat_stream`](Self::chat_stream) (D20 hard timeout).
+    pub fn with_token_timeout(mut self, token_timeout: Duration) -> Self {
+        self.token_timeout = token_timeout;
+        self
     }
 
     /// The configured model tag (e.g. `llama3.2`).
@@ -110,14 +148,115 @@ impl OllamaClient {
         }
     }
 
-    /// Stream a chat completion from Ollama (`POST /api/chat`, `stream: true`).
+    /// Stream a chat completion from Ollama (`POST /api/chat`, `stream: true`, D11).
     ///
-    /// TODO(chat): see docs/05-ai-integration.md D11 — POST /api/chat with stream:true, decode
-    /// the NDJSON `{message: {content: "..."}}` chunks token-by-token until `{done: true}`,
-    /// acquiring the process-wide concurrency semaphore (ADR-0006) before issuing the request and
-    /// releasing it on completion or client disconnect.
-    pub async fn chat_stream(&self, _messages: Vec<ChatMessage>) -> Result<(), AiError> {
-        Err(AiError::NotImplemented("ai::ollama::chat_stream"))
+    /// Yields one content chunk per NDJSON line until `done: true`; the stream then ends. Any
+    /// error item (hard timeout on a token gap, transport failure, or a protocol violation such
+    /// as EOF before `done`) is terminal — callers must treat the turn as aborted and never
+    /// persist the partial text (docs/05: "a partial turn must not become truth").
+    ///
+    /// Concurrency note: acquiring the process-wide semaphore (ADR-0006) is the caller's job —
+    /// this module has no access to `AppState`. Dropping the returned stream aborts the request.
+    pub async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<TokenStream, AiError> {
+        let url = format!("{}/api/chat", self.base_url);
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "stream": true,
+        });
+
+        let response =
+            tokio::time::timeout(self.token_timeout, self.http.post(&url).json(&body).send())
+                .await
+                .map_err(|_| AiError::Timeout)??
+                .error_for_status()?;
+
+        struct StreamState {
+            body: BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>,
+            buf: Vec<u8>,
+            token_timeout: Duration,
+            finished: bool,
+        }
+
+        let state = StreamState {
+            body: response.bytes_stream().boxed(),
+            buf: Vec::new(),
+            token_timeout: self.token_timeout,
+            finished: false,
+        };
+
+        Ok(futures::stream::unfold(state, |mut st| async move {
+            if st.finished {
+                return None;
+            }
+            loop {
+                // Drain complete NDJSON lines already buffered.
+                while let Some(pos) = st.buf.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = st.buf.drain(..=pos).collect();
+                    let line = &line[..line.len() - 1];
+                    let line = line.strip_suffix(b"\r").unwrap_or(line);
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let chunk: ChatChunk = match serde_json::from_slice(line) {
+                        Ok(chunk) => chunk,
+                        Err(e) => {
+                            st.finished = true;
+                            return Some((
+                                Err(AiError::Protocol(format!("bad NDJSON chat line: {e}"))),
+                                st,
+                            ));
+                        }
+                    };
+                    if chunk.done {
+                        st.finished = true;
+                    }
+                    let content = chunk.message.map(|m| m.content).unwrap_or_default();
+                    if !content.is_empty() {
+                        return Some((Ok(content), st));
+                    }
+                    if st.finished {
+                        return None;
+                    }
+                }
+
+                // Need more bytes: every gap is bounded by the hard timeout (D20).
+                match tokio::time::timeout(st.token_timeout, st.body.next()).await {
+                    Err(_) => {
+                        st.finished = true;
+                        return Some((Err(AiError::Timeout), st));
+                    }
+                    Ok(None) => {
+                        st.finished = true;
+                        return Some((
+                            Err(AiError::Protocol(
+                                "stream ended before done: true".to_string(),
+                            )),
+                            st,
+                        ));
+                    }
+                    Ok(Some(Err(e))) => {
+                        st.finished = true;
+                        return Some((Err(AiError::Http(e)), st));
+                    }
+                    Ok(Some(Ok(bytes))) => {
+                        st.buf.extend_from_slice(&bytes);
+                        // The hard timeout bounds *time*; this bounds *bytes* — a peer that
+                        // never sends a newline must not grow the buffer without limit.
+                        if st.buf.len() > MAX_LINE_BYTES {
+                            st.finished = true;
+                            return Some((
+                                Err(AiError::Protocol(format!(
+                                    "NDJSON line exceeded {MAX_LINE_BYTES} bytes"
+                                ))),
+                                st,
+                            ));
+                        }
+                    }
+                }
+            }
+        })
+        .boxed())
     }
 }
 
