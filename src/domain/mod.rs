@@ -2,13 +2,15 @@
 //! idea lifecycle state machine (docs/04-state-machine.md D9). No I/O here — see `vault` for
 //! reading/writing files on disk.
 
+pub mod compacted;
 pub mod frontmatter;
 pub mod idea;
 pub mod links;
 pub mod memory;
 pub mod slug;
 
-pub use frontmatter::{IdeaFrontmatter, MemoryFactFrontmatter};
+pub use compacted::Compacted;
+pub use frontmatter::{CompactedFrontmatter, IdeaFrontmatter, MemoryFactFrontmatter};
 pub use idea::{Idea, IdeaState};
 pub use memory::{MemoryFact, MemoryIndex};
 

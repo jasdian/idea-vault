@@ -96,6 +96,9 @@ pub async fn extract_and_store(
         ContextInput {
             idea_body: &idea.body,
             memory: &[],
+            // Store distils the FULL verbatim transcript (the high-fidelity backstop); it never
+            // substitutes the lossy rolling summary and never reads compacted.md (docs/adr/0012).
+            summary: None,
             turns: &turns,
         },
     );

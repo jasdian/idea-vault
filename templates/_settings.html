@@ -36,5 +36,18 @@
     </label>
   </div>
 
+  <fieldset class="settings__group">
+    <legend>auto-compact</legend>
+    <label class="opt">
+      <input type="checkbox" name="auto_compact" value="true" {% if auto_compact %}checked{% endif %} />
+      <span>Fold older turns into a rolling summary as the discussion grows</span>
+    </label>
+    <label class="field">
+      <span class="field__label">compact at</span>
+      <input type="number" name="compact_threshold" min="0.5" max="0.95" step="0.05" value="{{ compact_threshold }}" />
+      <span class="field__hint">fraction of the context budget (0.50–0.95) before a fold fires</span>
+    </label>
+  </fieldset>
+
   <button type="submit" class="btn">Save settings</button>
 </form>

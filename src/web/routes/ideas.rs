@@ -89,14 +89,25 @@ fn esc(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// The quiet usage line: turns, approximate context vs budget, and the model in use. Answers
-/// "what is being sent and to whom" at a glance.
-fn meter_line(model: &str, turns: usize, bytes: usize) -> String {
-    let kb = bytes.div_ceil(1024);
+/// The quiet usage line: turns, the *effective* context vs budget (summary + verbatim tail when a
+/// fold applies, not the raw transcript), and the model in use. Answers "what is being sent and to
+/// whom" at a glance — and, crucially, drops after a compaction instead of pinning at full
+/// (auto-compact meter honesty, docs/adr/0012).
+fn meter_line(
+    model: &str,
+    turns: usize,
+    effective_bytes: usize,
+    compacted_through: Option<usize>,
+) -> String {
+    let kb = effective_bytes.div_ceil(1024);
     let budget_kb = crate::web::routes::AI_BUDGET_BYTES / 1024;
     let plural = if turns == 1 { "" } else { "s" };
+    let compacted = match compacted_through {
+        Some(k) => format!(" · compacted through turn {k}"),
+        None => String::new(),
+    };
     format!(
-        r#"<div class="meter">{turns} turn{plural} · ~{kb} KB of ~{budget_kb} KB context · {model}</div>"#,
+        r#"<div class="meter">{turns} turn{plural} · ~{kb} KB of ~{budget_kb} KB context · {model}{compacted}</div>"#,
         model = esc(model)
     )
 }
@@ -122,29 +133,50 @@ fn error_block(message: &str) -> String {
 /// goes through — the idea page, the poll endpoint, and chat/skill/swarm/delete all emit it, so
 /// the view is identical whether freshly loaded or swapped in.
 pub(crate) fn transcript_inner(
+    vault_dir: &std::path::Path,
     slug: &str,
     model: &str,
     conversation: &str,
     pending: crate::web::jobs::Pending,
 ) -> Result<String, WebError> {
     use crate::web::jobs::Pending;
-    let turns = turns_to_html(slug, conversation)?;
+    let turns_html = turns_to_html(slug, conversation)?;
+
+    // Effective context (auto-compact, docs/adr/0012): read the sidecar once and resolve the
+    // fingerprint. Cheap — one small file read + an O(k) sum, not a full load_context. A corrupt
+    // cache reads as absent, so it never breaks the page.
+    let all_turns = store::split_turns(conversation);
+    let compacted = store::read_compacted(vault_dir, slug).unwrap_or(None);
+    let win = crate::memory::compact::effective_window(&all_turns, compacted.as_ref());
+
     let mut html = String::new();
-    if turns.is_empty() && matches!(pending, Pending::Idle) {
+    if turns_html.is_empty() && matches!(pending, Pending::Idle) {
         html.push_str(
             r#"<p class="empty-thread">No exchange yet. Push the idea below and let the foil break it.</p>"#,
         );
     }
-    html.push_str(&turns.concat());
+    html.push_str(&turns_html.concat());
     match pending {
         Pending::Running(secs) => html.push_str(&pending_block(slug, secs)),
         Pending::Failed(msg) => html.push_str(&error_block(&msg)),
         Pending::Idle => {}
     }
+    // The full transcript is never hidden (every turn is rendered above); this collapsible
+    // disclosure just reveals the derived summary the model actually sees for the folded head, so
+    // the owner sees exactly what it sees. Only shown when a valid fold applies.
+    if win.applied.is_some() {
+        if let Some(c) = &compacted {
+            html.push_str(&format!(
+                r#"<details class="summary-disclosure"><summary>Summary of earlier turns (used for AI context)</summary><div class="summary-disclosure__body">{}</div></details>"#,
+                crate::web::templates::render_markdown(&c.summary)
+            ));
+        }
+    }
     html.push_str(&meter_line(
         model,
-        store::split_turns(conversation).len(),
-        conversation.len(),
+        all_turns.len(),
+        win.effective_bytes,
+        win.compacted_through,
     ));
     Ok(html)
 }
@@ -158,6 +190,7 @@ pub(crate) fn respond_with_transcript(
     let conversation = store::read_conversation(&state.config.vault_dir, slug)?;
     let pending = crate::web::jobs::peek(&state.jobs, slug);
     Ok(axum::response::Html(transcript_inner(
+        &state.config.vault_dir,
         slug,
         &state.llm.model(),
         &conversation,
@@ -200,6 +233,7 @@ pub async fn history_page(
     let idea = store::read_idea(vault_dir, &slug)?; // 404 if missing
     let conversation = store::read_conversation(vault_dir, &slug)?;
     let transcript_html = transcript_inner(
+        vault_dir,
         &slug,
         &state.llm.model(),
         &conversation,
@@ -287,7 +321,9 @@ pub async fn delete_idea(
 /// Build the discussion pane for any discussion-state idea: rendered transcript turns plus the
 /// D20 availability state with its per-state remedy copy. Shared with the reopen route (R5),
 /// which returns this partial directly.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_discussion(
+    vault_dir: &std::path::Path,
     slug: &str,
     conversation: &str,
     health: crate::ai::AiHealth,
@@ -310,7 +346,7 @@ pub(crate) fn build_discussion(
 
     // The #transcript inner is the one shared renderer — so a fresh page load carries the same
     // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
-    let transcript_html = transcript_inner(slug, model, conversation, pending)?;
+    let transcript_html = transcript_inner(vault_dir, slug, model, conversation, pending)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),
@@ -327,6 +363,7 @@ pub(crate) fn build_discussion(
 /// every discussion state. Pre-rendered so the partials stay the single source of truth for
 /// both this full page and the HTMX swaps that replace `#discussion` later.
 fn render_panel(
+    vault_dir: &std::path::Path,
     idea: &Idea,
     conversation: &str,
     health: crate::ai::AiHealth,
@@ -348,6 +385,7 @@ fn render_panel(
     // Store is legal only from InDiscussion/Reopened (D9) — a Draft page must not offer it.
     let can_store = idea.frontmatter.state != IdeaState::Draft;
     build_discussion(
+        vault_dir,
         &idea.frontmatter.slug,
         conversation,
         health,
@@ -381,6 +419,7 @@ pub async fn idea_page(
     // If a background job is running for this idea, this resumes its indicator on the fresh page.
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     let panel_html = render_panel(
+        vault_dir,
         &idea,
         &conversation,
         health,

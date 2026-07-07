@@ -26,6 +26,12 @@ pub struct LlmSettings {
     /// claude-code reasoning effort (`low`/`medium`/`high`) — injected as a system-prompt hint,
     /// since the CLI has no per-call effort flag.
     pub claude_effort: String,
+    /// Auto-compact (docs/adr/0012): fold the conversation head into a rolling summary before a
+    /// chat turn once the context gets large. Live-tunable on the Settings page.
+    pub auto_compact: bool,
+    /// The effective-size fraction of the AI budget at which auto-compact fires (clamped
+    /// 0.5..=0.95).
+    pub compact_threshold: f32,
 }
 
 /// The live LLM router: both backends available, dispatch chosen per-call from [`LlmSettings`].
@@ -67,6 +73,8 @@ impl LlmBackend {
                 temperature: 0.7,
                 claude_model: String::new(),
                 claude_effort: "high".to_string(),
+                auto_compact: true,
+                compact_threshold: 0.80,
             },
         )
     }

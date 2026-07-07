@@ -19,6 +19,22 @@ pub struct IdeaFrontmatter {
     pub updated: DateTime<Utc>,
 }
 
+/// The structured header of a `compacted.md` sidecar — the derived rolling summary of the
+/// conversation head (auto-compact, docs/adr/0012). `covered_bytes` is a staleness fingerprint
+/// over `turns[0..compacted_through]`; `compacted.md` is a *deletable cache*, never truth.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CompactedFrontmatter {
+    /// `k`: `turns[0..k]` (in `store::split_turns` order) are folded into the summary body.
+    pub compacted_through: usize,
+    /// Σ `prefix_bytes(turns, k)` at write time — the fingerprint that detects a mutated prefix.
+    pub covered_bytes: usize,
+    /// `n` (total turn count) at write time — for display / staleness UI only.
+    pub turn_count_at_compaction: usize,
+    /// The model that produced the summary — provenance.
+    pub model: String,
+    pub updated: DateTime<Utc>,
+}
+
 /// The (lighter) structured header of a `memory/<fact-slug>.md` file.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MemoryFactFrontmatter {
@@ -105,6 +121,22 @@ pub fn parse_idea(input: &str) -> Result<(IdeaFrontmatter, String), DomainError>
 /// Serialization of these plain-data fields cannot fail in practice; the error is propagated
 /// anyway (defense in depth — no panic paths in library code).
 pub fn emit_idea(fm: &IdeaFrontmatter, body: &str) -> Result<String, DomainError> {
+    let yaml = serde_norway::to_string(fm)?;
+    Ok(emit_fence(&yaml, body))
+}
+
+/// Parse a `compacted.md` sidecar into its frontmatter and summary body.
+pub fn parse_compacted(input: &str) -> Result<(CompactedFrontmatter, String), DomainError> {
+    let (yaml, body) = split_fence(input)?;
+    let fm: CompactedFrontmatter = serde_norway::from_str(yaml)?;
+    Ok((fm, body.to_string()))
+}
+
+/// Render a `compacted.md` sidecar from frontmatter and summary body.
+///
+/// Serialization of these plain-data fields cannot fail in practice; the error is propagated
+/// anyway (defense in depth — no panic paths in library code).
+pub fn emit_compacted(fm: &CompactedFrontmatter, body: &str) -> Result<String, DomainError> {
     let yaml = serde_norway::to_string(fm)?;
     Ok(emit_fence(&yaml, body))
 }
@@ -228,6 +260,22 @@ body\n";
         assert_eq!(fm, fm2);
         assert_eq!(body, body2);
         assert_eq!(fm2.links, vec!["distributed-idea-market", "other-idea"]);
+    }
+
+    #[test]
+    fn compacted_roundtrip_preserves_every_field_and_body() {
+        let fm = CompactedFrontmatter {
+            compacted_through: 7,
+            covered_bytes: 15234,
+            turn_count_at_compaction: 12,
+            model: "qwen3-8b-local".into(),
+            updated: dt("2026-07-07T10:15:00Z"),
+        };
+        let body = "## Decisions\n- kept the sidecar\n## Open threads\n- none\n";
+        let emitted = emit_compacted(&fm, body).unwrap();
+        let (fm2, body2) = parse_compacted(&emitted).unwrap();
+        assert_eq!(fm, fm2);
+        assert_eq!(body, body2);
     }
 
     #[test]

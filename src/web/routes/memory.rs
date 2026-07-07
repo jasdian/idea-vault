@@ -106,6 +106,7 @@ pub async fn reopen_idea(
     let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     build_discussion(
+        &vault_dir,
         &slug,
         &conversation,
         health,

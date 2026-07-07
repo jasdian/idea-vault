@@ -40,6 +40,8 @@ fn test_state() -> AppState {
             timeout: std::time::Duration::from_secs(5),
             effort: "high".to_string(),
         },
+        auto_compact: true,
+        compact_threshold: 0.80,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");

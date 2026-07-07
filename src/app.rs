@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::web::routes::{admin, chat, ideas, memory, settings};
+use crate::web::routes::{admin, chat, compact, ideas, memory, settings};
 
 /// Cloneable shared state injected into handlers (docs/01-architecture.md "Cross-cutting concerns").
 #[derive(Clone)]
@@ -52,6 +52,8 @@ pub fn build_router(state: AppState) -> Router {
         // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))
         .route("/idea/{slug}/pending", get(ideas::pending))
+        // Manual auto-compact fold (docs/adr/0012).
+        .route("/idea/{slug}/compact", post(compact::compact))
         // The "btw" history view + fork-to-new-idea.
         .route("/idea/{slug}/history", get(ideas::history_page))
         .route("/idea/{slug}/fork", post(ideas::fork_idea))

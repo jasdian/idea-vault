@@ -3,6 +3,7 @@
 //! See docs/06-concepts/memory.md.
 
 pub mod backlinks;
+pub mod compact;
 pub mod extract;
 pub mod load;
 
@@ -15,6 +16,10 @@ pub enum MemoryError {
     Vault(#[from] crate::vault::VaultError),
     #[error("ai error: {0}")]
     Ai(#[from] crate::ai::AiError),
+    /// The compaction fold call returned no usable summary — the previous `compacted.md` is left
+    /// intact (mirrors `extract_and_store`'s "model failure aborts with truth intact").
+    #[error("compaction produced no summary")]
+    EmptyCompaction,
     /// The process-wide AI semaphore was closed — only happens during shutdown.
     #[error("ai concurrency semaphore closed")]
     SemaphoreClosed,

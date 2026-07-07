@@ -64,7 +64,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D28) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0011 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0012 | — |
 
 ## Locked decisions (at a glance)
 
@@ -75,6 +75,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Code:** single crate, strict one-way module deps ([ADR-0005](./adr/0005-single-crate-vs-workspace.md)).
 - **Swarm:** bounded concurrency + context budget ([ADR-0006](./adr/0006-bounded-concurrency-swarm.md)).
 - **State:** canonical in frontmatter ([ADR-0007](./adr/0007-state-in-frontmatter-not-db.md)).
+- **Auto-compact:** a fingerprinted, deletable `compacted.md` sidecar rolls up the conversation head, folded pre-emptively and best-effort before each reply ([ADR-0012](./adr/0012-auto-compact.md)).
 - **Deployment:** app + Ollama in containers, GPU optional (override), env-driven config ([ADR-0008](./adr/0008-containerized-local-deployment.md)).
 
 ## Beyond these docs

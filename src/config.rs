@@ -38,6 +38,12 @@ pub struct Config {
     pub llm_backend: LlmBackendKind,
     /// claude-code backend settings (both backends are always constructed so the toggle is live).
     pub claude: ClaudeSettings,
+    /// Auto-compact enabled at boot (docs/adr/0012). Live-retunable on the Settings page. Defaults
+    /// on: with silent-drop as the pre-auto-compact failure mode, folding on is the safer default.
+    pub auto_compact: bool,
+    /// The effective-size fraction of the AI budget at which auto-compact fires (default 0.80,
+    /// clamped 0.5..=0.95).
+    pub compact_threshold: f32,
 }
 
 /// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
@@ -74,6 +80,8 @@ const DEFAULT_CLAUDE_BIN: &str = "claude";
 const DEFAULT_CLAUDE_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_OLLAMA_TEMPERATURE: f32 = 0.7;
 const DEFAULT_CLAUDE_EFFORT: &str = "high";
+const DEFAULT_AUTO_COMPACT: bool = true;
+const DEFAULT_COMPACT_THRESHOLD: f32 = 0.80;
 
 impl Config {
     /// Build configuration from the real process environment.
@@ -149,6 +157,16 @@ impl Config {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_CLAUDE_EFFORT.to_string());
 
+        // Auto-compact (docs/adr/0012): on unless explicitly `false`/`0`.
+        let auto_compact = lookup("IDEA_VAULT_AUTO_COMPACT")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(DEFAULT_AUTO_COMPACT);
+        // Threshold fraction of the AI budget; out-of-range or unparsable falls back to default.
+        let compact_threshold = lookup("IDEA_VAULT_COMPACT_THRESHOLD")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|t| (0.5..=0.95).contains(t))
+            .unwrap_or(DEFAULT_COMPACT_THRESHOLD);
+
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
                 .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
@@ -179,6 +197,8 @@ impl Config {
             ollama_temperature,
             llm_backend,
             claude,
+            auto_compact,
+            compact_threshold,
         }
     }
 }
@@ -239,6 +259,36 @@ mod tests {
         assert!(cfg.claude.add_dirs.is_empty());
         assert!(cfg.claude.skip_permissions);
         assert_eq!(cfg.claude.timeout, std::time::Duration::from_secs(300));
+        // Auto-compact defaults on, threshold 0.80.
+        assert!(cfg.auto_compact);
+        assert_eq!(cfg.compact_threshold, 0.80);
+    }
+
+    #[test]
+    fn auto_compact_and_threshold_override_and_clamp() {
+        // Explicit disable + in-range threshold.
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_AUTO_COMPACT", "false");
+        map.insert("IDEA_VAULT_COMPACT_THRESHOLD", "0.9");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert!(!cfg.auto_compact);
+        assert_eq!(cfg.compact_threshold, 0.9);
+
+        // Out-of-range threshold falls back to default; "0" also disables auto-compact.
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_AUTO_COMPACT", "0");
+        map.insert("IDEA_VAULT_COMPACT_THRESHOLD", "0.2");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert!(!cfg.auto_compact);
+        assert_eq!(cfg.compact_threshold, DEFAULT_COMPACT_THRESHOLD);
+
+        // Unparsable threshold falls back too; any other AUTO_COMPACT value keeps it on.
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_AUTO_COMPACT", "yes");
+        map.insert("IDEA_VAULT_COMPACT_THRESHOLD", "loads");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert!(cfg.auto_compact);
+        assert_eq!(cfg.compact_threshold, DEFAULT_COMPACT_THRESHOLD);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::domain::memory::MemoryIndexEntry;
-use crate::domain::{frontmatter, Idea, MemoryFact, MemoryIndex};
+use crate::domain::{frontmatter, Compacted, Idea, MemoryFact, MemoryIndex};
 use crate::vault::VaultError;
 
 /// Ensure `dir` exists, creating all missing parent components. Idempotent — succeeds if the
@@ -187,6 +187,47 @@ pub fn read_conversation(vault_dir: &Path, slug: &str) -> Result<String, VaultEr
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Read `vault/<slug>/compacted.md` — the derived rolling-summary sidecar (auto-compact,
+/// docs/adr/0012). A missing file is `Ok(None)` (most ideas have none). `compacted.md` is a
+/// *deletable cache*, not truth: a malformed sidecar is treated as absent (logged) so the next
+/// compaction rebuilds it from scratch rather than wedging on a corrupt cache — the reindex
+/// invariant is untouched either way (the index never reads this file).
+pub fn read_compacted(vault_dir: &Path, slug: &str) -> Result<Option<Compacted>, VaultError> {
+    let path = checked_idea_dir(vault_dir, slug)?.join("compacted.md");
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    match frontmatter::parse_compacted(&raw) {
+        Ok((frontmatter, summary)) => Ok(Some(Compacted {
+            frontmatter,
+            summary,
+        })),
+        Err(e) => {
+            tracing::warn!(slug, error = %e, "malformed compacted.md ignored (will be rebuilt)");
+            Ok(None)
+        }
+    }
+}
+
+/// Write `vault/<slug>/compacted.md` (auto-compact, docs/adr/0012) via the crash-safe atomic
+/// write. Derived, not truth — rewriting it is sanctioned exactly like `rebuild_memory_index`
+/// rewrites `MEMORY.md`; the append-only rule binds only `conversation.md`. Orphan-guarded: it
+/// only writes into a directory that already holds an `idea.md`.
+pub fn write_compacted(
+    vault_dir: &Path,
+    slug: &str,
+    compacted: &Compacted,
+) -> Result<(), VaultError> {
+    let idea_dir = checked_idea_dir(vault_dir, slug)?;
+    if !idea_dir.join("idea.md").is_file() {
+        return Err(VaultError::IdeaNotFound(slug.to_string()));
+    }
+    let rendered = frontmatter::emit_compacted(&compacted.frontmatter, &compacted.summary)?;
+    write_atomic(&idea_dir.join("compacted.md"), &rendered)
 }
 
 /// Write one `vault/<idea_slug>/memory/<fact-slug>.md` file, creating `memory/` on first write.
@@ -647,6 +688,58 @@ mod tests {
         let index = rebuild_memory_index(tmp.path(), "i").unwrap();
         assert!(index.entries.is_empty());
         assert!(!tmp.path().join("i/MEMORY.md").exists());
+    }
+
+    #[test]
+    fn compacted_sidecar_round_trips_and_missing_reads_as_none() {
+        use crate::domain::{Compacted, CompactedFrontmatter};
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+
+        // Absent by default.
+        assert!(read_compacted(tmp.path(), "i").unwrap().is_none());
+
+        let compacted = Compacted {
+            frontmatter: CompactedFrontmatter {
+                compacted_through: 3,
+                covered_bytes: 42,
+                turn_count_at_compaction: 5,
+                model: "test-model".into(),
+                updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 15, 0).unwrap(),
+            },
+            summary: "## Decisions\n- go with the sidecar\n".into(),
+        };
+        write_compacted(tmp.path(), "i", &compacted).unwrap();
+        let read = read_compacted(tmp.path(), "i").unwrap().unwrap();
+        assert_eq!(read, compacted);
+    }
+
+    #[test]
+    fn write_compacted_to_missing_idea_errors_and_creates_nothing() {
+        use crate::domain::{Compacted, CompactedFrontmatter};
+        let tmp = tempfile::tempdir().unwrap();
+        let compacted = Compacted {
+            frontmatter: CompactedFrontmatter {
+                compacted_through: 1,
+                covered_bytes: 1,
+                turn_count_at_compaction: 1,
+                model: "m".into(),
+                updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 15, 0).unwrap(),
+            },
+            summary: "x\n".into(),
+        };
+        let err = write_compacted(tmp.path(), "ghost", &compacted).unwrap_err();
+        assert!(matches!(err, VaultError::IdeaNotFound(_)));
+        assert!(!tmp.path().join("ghost").exists());
+    }
+
+    #[test]
+    fn malformed_compacted_reads_as_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        fs::write(tmp.path().join("i/compacted.md"), "no fence at all\n").unwrap();
+        // A corrupt cache is treated as absent so the next compaction rebuilds it.
+        assert!(read_compacted(tmp.path(), "i").unwrap().is_none());
     }
 
     #[test]

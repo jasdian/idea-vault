@@ -528,6 +528,48 @@ mod tests {
     }
 
     #[test]
+    fn compacted_md_sidecar_is_excluded_from_the_index() {
+        use crate::domain::{Compacted, CompactedFrontmatter};
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        let before = {
+            reindex(&mut conn, tmp.path()).unwrap();
+            snapshot(&conn)
+        };
+
+        // Drop a compacted.md sidecar next to an idea — reindex reads only idea.md /
+        // conversation.md / memory/*.md, so a derived summary must never change the index
+        // (auto-compact keeps the reindex invariant trivially intact, docs/adr/0012).
+        store::write_compacted(
+            tmp.path(),
+            "alpha",
+            &Compacted {
+                frontmatter: CompactedFrontmatter {
+                    compacted_through: 1,
+                    covered_bytes: 10,
+                    turn_count_at_compaction: 1,
+                    model: "test".into(),
+                    updated: dt(12),
+                },
+                summary: "## Decisions\n- UNINDEXED-SUMMARY\n".into(),
+            },
+        )
+        .unwrap();
+
+        let mut fresh = mem_conn();
+        reindex(&mut fresh, tmp.path()).unwrap();
+        let after = snapshot(&fresh);
+        assert_eq!(before, after, "compacted.md does not affect the index");
+        assert!(
+            !after.iter().any(|r| r.contains("UNINDEXED-SUMMARY")),
+            "the rolling summary is never searchable"
+        );
+        // And it does not register as drift.
+        assert!(!check_drift(&fresh, tmp.path()).unwrap());
+    }
+
+    #[test]
     fn unparsable_idea_is_skipped_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
         build_fixture_vault(tmp.path());

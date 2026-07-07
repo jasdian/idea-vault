@@ -80,6 +80,9 @@ pub struct SettingsForm {
     pub temperature: String,
     pub claude_model: String,
     pub effort: String,
+    /// Auto-compact toggle + trigger fraction (docs/adr/0012).
+    pub auto_compact: bool,
+    pub compact_threshold: String,
     pub saved: bool,
 }
 

@@ -26,6 +26,10 @@
   </div>
 
   <div class="capstones">
+    <form hx-post="/idea/{{ slug }}/compact" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip chip--compact"
+              title="Fold the older turns into a rolling summary so the discussion keeps fitting the context budget">⤵ compact now</button>
+    </form>
     <form hx-post="/idea/{{ slug }}/skill/build-prompt" hx-target="#transcript" hx-swap="innerHTML">
       <button type="submit" class="chip chip--build"
               title="Fold the whole discussion into a ready-to-run build prompt for a coding agent">⌁ generate build prompt</button>

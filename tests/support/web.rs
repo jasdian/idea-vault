@@ -34,6 +34,8 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         ollama_temperature: 0.7,
         llm_backend: idea_vault::config::LlmBackendKind::Ollama,
         claude: default_claude_settings(&vault_dir),
+        auto_compact: true,
+        compact_threshold: 0.80,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");

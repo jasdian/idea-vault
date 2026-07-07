@@ -21,6 +21,8 @@ fn form_view(state: &AppState, saved: bool) -> SettingsForm {
         temperature: format!("{:.2}", s.temperature),
         claude_model: s.claude_model.clone(),
         effort: s.claude_effort.clone(),
+        auto_compact: s.auto_compact,
+        compact_threshold: format!("{:.2}", s.compact_threshold),
         saved,
     }
 }
@@ -44,6 +46,11 @@ pub struct SettingsUpdate {
     pub claude_model: String,
     #[serde(default)]
     pub effort: String,
+    /// An unchecked checkbox is omitted from the form body ⇒ `false` via `serde(default)`.
+    #[serde(default)]
+    pub auto_compact: bool,
+    #[serde(default)]
+    pub compact_threshold: Option<f32>,
 }
 
 /// `POST /settings` — apply the change to the runtime settings and re-render the form.
@@ -65,6 +72,10 @@ pub async fn update_settings(
     if matches!(effort, "low" | "medium" | "high") {
         s.claude_effort = effort.to_string();
     }
+    // Auto-compact (docs/adr/0012): the checkbox drives the toggle (absent ⇒ off); the threshold
+    // is clamped to the supported band, defaulting when the field is absent.
+    s.auto_compact = form.auto_compact;
+    s.compact_threshold = form.compact_threshold.unwrap_or(0.80).clamp(0.5, 0.95);
     state.llm.set_settings(LlmSettings { ..s });
     tracing::info!(backend = ?state.llm.settings().backend, "llm settings updated");
 

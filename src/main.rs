@@ -153,6 +153,8 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         temperature: config.ollama_temperature,
         claude_model: model.unwrap_or_default(),
         claude_effort: effort,
+        auto_compact: config.auto_compact,
+        compact_threshold: config.compact_threshold,
     };
     Ok(LlmBackend::new(ollama, claude_base, settings))
 }

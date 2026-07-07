@@ -37,6 +37,12 @@ impl ContextBudget {
 pub struct ContextInput<'a> {
     pub idea_body: &'a str,
     pub memory: &'a [String],
+    /// Rolling summary of the folded conversation head `turns[0..k]` (auto-compact,
+    /// docs/adr/0012). `None` when no compaction applies — the assembled output is then
+    /// byte-identical to a plain transcript budgeting.
+    pub summary: Option<&'a str>,
+    /// The conversation turns to render verbatim, oldest-first. When `summary` is `Some`, this
+    /// is the verbatim tail `turns[k..n]`; otherwise the whole transcript.
     pub turns: &'a [String],
 }
 
@@ -49,13 +55,16 @@ pub struct AssembledContext {
     pub included_memory: usize,
     /// How many trailing (most recent) entries of `turns` were included.
     pub included_turns: usize,
-    /// True if the assembly did not fully fit the budget: a memory fact or turn was dropped,
-    /// or the always-included idea body alone already exceeds it.
+    /// True if a rolling summary was provided and fit (rendered as its own atomic block).
+    pub included_summary: bool,
+    /// True if the assembly did not fully fit the budget: a memory fact, the summary block, or a
+    /// turn was dropped, or the always-included idea body alone already exceeds it.
     pub truncated: bool,
 }
 
 const IDEA_HEADER: &str = "## Idea\n";
 const MEMORY_HEADER: &str = "## Memory\n";
+const SUMMARY_HEADER: &str = "## Earlier in this discussion (summarized)\n";
 const CONVERSATION_HEADER: &str = "## Conversation\n";
 
 /// Assemble a context within `budget` from `input`, honouring the D21 priority order.
@@ -94,7 +103,25 @@ pub fn assemble_context(budget: ContextBudget, input: ContextInput<'_>) -> Assem
         }
     }
 
-    // 3. Conversation turns: newest-backwards selection, chronological rendering.
+    // 3. Rolling summary (auto-compact, docs/adr/0012): one atomic block between Memory and
+    // Conversation — included whole if it fits after Idea+Memory, else dropped whole. It stands
+    // in for the folded head `turns[0..k]`, so partial inclusion would be incoherent.
+    let mut included_summary = false;
+    if let Some(summary) = input.summary.filter(|s| !s.is_empty()) {
+        let mut block = String::from(SUMMARY_HEADER);
+        block.push_str(summary);
+        if !summary.ends_with('\n') {
+            block.push('\n');
+        }
+        if text.len() + block.len() <= budget.max_bytes {
+            text.push_str(&block);
+            included_summary = true;
+        } else {
+            truncated = true;
+        }
+    }
+
+    // 4. Conversation turns: newest-backwards selection, chronological rendering.
     let mut included_turns = 0;
     if !input.turns.is_empty() {
         let mut used = 0;
@@ -120,6 +147,7 @@ pub fn assemble_context(budget: ContextBudget, input: ContextInput<'_>) -> Assem
         text,
         included_memory,
         included_turns,
+        included_summary,
         truncated,
     }
 }
@@ -141,6 +169,7 @@ mod tests {
             ContextInput {
                 idea_body: "The idea.\n",
                 memory: &memory,
+                summary: None,
                 turns: &turns,
             },
         );
@@ -163,6 +192,7 @@ mod tests {
             ContextInput {
                 idea_body: &body,
                 memory: &memory,
+                summary: None,
                 turns: &[],
             },
         );
@@ -184,6 +214,7 @@ mod tests {
             ContextInput {
                 idea_body: "idea\n",
                 memory: &memory,
+                summary: None,
                 turns: &[],
             },
         );
@@ -213,6 +244,7 @@ mod tests {
             ContextInput {
                 idea_body: "idea\n",
                 memory: &[],
+                summary: None,
                 turns: &turns,
             },
         );
@@ -234,6 +266,7 @@ mod tests {
             ContextInput {
                 idea_body: "idea\n",
                 memory: &memory,
+                summary: None,
                 turns: &turns,
             },
         );
@@ -254,6 +287,7 @@ mod tests {
             ContextInput {
                 idea_body: "idea\n",
                 memory: &memory,
+                summary: None,
                 turns: &[],
             },
         );
@@ -267,6 +301,7 @@ mod tests {
             ContextInput {
                 idea_body: "idea\n",
                 memory: &memory,
+                summary: None,
                 turns: &[],
             },
         );
@@ -281,6 +316,7 @@ mod tests {
             ContextInput {
                 idea_body: "idea body far over budget\n",
                 memory: &[],
+                summary: None,
                 turns: &[],
             },
         );
@@ -295,6 +331,7 @@ mod tests {
             ContextInput {
                 idea_body: "idea\n",
                 memory: &memory,
+                summary: None,
                 turns: &[],
             },
         );
@@ -308,6 +345,7 @@ mod tests {
         let input = ContextInput {
             idea_body: "idea\n",
             memory: &memory,
+            summary: None,
             turns: &turns,
         };
         let a = assemble_context(ContextBudget::new(64), input);
@@ -322,11 +360,90 @@ mod tests {
             ContextInput {
                 idea_body: "idea\n",
                 memory: &[],
+                summary: None,
                 turns: &[],
             },
         );
         assert!(!out.text.contains("## Memory"));
         assert!(!out.text.contains("## Conversation"));
         assert!(!out.truncated);
+    }
+
+    #[test]
+    fn summary_section_renders_between_memory_and_conversation() {
+        let memory = strings(&["a fact"]);
+        let turns = strings(&["## user\ntail turn"]);
+        let out = assemble_context(
+            ContextBudget::new(10_000),
+            ContextInput {
+                idea_body: "idea\n",
+                memory: &memory,
+                summary: Some("## Decisions\n- something folded"),
+                turns: &turns,
+            },
+        );
+        assert!(out.included_summary);
+        assert!(!out.truncated);
+        let mem = out.text.find("## Memory").unwrap();
+        let sum = out.text.find(SUMMARY_HEADER.trim()).unwrap();
+        let conv = out.text.find("## Conversation").unwrap();
+        assert!(
+            mem < sum && sum < conv,
+            "summary sits between memory and tail"
+        );
+        assert!(out.text.contains("- something folded"));
+    }
+
+    #[test]
+    fn summary_is_dropped_whole_when_it_does_not_fit() {
+        let big_summary = "s".repeat(400);
+        let out = assemble_context(
+            ContextBudget::new(IDEA_HEADER.len() + "idea\n".len() + 50),
+            ContextInput {
+                idea_body: "idea\n",
+                memory: &[],
+                summary: Some(&big_summary),
+                turns: &[],
+            },
+        );
+        // Atomic: none of it is spliced in, and the drop is visible.
+        assert!(!out.included_summary);
+        assert!(out.truncated);
+        assert!(!out.text.contains(SUMMARY_HEADER.trim()));
+        assert!(!out.text.contains(&big_summary));
+    }
+
+    #[test]
+    fn output_is_byte_identical_when_summary_is_none() {
+        // Strict-superset guarantee: with `summary: None` the assembly is exactly what it was
+        // before auto-compact, so every pre-existing budgeting/test stays green.
+        let memory = strings(&["m1", "m2"]);
+        let turns = strings(&["## user\nfirst", "## assistant\nsecond"]);
+        let without_field = |budget: usize| {
+            // Re-derive the expected text the "old" way: Idea + Memory + Conversation, no summary.
+            assemble_context(
+                ContextBudget::new(budget),
+                ContextInput {
+                    idea_body: "idea\n",
+                    memory: &memory,
+                    summary: None,
+                    turns: &turns,
+                },
+            )
+        };
+        let a = without_field(10_000);
+        // A summary of Some("") must also be a no-op (empty block never rendered).
+        let b = assemble_context(
+            ContextBudget::new(10_000),
+            ContextInput {
+                idea_body: "idea\n",
+                memory: &memory,
+                summary: Some(""),
+                turns: &turns,
+            },
+        );
+        assert!(!a.text.contains(SUMMARY_HEADER.trim()));
+        assert_eq!(a.text, b.text);
+        assert!(!b.included_summary);
     }
 }

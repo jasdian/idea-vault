@@ -76,6 +76,21 @@ pub async fn chat(
     let task_state = state.clone();
     let task_slug = slug.clone();
     tokio::spawn(async move {
+        // Phase 0: pre-emptive, best-effort compaction (auto-compact, docs/adr/0012). It runs
+        // BEFORE the reply so the very turn that tripped the threshold is answered off the freshly
+        // compacted context — but a compaction failure NEVER fails the turn: it is logged and the
+        // reply proceeds with the fallback (uncompacted) context.
+        if let Err(e) = memory::compact::maybe_run_compaction(
+            &task_state.llm,
+            &task_state.ai_semaphore,
+            &task_state.config.vault_dir,
+            &task_slug,
+        )
+        .await
+        {
+            tracing::warn!(slug = %task_slug, "compaction skipped (fallback context): {e}");
+        }
+        // Phase 1: the reply, off the (possibly) freshly-compacted context.
         match run_chat(&task_state, &task_slug).await {
             Ok(()) => jobs::mark_done(&task_state.jobs, &task_slug),
             Err(msg) => jobs::mark_failed(&task_state.jobs, &task_slug, msg),

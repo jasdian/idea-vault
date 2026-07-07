@@ -303,6 +303,25 @@ h1.title {
   border-top: 1px dashed var(--rule);
 }
 
+/* ---- auto-compact: the summary the model actually sees (ADR-0012) ------- */
+.summary-disclosure {
+  margin: .75rem 0 .25rem; border: 1px solid var(--rule);
+  border-radius: var(--radius); background: var(--surface);
+}
+.summary-disclosure > summary {
+  font-family: var(--mono); font-size: .72rem; color: var(--faint);
+  letter-spacing: .04em; padding: .5rem .7rem; cursor: pointer; list-style: none;
+}
+.summary-disclosure > summary::before { content: "⤵ "; color: var(--faint); }
+.summary-disclosure[open] > summary { border-bottom: 1px dashed var(--rule); color: var(--ink); }
+.summary-disclosure__body {
+  padding: .35rem .85rem .6rem; font-size: .92rem;
+  color: color-mix(in srgb, var(--ink) 88%, var(--paper));
+}
+.chip--compact { border-color: var(--rule-strong); color: var(--muted); }
+.chip--compact::before { content: ""; }
+.chip--compact:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
 /* ---- capstone actions: generate build prompt + store ------------------- */
 .capstones { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .75rem; }
 .capstones form { margin: 0; }

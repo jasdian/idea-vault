@@ -116,12 +116,19 @@ pub(crate) fn hydrate_context(
     );
 
     let turns = store::split_turns(&conversation);
+    let compacted = store::read_compacted(vault_dir, idea_slug)?;
+    let win = crate::memory::compact::effective_window(&turns, compacted.as_ref());
+    let (summary, tail): (Option<&str>, &[String]) = match win.applied {
+        Some(k) => (compacted.as_ref().map(|c| c.summary.as_str()), &turns[k..]),
+        None => (None, &turns[..]),
+    };
     Ok(assemble_context(
         budget,
         ContextInput {
             idea_body: &idea.body,
             memory: &memory,
-            turns: &turns,
+            summary,
+            turns: tail,
         },
     ))
 }
