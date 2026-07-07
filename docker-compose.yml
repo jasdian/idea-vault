@@ -85,6 +85,32 @@ services:
     command: ["pull", "${IDEA_VAULT_OLLAMA_MODEL:-qwen3.5:4b}"]
     restart: "no"
 
+  # One-shot: import a LOCAL .gguf as an Ollama model (instead of pulling from the registry),
+  # for a fine-tuned/offline weight file — the cosmic-mmo local-GGUF pattern, adapted to Ollama.
+  #   IDEA_VAULT_MODELS_DIR=/path/to/gguf-dir IDEA_VAULT_GGUF=Foo.gguf \
+  #   IDEA_VAULT_OLLAMA_MODEL=my-local docker compose --profile tools run --rm ollama-import
+  # Then set IDEA_VAULT_OLLAMA_MODEL=my-local in .env and `docker compose up -d`.
+  ollama-import:
+    image: ollama/ollama:latest
+    profiles: ["tools"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    volumes:
+      # The .gguf must be visible to the client that runs `ollama create`.
+      - "${IDEA_VAULT_MODELS_DIR:-./llm-models}:/models:ro"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        printf 'FROM /models/%s\nPARAMETER num_ctx 8192\n' "${IDEA_VAULT_GGUF:-model.gguf}" > /tmp/Modelfile
+        echo "Importing /models/${IDEA_VAULT_GGUF:-model.gguf} as '${IDEA_VAULT_OLLAMA_MODEL:-local-model}'…"
+        ollama create "${IDEA_VAULT_OLLAMA_MODEL:-local-model}" -f /tmp/Modelfile
+        ollama list
+    restart: "no"
+
 volumes:
   idea-index:
   ollama-models:
