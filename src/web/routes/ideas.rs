@@ -266,6 +266,24 @@ pub async fn fork_idea(
         .into_response())
 }
 
+/// `POST /idea/{slug}/delete` — permanently delete an idea and its whole folder (a deliberate,
+/// destructive human action, gated by an explicit confirm in the UI). Redirects home.
+pub async fn delete_idea(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<axum::response::Response, WebError> {
+    use axum::response::IntoResponse;
+    if !store::delete_idea(&state.config.vault_dir, &slug)? {
+        return Err(WebError::NotFound(format!("idea: {slug}")));
+    }
+    crate::web::routes::reindex_logged(&state);
+    Ok((
+        [("HX-Redirect", "/".to_string())],
+        axum::http::StatusCode::OK,
+    )
+        .into_response())
+}
+
 /// Build the discussion pane for any discussion-state idea: rendered transcript turns plus the
 /// D20 availability state with its per-state remedy copy. Shared with the reopen route (R5),
 /// which returns this partial directly.

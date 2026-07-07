@@ -92,6 +92,20 @@ pub fn create_idea(vault_dir: &Path, idea: &Idea) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// Delete an entire idea — remove `vault/<slug>/` and everything under it (idea.md, conversation,
+/// memory). A deliberate, destructive human action (the whole-idea sibling of `delete_turn` /
+/// `delete_memory_fact`); the SQLite index rebuilds without it. Returns whether an idea was removed.
+/// Guarded: only a directory that actually holds an `idea.md` is removed, so a bad slug can never
+/// nuke an unrelated path (`checked_idea_dir` also validates the slug charset).
+pub fn delete_idea(vault_dir: &Path, slug: &str) -> Result<bool, VaultError> {
+    let dir = checked_idea_dir(vault_dir, slug)?;
+    if !dir.join("idea.md").is_file() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&dir)?;
+    Ok(true)
+}
+
 /// Append one turn of markdown to `vault/<slug>/conversation.md`, creating it on the first turn.
 /// `conversation.md` is append-only across every discussion state (docs/04-state-machine.md
 /// Invariants) — Store and Reopen only ever append here, never rewrite or truncate.

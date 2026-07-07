@@ -13,4 +13,9 @@
 {{ memory_html|safe }}
 
 <div id="discussion" data-slug="{{ slug }}">{{ panel_html|safe }}</div>
+
+<form class="danger-zone" hx-post="/idea/{{ slug }}/delete"
+      hx-confirm="Permanently delete “{{ title }}” and its entire history (conversation + memory)? This cannot be undone.">
+  <button type="submit" class="btn-danger">Delete this idea</button>
+</form>
 {% endblock %}

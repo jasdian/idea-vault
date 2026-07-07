@@ -55,6 +55,7 @@ pub fn build_router(state: AppState) -> Router {
         // The "btw" history view + fork-to-new-idea.
         .route("/idea/{slug}/history", get(ideas::history_page))
         .route("/idea/{slug}/fork", post(ideas::fork_idea))
+        .route("/idea/{slug}/delete", post(ideas::delete_idea))
         // Search.
         .route("/search", get(ideas::search))
         // Live LLM settings (backend toggle + params).

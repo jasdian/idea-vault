@@ -372,3 +372,16 @@ h1.title {
 .btw__intro { color: var(--muted); margin: .5rem 0 1.25rem; max-width: 34rem; }
 .btw__fork { margin: 0 0 1.5rem; }
 .thread--readonly { opacity: .96; }
+
+/* ---- danger zone: delete idea ----------------------------------------- */
+.danger-zone { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); }
+.btn-danger {
+  font-family: var(--mono); font-size: .78rem; letter-spacing: .02em;
+  padding: .4rem .8rem; border-radius: 6px; cursor: pointer;
+  background: transparent; color: var(--faint);
+  border: 1px solid var(--rule-strong); transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.btn-danger:hover {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
