@@ -13,12 +13,11 @@
 <div id="results"></div>
 
 <div id="idea-list">
-  {% if ideas.is_empty() %}
-  <p class="muted">No ideas yet — bring one.</p>
-  {% else %}
   {% for idea in ideas %}
   {% include "_idea_row.html" %}
   {% endfor %}
-  {% endif %}
+  {# Kept as the LAST child so an hx-swap="afterbegin" row insert hides it via CSS —
+     the placeholder must not survive visibly after the first create. #}
+  <p class="muted empty-state">No ideas yet — bring one.</p>
 </div>
 {% endblock %}

@@ -4,6 +4,8 @@
 //! offline and deterministic — AI paths are never tested against a live model.
 #![allow(dead_code)] // compiled once per test binary; not every binary uses every helper
 
+pub mod web;
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

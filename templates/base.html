@@ -14,6 +14,8 @@
       nav .brand { font-weight: 600; }
       input, textarea, button { font: inherit; }
       .idea-row { padding: .5rem 0; border-bottom: 1px solid #8882; }
+      /* hide the empty-state once any idea row exists (incl. HTMX afterbegin inserts) */
+      .idea-row ~ .empty-state { display: none; }
       .muted { color: #8888; }
       .banner { background: #fdd8; border: 1px solid #c003; padding: .5rem; border-radius: .25rem; }
     </style>

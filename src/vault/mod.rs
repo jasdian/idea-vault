@@ -23,6 +23,10 @@ pub enum VaultError {
     /// or hostile slug (`../`, separators) can never escape the vault directory.
     #[error("invalid slug: {0:?}")]
     InvalidSlug(String),
+    /// `create_idea` lost the atomic directory claim — another create raced to the same slug.
+    /// Callers retry with the next disambiguated candidate; existing truth is never overwritten.
+    #[error("slug already taken: {0}")]
+    SlugTaken(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("domain error: {0}")]

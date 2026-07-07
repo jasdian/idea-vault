@@ -97,17 +97,33 @@ async fn static_htmx_is_embedded() {
 }
 
 #[tokio::test]
-async fn create_idea_is_scaffold_501() {
+async fn unimplemented_route_answers_501_and_create_validates_input() {
+    // A still-stubbed route keeps answering an honest 501 …
     let app = build_router(test_state());
     let resp = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/ideas")
+                .uri("/idea/x/chat")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+
+    // … while the now-real create route validates instead (empty form → 400, not 501).
+    let app = build_router(test_state());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ideas")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("title="))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

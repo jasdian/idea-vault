@@ -73,6 +73,25 @@ pub fn write_idea(vault_dir: &Path, idea: &Idea) -> Result<(), VaultError> {
     write_atomic(&dir.join("idea.md"), &rendered)
 }
 
+/// Create a brand-new idea (D10): atomically claim `vault/<slug>/` (plain `create_dir`, so a
+/// concurrent create racing to the same slug loses with [`VaultError::SlugTaken`] instead of
+/// silently overwriting existing truth), then write `idea.md` and an empty `conversation.md`
+/// (D7: an idea dir always carries both). For updates to an existing idea use [`write_idea`].
+pub fn create_idea(vault_dir: &Path, idea: &Idea) -> Result<(), VaultError> {
+    let dir = checked_idea_dir(vault_dir, &idea.frontmatter.slug)?;
+    match fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(VaultError::SlugTaken(idea.frontmatter.slug.clone()))
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let rendered = frontmatter::emit_idea(&idea.frontmatter, &idea.body)?;
+    write_atomic(&dir.join("idea.md"), &rendered)?;
+    fs::write(dir.join("conversation.md"), "")?;
+    Ok(())
+}
+
 /// Append one turn of markdown to `vault/<slug>/conversation.md`, creating it on the first turn.
 /// `conversation.md` is append-only across every discussion state (docs/04-state-machine.md
 /// Invariants) — Store and Reopen only ever append here, never rewrite or truncate.
@@ -326,6 +345,24 @@ mod tests {
 
         let read = read_idea(tmp.path(), "distributed-idea-market").unwrap();
         assert_eq!(read, idea);
+    }
+
+    #[test]
+    fn create_idea_claims_atomically_and_never_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let idea = sample_idea("claimed");
+
+        create_idea(tmp.path(), &idea).unwrap();
+        assert!(tmp.path().join("claimed/idea.md").is_file());
+        assert!(tmp.path().join("claimed/conversation.md").is_file());
+        assert_eq!(read_conversation(tmp.path(), "claimed").unwrap(), "");
+
+        // A second create racing to the same slug loses cleanly — truth untouched.
+        let mut rival = sample_idea("claimed");
+        rival.body = "the overwriting rival\n".into();
+        let err = create_idea(tmp.path(), &rival).unwrap_err();
+        assert!(matches!(err, VaultError::SlugTaken(s) if s == "claimed"));
+        assert_eq!(read_idea(tmp.path(), "claimed").unwrap(), idea);
     }
 
     #[test]

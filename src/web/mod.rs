@@ -31,6 +31,14 @@ pub enum WebError {
     #[error("concept error: {0}")]
     Concept(#[from] crate::concepts::ConceptError),
 
+    /// Invalid client input (empty title, malformed form) → 400 with the reason.
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
+    /// The addressed idea does not exist → 404.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -58,11 +66,22 @@ impl IntoResponse for WebError {
             )
                 .into_response();
         }
-        tracing::error!(error = %self, "web handler error");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal server error".to_string(),
-        )
-            .into_response()
+        match self {
+            WebError::BadRequest(reason) => {
+                (StatusCode::BAD_REQUEST, format!("bad request: {reason}")).into_response()
+            }
+            WebError::NotFound(what)
+            | WebError::Vault(crate::vault::VaultError::IdeaNotFound(what)) => {
+                (StatusCode::NOT_FOUND, format!("not found: {what}")).into_response()
+            }
+            other => {
+                tracing::error!(error = %other, "web handler error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
+                    .into_response()
+            }
+        }
     }
 }
