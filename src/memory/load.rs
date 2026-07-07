@@ -9,25 +9,9 @@ use crate::ai::budget::{assemble_context, AssembledContext, ContextBudget, Conte
 use crate::memory::MemoryError;
 use crate::vault::store;
 
-/// Split an append-only `conversation.md` transcript into turns: a turn starts at each `## `
-/// heading line (the shape `append_conversation` callers write). Text before the first heading
-/// is its own leading chunk. Pure and shared with `extract`.
-pub fn split_turns(conversation: &str) -> Vec<String> {
-    let mut turns: Vec<String> = Vec::new();
-    for line in conversation.lines() {
-        let starts_new = line.starts_with("## ");
-        if starts_new || turns.is_empty() {
-            if turns.is_empty() && !starts_new && line.trim().is_empty() {
-                continue;
-            }
-            turns.push(String::new());
-        }
-        let current = turns.last_mut().expect("pushed above");
-        current.push_str(line);
-        current.push('\n');
-    }
-    turns.into_iter().filter(|t| !t.trim().is_empty()).collect()
-}
+/// Turn splitting is owned by `vault::store` (it owns the conversation.md format); re-exported
+/// here for `memory`-internal callers.
+pub use crate::vault::store::split_turns;
 
 /// Assemble the context block for `Stored→Reopened` (D13), under `budget` (D21):
 ///

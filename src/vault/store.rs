@@ -190,6 +190,26 @@ fn memory_index_line(fact: &MemoryFact) -> (MemoryIndexEntry, String) {
     )
 }
 
+/// Split an append-only `conversation.md` transcript into turns: a turn starts at each `## `
+/// heading line (the shape `append_conversation` callers write; the header grammar is owned by
+/// this module). Text before the first heading is its own leading chunk. Pure.
+pub fn split_turns(conversation: &str) -> Vec<String> {
+    let mut turns: Vec<String> = Vec::new();
+    for line in conversation.lines() {
+        let starts_new = line.starts_with("## ");
+        if starts_new || turns.is_empty() {
+            if turns.is_empty() && !starts_new && line.trim().is_empty() {
+                continue;
+            }
+            turns.push(String::new());
+        }
+        let current = turns.last_mut().expect("pushed above");
+        current.push_str(line);
+        current.push('\n');
+    }
+    turns.into_iter().filter(|t| !t.trim().is_empty()).collect()
+}
+
 /// Read and parse `vault/<idea_slug>/MEMORY.md` directly — the cheap always-on index load of
 /// D13, with no rescan of the `memory/*.md` fact bodies. Missing file = empty index (an idea
 /// that was never stored has no memory). Lines that don't match the

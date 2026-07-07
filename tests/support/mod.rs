@@ -26,6 +26,15 @@ pub enum ChatScript {
 
 pub struct MockOllama {
     pub url: String,
+    /// Raw bodies of every `/api/chat` request received, in arrival order — lets tests assert
+    /// what context/prompt actually reached the model.
+    pub chat_requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockOllama {
+    pub fn chat_bodies(&self) -> Vec<String> {
+        self.chat_requests.lock().unwrap().clone()
+    }
 }
 
 /// Bind a listener and immediately drop it: connecting to the returned URL is refused fast.
@@ -78,6 +87,8 @@ async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
         "models": models.iter().map(|m| serde_json::json!({"name": m})).collect::<Vec<_>>(),
     })
     .to_string();
+    let chat_requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let chat_requests_srv = chat_requests.clone();
 
     tokio::spawn(async move {
         loop {
@@ -86,19 +97,26 @@ async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
             };
             let tags_body = tags_body.clone();
             let scripts = scripts.clone();
+            let chat_requests = chat_requests_srv.clone();
             tokio::spawn(async move {
-                let _ = handle(sock, tags_body, scripts).await;
+                let _ = handle(sock, tags_body, scripts, chat_requests).await;
             });
         }
     });
 
     MockOllama {
         url: format!("http://{addr}"),
+        chat_requests,
     }
 }
 
-async fn handle(mut sock: TcpStream, tags_body: String, scripts: Scripts) -> std::io::Result<()> {
-    // Read until the end of headers; consume any body best-effort (the mock never inspects it).
+async fn handle(
+    mut sock: TcpStream,
+    tags_body: String,
+    scripts: Scripts,
+    chat_requests: Arc<Mutex<Vec<String>>>,
+) -> std::io::Result<()> {
+    // Read until the end of headers.
     let mut req = Vec::new();
     let mut byte = [0u8; 1024];
     while !req.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -107,15 +125,35 @@ async fn handle(mut sock: TcpStream, tags_body: String, scripts: Scripts) -> std
             return Ok(());
         }
         req.extend_from_slice(&byte[..n]);
-        if req.len() > 64 * 1024 {
+        if req.len() > 1024 * 1024 {
             return Ok(());
         }
     }
-    let request_line = String::from_utf8_lossy(&req)
+    let header_end = req
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("checked above")
+        + 4;
+    let head = String::from_utf8_lossy(&req[..header_end]).to_string();
+    let request_line = head.lines().next().unwrap_or_default().to_string();
+
+    // Read the full body per Content-Length so tests can assert what the client sent.
+    let content_length = head
         .lines()
-        .next()
-        .unwrap_or_default()
-        .to_string();
+        .find_map(|l| {
+            let (name, value) = l.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0);
+    let mut body = req[header_end..].to_vec();
+    while body.len() < content_length {
+        let n = sock.read(&mut byte).await?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&byte[..n]);
+    }
 
     if request_line.starts_with("GET /api/tags") {
         let resp = format!(
@@ -128,6 +166,10 @@ async fn handle(mut sock: TcpStream, tags_body: String, scripts: Scripts) -> std
     }
 
     if request_line.starts_with("POST /api/chat") {
+        chat_requests
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(&body).into_owned());
         let script = scripts.next();
         sock.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n",

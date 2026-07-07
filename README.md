@@ -1,4 +1,8 @@
-# idea-vault
+# idea-vault - fully vibe-coded project
+
+This tool exists to allow moving of all "in mind" ideas, into usable database.
+
+## Description
 
 A single-user, **localhost, offline** web tool where you bring a raw idea, **run it into the ground**
 in conversation with a local AI, and store it in a markdown vault for later resumption. It mirrors an
