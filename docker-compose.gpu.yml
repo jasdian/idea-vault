@@ -1,0 +1,24 @@
+# docker-compose.gpu.yml
+# GPU override — layer on top of the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# GPU benefits ONLY Ollama. The idea-vault (Rust) service is untouched — no
+# override for it here, so it runs identically with or without a GPU.
+#
+# Requires the NVIDIA Container Toolkit on the host:
+#   sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+#   docker run --rm --gpus all ubuntu nvidia-smi   # verify before using this file
+#
+# Linux/amd64 (and Jetson) only. On Apple Silicon the container runs CPU-only.
+services:
+  ollama:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]

@@ -1,0 +1,7 @@
+<div class="stored" data-slug="{{ slug }}">
+  <p class="muted">Stored.</p>
+  <article>{{ body_html|safe }}</article>
+  <form hx-post="/idea/{{ slug }}/reopen" hx-target="#discussion" hx-swap="innerHTML">
+    <button type="submit">Reopen</button>
+  </form>
+</div>

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block content %}
+<p><a href="/">← all ideas</a></p>
+<h1>{{ title }}</h1>
+<p class="muted">state: {{ state }}</p>
+
+<article>{{ body_html|safe }}</article>
+
+<div id="discussion" data-slug="{{ slug }}"></div>
+{% endblock %}

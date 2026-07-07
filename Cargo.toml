@@ -1,0 +1,52 @@
+[package]
+name = "idea-vault"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+description = "Localhost web tool for solo ideation: run an idea into the ground with a local AI, then store it in the vault"
+license = "MIT"
+
+[dependencies]
+# web
+axum = "0.8"
+tokio = { version = "1.52", features = ["full"] }
+tower-http = { version = "0.7", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# templates — askama_axum is deprecated; askama_web is the maintained axum bridge
+askama = "0.16"
+askama_web = { version = "0.16", features = ["axum-0.8"] }
+
+# storage (bundled SQLite: no system libsqlite3, ships FTS5 — ADR-0002 / docs/12)
+rusqlite = { version = "0.37", features = ["bundled"] }
+walkdir = "2.5"
+
+# ai / http client — rustls, no OpenSSL (docs/12, ADR-0008)
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+
+# serde stack (serde_norway = maintained serde_yaml fork; frontmatter per D8)
+serde = { version = "1.0", features = ["derive"] }
+serde_norway = "0.9"
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+# markdown render + sanitize (wired in later milestones)
+pulldown-cmark = "0.13"
+ammonia = "4"
+
+# streams (SSE plumbing, D11)
+futures = "0.3"
+tokio-stream = "0.1"
+
+# assets (single-binary: htmx/CSS embedded — ADR-0001, docs/12)
+rust-embed = "8"
+
+# errors
+thiserror = "2"
+anyhow = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"

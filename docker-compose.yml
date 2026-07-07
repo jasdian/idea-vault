@@ -1,0 +1,88 @@
+name: idea-vault
+
+services:
+  idea-vault:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_UID: ${IDEA_VAULT_UID:-1000}
+        APP_GID: ${IDEA_VAULT_GID:-1000}
+    image: idea-vault:latest
+    container_name: idea-vault
+    restart: unless-stopped
+    # Run as the host user so the bind-mounted ./vault (owned by that user)
+    # and the named index volume (chowned to this uid in the image) are both
+    # writable. Defaults to 1000; override in .env if `id -u` differs.
+    user: "${IDEA_VAULT_UID:-1000}:${IDEA_VAULT_GID:-1000}"
+    environment:
+      # Bind to all interfaces INSIDE the container (host publish is loopback-only).
+      IDEA_VAULT_BIND: "0.0.0.0:3000"
+      IDEA_VAULT_VAULT_DIR: "/vault"
+      IDEA_VAULT_INDEX_PATH: "/data/index.db"
+      # Reach Ollama over the compose network by service name, NOT localhost.
+      IDEA_VAULT_OLLAMA_URL: "http://ollama:11434"
+      IDEA_VAULT_OLLAMA_MODEL: "${IDEA_VAULT_OLLAMA_MODEL:-llama3.2}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    ports:
+      # Loopback-only: open http://localhost:3000 on the host, not exposed to LAN.
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # SOURCE OF TRUTH: bind mount the user-owned vault directory.
+      - ./vault:/vault
+      # Rebuildable SQLite index: app-managed named volume.
+      - idea-index:/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/admin/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "4m"
+        max-file: "10"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: idea-vault-ollama
+    restart: unless-stopped
+    ports:
+      # Loopback-only so the host `ollama` CLI can pull/manage models.
+      # The app does NOT use this; it talks over the compose network.
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # `ollama list` succeeds only when the server is up. No extra tooling.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "4m"
+        max-file: "10"
+
+  # One-shot model bootstrap (profile-gated, cosmic migrate pattern):
+  #   docker compose --profile tools run --rm ollama-pull
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: ["tools"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    command: ["pull", "${IDEA_VAULT_OLLAMA_MODEL:-llama3.2}"]
+    restart: "no"
+
+volumes:
+  idea-index:
+  ollama-models:

@@ -1,0 +1,16 @@
+<div class="discussion" hx-ext="sse">
+  <div id="transcript"></div>
+  {% if ai_available %}
+  <form hx-post="/idea/{{ slug }}/chat" hx-target="#transcript" hx-swap="beforeend">
+    <textarea name="message" placeholder="Push the idea…" rows="3"></textarea>
+    <button type="submit">Send</button>
+  </form>
+  {% else %}
+  <p class="banner">AI is unavailable — the local model is not reachable. Browsing still works;
+    the compose box is disabled until Ollama returns.</p>
+  <form>
+    <textarea name="message" rows="3" disabled></textarea>
+    <button type="submit" disabled>Send</button>
+  </form>
+  {% endif %}
+</div>

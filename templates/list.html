@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Ideas</h1>
+
+<form hx-post="/ideas" hx-target="#idea-list" hx-swap="afterbegin">
+  <input type="text" name="title" placeholder="Bring an idea…" autocomplete="off" />
+  <button type="submit">New idea</button>
+</form>
+
+<input type="search" name="q" placeholder="Search…" autocomplete="off"
+       hx-get="/search" hx-trigger="keyup changed delay:300ms" hx-target="#results" />
+<div id="results"></div>
+
+<div id="idea-list">
+  {% if ideas.is_empty() %}
+  <p class="muted">No ideas yet — bring one.</p>
+  {% else %}
+  {% for idea in ideas %}
+  {% include "_idea_row.html" %}
+  {% endfor %}
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,8 @@
+/target
+/vault/
+index.db
+*.db-wal
+*.db-shm
+.env
+.claude/attack-workspace/
+.claude/

@@ -1,0 +1,27 @@
+# Keep the build context tiny and never bake user data / secrets into layers.
+
+# Rust build output
+target/
+
+# NEVER ship the owner's vault or the rebuildable index into an image layer
+vault/
+index.db
+*.db
+*.db-wal
+*.db-shm
+
+# VCS / tooling / docs
+.git/
+.github/
+.claude/
+docs/
+*.md
+
+# Env / local config / secrets
+.env
+.env.*
+shell.nix
+CLAUDE.nix
+
+# Scratch
+scratchpad/
