@@ -27,9 +27,65 @@ pub struct SwarmOutcome {
     pub agent_results: Vec<Option<AgentResult>>,
 }
 
+/// Bounded fan-out over prepared tasks: the D14 parallel primitive, shared with `workflows`
+/// (D19 "a workflow uses the swarm fan-out as its parallel stage"). Polls all futures together;
+/// each `run_agent` acquires its own permit, so in-flight calls never exceed K. A failed agent
+/// becomes `None` (degrade, don't abort).
+pub(crate) async fn fan_out(
+    ollama: &OllamaClient,
+    ai_semaphore: &Semaphore,
+    registry: &SkillRegistry,
+    tasks: Vec<AgentTask>,
+) -> Vec<Option<AgentResult>> {
+    let futures = tasks.into_iter().map(|task| {
+        let label = format!(
+            "{}·{}",
+            task.role.as_str(),
+            task.skill.as_deref().unwrap_or("-")
+        );
+        async move {
+            match run_agent(ollama, ai_semaphore, registry, task).await {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    tracing::warn!(step = %label, error = %e, "fan-out agent failed; skipping");
+                    None
+                }
+            }
+        }
+    });
+    join_all(futures).await
+}
+
+/// Converge a judged shortlist with one Synthesizer call (shared with `workflows`).
+pub(crate) async fn synthesize(
+    ollama: &OllamaClient,
+    ai_semaphore: &Semaphore,
+    registry: &SkillRegistry,
+    shortlist: &[&AgentResult],
+) -> Result<String, ConceptError> {
+    let findings = shortlist
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!("Finding {} ({}):\n{}", i + 1, r.role.as_str(), r.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(run_agent(
+        ollama,
+        ai_semaphore,
+        registry,
+        AgentTask {
+            role: AgentRole::Synthesizer,
+            skill: None,
+            context: findings,
+        },
+    )
+    .await?
+    .content)
+}
+
 /// Judge (D14 "rank / dedupe"): deterministic code, not a model call. Drops failed agents and
-/// empty outputs, dedupes byte-identical findings, keeps angle order.
-fn judge(results: &[Option<AgentResult>]) -> Vec<&AgentResult> {
+/// empty outputs, dedupes byte-identical findings, keeps angle order. Shared with `workflows`.
+pub(crate) fn judge(results: &[Option<AgentResult>]) -> Vec<&AgentResult> {
     let mut shortlist: Vec<&AgentResult> = Vec::new();
     for result in results.iter().flatten() {
         if result.content.is_empty() {
@@ -69,26 +125,16 @@ pub async fn swarm(
     // One budgeted context block for every agent (D21; hydrated once, lenses differ per angle).
     let context = hydrate_context(vault_dir, idea_slug, budget)?;
 
-    // Bounded fan-out: N futures polled concurrently; each run_agent acquires its own permit,
-    // so in-flight Ollama calls never exceed K and the rest queue (D14/ADR-0006).
-    let fanout = angles.iter().map(|angle| {
-        let task = AgentTask {
+    // Bounded fan-out (D14/ADR-0006): one Critic per angle over the shared context block.
+    let tasks = angles
+        .iter()
+        .map(|angle| AgentTask {
             role: AgentRole::Critic,
             skill: Some(angle.clone()),
             context: context.text.clone(),
-        };
-        async move {
-            match run_agent(ollama, ai_semaphore, registry, task).await {
-                Ok(result) => Some(result),
-                Err(e) => {
-                    // Degrade, don't abort: a failed agent is a null result the judge skips.
-                    tracing::warn!(angle = %angle, error = %e, "swarm agent failed; skipping");
-                    None
-                }
-            }
-        }
-    });
-    let agent_results: Vec<Option<AgentResult>> = join_all(fanout).await;
+        })
+        .collect();
+    let agent_results = fan_out(ollama, ai_semaphore, registry, tasks).await;
 
     let shortlist = judge(&agent_results);
     if shortlist.is_empty() {
@@ -96,24 +142,7 @@ pub async fn swarm(
     }
 
     // Synthesizer converges the shortlisted findings (one more bounded AI call).
-    let findings = shortlist
-        .iter()
-        .enumerate()
-        .map(|(i, r)| format!("Finding {} ({}):\n{}", i + 1, r.role.as_str(), r.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let synthesis = run_agent(
-        ollama,
-        ai_semaphore,
-        registry,
-        AgentTask {
-            role: AgentRole::Synthesizer,
-            skill: None,
-            context: findings,
-        },
-    )
-    .await?
-    .content;
+    let synthesis = synthesize(ollama, ai_semaphore, registry, &shortlist).await?;
 
     // Persist boundary: the single converged result becomes one assistant turn, only now.
     if synthesis.is_empty() {

@@ -13,6 +13,8 @@ pub enum ConceptError {
     NotImplemented(&'static str),
     #[error("unknown skill: {0}")]
     UnknownSkill(String),
+    #[error("unknown workflow: {0}")]
+    UnknownWorkflow(String),
     #[error("ai error: {0}")]
     Ai(#[from] crate::ai::AiError),
     #[error("vault error: {0}")]

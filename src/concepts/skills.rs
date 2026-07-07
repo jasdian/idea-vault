@@ -51,6 +51,20 @@ impl SkillRegistry {
                     // devils-advocate prompt template; {context} is filled by ai::budget (D21).
                     prompt: "Argue against this idea as persuasively as you can.\n{context}".to_string(),
                 },
+                Skill {
+                    name: "constraints".to_string(),
+                    description: "Map the practical constraints, prerequisites, and precedents bearing on the idea.".to_string(),
+                    // TODO(skills): see docs/06-concepts/skills.md — flesh out the full
+                    // constraints prompt template; {context} is filled by ai::budget (D21).
+                    prompt: "Map the practical constraints, prerequisites, and relevant precedents that bear on this idea.\n{context}".to_string(),
+                },
+                Skill {
+                    name: "second-order-effects".to_string(),
+                    description: "Assume the idea works; trace the second-order and knock-on effects.".to_string(),
+                    // TODO(skills): see docs/06-concepts/skills.md — flesh out the full
+                    // second-order-effects prompt template; {context} is filled by ai::budget (D21).
+                    prompt: "Assume this idea succeeds as stated. Trace the second-order and knock-on effects, good and bad.\n{context}".to_string(),
+                },
             ],
         }
     }
