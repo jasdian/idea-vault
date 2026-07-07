@@ -159,8 +159,14 @@ pub async fn invoke(
         // rather than silently appending nothing (D24: surface, not swallow).
         tracing::warn!(skill = %skill.name, idea_slug, "skill invocation returned empty output");
     } else {
-        let turn = format!("## assistant (skill: {})\n{}\n", skill.name, output);
-        store::append_conversation(vault_dir, idea_slug, &turn)?;
+        // append_turn owns the heading grammar and escapes any embedded "## " lines the model
+        // may emit, so its output can never forge a turn boundary.
+        store::append_turn(
+            vault_dir,
+            idea_slug,
+            &format!("assistant (skill: {})", skill.name),
+            &output,
+        )?;
     }
     Ok(output)
 }

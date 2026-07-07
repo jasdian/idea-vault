@@ -31,6 +31,9 @@ pub enum WebError {
     #[error("concept error: {0}")]
     Concept(#[from] crate::concepts::ConceptError),
 
+    #[error("memory error: {0}")]
+    Memory(#[from] crate::memory::MemoryError),
+
     /// Invalid client input (empty title, malformed form) → 400 with the reason.
     #[error("bad request: {0}")]
     BadRequest(String),
@@ -52,6 +55,7 @@ impl WebError {
             WebError::Index(crate::index::IndexError::NotImplemented(what)) => Some(what),
             WebError::Ai(crate::ai::AiError::NotImplemented(what)) => Some(what),
             WebError::Concept(crate::concepts::ConceptError::NotImplemented(what)) => Some(what),
+            WebError::Memory(crate::memory::MemoryError::NotImplemented(what)) => Some(what),
             _ => None,
         }
     }

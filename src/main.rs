@@ -52,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. AI client + non-blocking health probe (boot must not wait on Ollama — D20/D25).
     let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
-        .context("failed to build the Ollama HTTP client (check proxy/TLS environment)")?;
+        .context("failed to build the Ollama HTTP client (check proxy/TLS environment)")?
+        .with_token_timeout(config.ollama_timeout);
     {
         let probe_client = ollama.clone();
         tokio::spawn(async move {

@@ -30,6 +30,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         ollama_url: ollama_url.to_string(),
         ollama_model: "llama3.2".to_string(),
         ai_concurrency,
+        ollama_timeout: std::time::Duration::from_secs(5),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");

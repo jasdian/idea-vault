@@ -153,8 +153,9 @@ pub async fn swarm(
             "swarm synthesizer returned empty output; nothing persisted"
         );
     } else {
-        let turn = format!("## assistant (swarm)\n{synthesis}\n");
-        store::append_conversation(vault_dir, idea_slug, &turn)?;
+        // append_turn owns the heading grammar and escapes embedded "## " lines (no forged
+        // turn boundaries from model output).
+        store::append_turn(vault_dir, idea_slug, "assistant (swarm)", &synthesis)?;
     }
 
     Ok(SwarmOutcome {

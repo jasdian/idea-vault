@@ -27,6 +27,7 @@ fn test_state() -> AppState {
         ollama_url: "http://127.0.0.1:9".to_string(),
         ollama_model: "llama3.2".to_string(),
         ai_concurrency: 1,
+        ollama_timeout: std::time::Duration::from_secs(5),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
@@ -104,7 +105,7 @@ async fn unimplemented_route_answers_501_and_create_validates_input() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/idea/x/chat")
+                .uri("/admin/reindex")
                 .body(Body::empty())
                 .unwrap(),
         )

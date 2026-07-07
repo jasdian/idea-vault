@@ -130,11 +130,14 @@ pub async fn run_workflow(
             "workflow synthesizer returned empty output; nothing persisted"
         );
     } else {
-        let turn = format!(
-            "## assistant (workflow: {})\n{}\n",
-            workflow.name, synthesis
-        );
-        store::append_conversation(vault_dir, idea_slug, &turn)?;
+        // append_turn owns the heading grammar and escapes embedded "## " lines (no forged
+        // turn boundaries from model output).
+        store::append_turn(
+            vault_dir,
+            idea_slug,
+            &format!("assistant (workflow: {})", workflow.name),
+            &synthesis,
+        )?;
     }
 
     Ok(WorkflowOutcome {

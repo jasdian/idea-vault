@@ -28,6 +28,9 @@ pub struct Config {
     /// how many subagent tasks may call Ollama at once; excess tasks queue rather than run, so
     /// a local, single-server Ollama instance stays responsive under fan-out.
     pub ai_concurrency: usize,
+    /// Hard inactivity timeout for Ollama calls (D20): the initial response and every token gap
+    /// must arrive within this window or the call aborts (docs/05 "per-request timeout").
+    pub ollama_timeout: std::time::Duration,
 }
 
 const DEFAULT_BIND: &str = "127.0.0.1:3000";
@@ -36,6 +39,7 @@ const DEFAULT_INDEX_PATH: &str = "./index.db";
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL: &str = "qwen3.5:4b";
 const DEFAULT_AI_CONCURRENCY: usize = 2;
+const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 120;
 
 impl Config {
     /// Build configuration from the real process environment.
@@ -77,6 +81,18 @@ impl Config {
             }),
         };
 
+        let ollama_timeout_secs = match lookup("IDEA_VAULT_OLLAMA_TIMEOUT_SECS") {
+            None => DEFAULT_OLLAMA_TIMEOUT_SECS,
+            Some(raw) => raw.parse::<u64>().unwrap_or_else(|_| {
+                tracing::warn!(
+                    value = %raw,
+                    default = DEFAULT_OLLAMA_TIMEOUT_SECS,
+                    "IDEA_VAULT_OLLAMA_TIMEOUT_SECS unparsable as u64, falling back to default"
+                );
+                DEFAULT_OLLAMA_TIMEOUT_SECS
+            }),
+        };
+
         Self {
             bind,
             vault_dir,
@@ -84,6 +100,7 @@ impl Config {
             ollama_url,
             ollama_model,
             ai_concurrency,
+            ollama_timeout: std::time::Duration::from_secs(ollama_timeout_secs),
         }
     }
 }
@@ -107,6 +124,20 @@ mod tests {
         assert_eq!(cfg.ollama_url, "http://localhost:11434");
         assert_eq!(cfg.ollama_model, "qwen3.5:4b");
         assert_eq!(cfg.ai_concurrency, 2);
+        assert_eq!(cfg.ollama_timeout, std::time::Duration::from_secs(120));
+    }
+
+    #[test]
+    fn ollama_timeout_override_and_fallback() {
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_OLLAMA_TIMEOUT_SECS", "300");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert_eq!(cfg.ollama_timeout, std::time::Duration::from_secs(300));
+
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_OLLAMA_TIMEOUT_SECS", "soon");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert_eq!(cfg.ollama_timeout, std::time::Duration::from_secs(120));
     }
 
     #[test]

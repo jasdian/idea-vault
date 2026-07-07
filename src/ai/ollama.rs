@@ -23,10 +23,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// gap this long means the call is wedged — abort rather than hang the SSE stream forever.
 const DEFAULT_TOKEN_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Upper bound on one buffered NDJSON line: a single chat chunk is tiny, so anything past this
-/// is a broken peer, not a token.
-const MAX_LINE_BYTES: usize = 1024 * 1024;
-
 /// A live token stream from `/api/chat`: each item is one content chunk, in order. The stream
 /// ends after Ollama's `done: true`; an `Err` item (timeout/protocol/transport) is terminal.
 pub type TokenStream = BoxStream<'static, Result<String, AiError>>;
@@ -60,21 +56,6 @@ struct TagsResponse {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
-}
-
-/// One NDJSON line of Ollama's streaming `/api/chat` response — only the fields we need.
-#[derive(Debug, Deserialize)]
-struct ChatChunk {
-    #[serde(default)]
-    message: Option<ChatChunkMessage>,
-    #[serde(default)]
-    done: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChunkMessage {
-    #[serde(default)]
-    content: String,
 }
 
 /// Client for the local Ollama server. Cheap to clone (wraps a pooled `reqwest::Client`).
@@ -184,92 +165,10 @@ impl OllamaClient {
                 .map_err(|_| AiError::Timeout)??
                 .error_for_status()?;
 
-        struct StreamState {
-            body: BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>,
-            buf: Vec<u8>,
-            token_timeout: Duration,
-            finished: bool,
-        }
-
-        let state = StreamState {
-            body: response.bytes_stream().boxed(),
-            buf: Vec::new(),
-            token_timeout: self.token_timeout,
-            finished: false,
-        };
-
-        Ok(futures::stream::unfold(state, |mut st| async move {
-            if st.finished {
-                return None;
-            }
-            loop {
-                // Drain complete NDJSON lines already buffered.
-                while let Some(pos) = st.buf.iter().position(|&b| b == b'\n') {
-                    let line: Vec<u8> = st.buf.drain(..=pos).collect();
-                    let line = &line[..line.len() - 1];
-                    let line = line.strip_suffix(b"\r").unwrap_or(line);
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let chunk: ChatChunk = match serde_json::from_slice(line) {
-                        Ok(chunk) => chunk,
-                        Err(e) => {
-                            st.finished = true;
-                            return Some((
-                                Err(AiError::Protocol(format!("bad NDJSON chat line: {e}"))),
-                                st,
-                            ));
-                        }
-                    };
-                    if chunk.done {
-                        st.finished = true;
-                    }
-                    let content = chunk.message.map(|m| m.content).unwrap_or_default();
-                    if !content.is_empty() {
-                        return Some((Ok(content), st));
-                    }
-                    if st.finished {
-                        return None;
-                    }
-                }
-
-                // Need more bytes: every gap is bounded by the hard timeout (D20).
-                match tokio::time::timeout(st.token_timeout, st.body.next()).await {
-                    Err(_) => {
-                        st.finished = true;
-                        return Some((Err(AiError::Timeout), st));
-                    }
-                    Ok(None) => {
-                        st.finished = true;
-                        return Some((
-                            Err(AiError::Protocol(
-                                "stream ended before done: true".to_string(),
-                            )),
-                            st,
-                        ));
-                    }
-                    Ok(Some(Err(e))) => {
-                        st.finished = true;
-                        return Some((Err(AiError::Http(e)), st));
-                    }
-                    Ok(Some(Ok(bytes))) => {
-                        st.buf.extend_from_slice(&bytes);
-                        // The hard timeout bounds *time*; this bounds *bytes* — a peer that
-                        // never sends a newline must not grow the buffer without limit.
-                        if st.buf.len() > MAX_LINE_BYTES {
-                            st.finished = true;
-                            return Some((
-                                Err(AiError::Protocol(format!(
-                                    "NDJSON line exceeded {MAX_LINE_BYTES} bytes"
-                                ))),
-                                st,
-                            ));
-                        }
-                    }
-                }
-            }
-        })
-        .boxed())
+        Ok(crate::ai::stream::ndjson_to_tokens(
+            response.bytes_stream().boxed(),
+            self.token_timeout,
+        ))
     }
 }
 
