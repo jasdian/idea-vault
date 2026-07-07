@@ -2,7 +2,10 @@
 //! implementing `/api/tags` and streaming `/api/chat`, scriptable to return tokens, stall
 //! (timeout tests), or cut the connection early. This is the seam that keeps the whole suite
 //! offline and deterministic — AI paths are never tested against a live model.
+#![allow(dead_code)] // compiled once per test binary; not every binary uses every helper
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,8 +36,42 @@ pub async fn refused_url() -> String {
     format!("http://{addr}")
 }
 
-/// Spawn the mock server. `models` populates `/api/tags`; `script` drives `/api/chat`.
+/// Spawn the mock server. `models` populates `/api/tags`; `script` drives every `/api/chat`.
 pub async fn spawn(models: &[&str], script: ChatScript) -> MockOllama {
+    spawn_inner(models, Scripts::Repeat(script)).await
+}
+
+/// Spawn a mock whose `/api/chat` answers consume `scripts` in order — call 1 gets scripts[0],
+/// call 2 gets scripts[1], … For multi-call flows (consolidate then extract, D12). A call past
+/// the end of the sequence answers with an empty completed stream.
+pub async fn spawn_sequence(models: &[&str], scripts: Vec<ChatScript>) -> MockOllama {
+    spawn_inner(
+        models,
+        Scripts::Sequence(Arc::new(Mutex::new(scripts.into()))),
+    )
+    .await
+}
+
+#[derive(Clone)]
+enum Scripts {
+    Repeat(ChatScript),
+    Sequence(Arc<Mutex<VecDeque<ChatScript>>>),
+}
+
+impl Scripts {
+    fn next(&self) -> ChatScript {
+        match self {
+            Scripts::Repeat(script) => script.clone(),
+            Scripts::Sequence(queue) => queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(ChatScript::Tokens(Vec::new())),
+        }
+    }
+}
+
+async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let tags_body = serde_json::json!({
@@ -48,9 +85,9 @@ pub async fn spawn(models: &[&str], script: ChatScript) -> MockOllama {
                 break;
             };
             let tags_body = tags_body.clone();
-            let script = script.clone();
+            let scripts = scripts.clone();
             tokio::spawn(async move {
-                let _ = handle(sock, tags_body, script).await;
+                let _ = handle(sock, tags_body, scripts).await;
             });
         }
     });
@@ -60,7 +97,7 @@ pub async fn spawn(models: &[&str], script: ChatScript) -> MockOllama {
     }
 }
 
-async fn handle(mut sock: TcpStream, tags_body: String, script: ChatScript) -> std::io::Result<()> {
+async fn handle(mut sock: TcpStream, tags_body: String, scripts: Scripts) -> std::io::Result<()> {
     // Read until the end of headers; consume any body best-effort (the mock never inspects it).
     let mut req = Vec::new();
     let mut byte = [0u8; 1024];
@@ -91,6 +128,7 @@ async fn handle(mut sock: TcpStream, tags_body: String, script: ChatScript) -> s
     }
 
     if request_line.starts_with("POST /api/chat") {
+        let script = scripts.next();
         sock.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n",
         )

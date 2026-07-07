@@ -148,6 +148,19 @@ impl OllamaClient {
         }
     }
 
+    /// Complete a chat non-interactively: consume [`chat_stream`](Self::chat_stream) to the end
+    /// and return the concatenated text. Used by extraction/skills where no browser is watching
+    /// tokens; the same hard-timeout and persist-boundary guarantees apply — any stream error
+    /// aborts the whole call, a partial response is never returned as if complete.
+    pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
+        let mut stream = self.chat_stream(messages).await?;
+        let mut out = String::new();
+        while let Some(item) = stream.next().await {
+            out.push_str(&item?);
+        }
+        Ok(out)
+    }
+
     /// Stream a chat completion from Ollama (`POST /api/chat`, `stream: true`, D11).
     ///
     /// Yields one content chunk per NDJSON line until `done: true`; the stream then ends. Any

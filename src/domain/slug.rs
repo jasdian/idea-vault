@@ -4,8 +4,9 @@
 
 /// Normalize a raw title into a filesystem/URL-safe slug: lowercase, collapse whitespace runs
 /// to `-`, strip anything outside `[a-z0-9-]`, collapse repeated `-`, trim leading/trailing `-`.
-/// Titles that normalize to nothing (empty or symbol-only) fall back to `"idea"`.
-pub fn slugify(title: &str) -> String {
+/// Returns `None` when the title normalizes to nothing (empty or symbol-only) — callers decide
+/// their own fallback so a junk title can never collide with a real one (see [`slugify`]).
+pub fn try_slugify(title: &str) -> Option<String> {
     let lowered = title.to_lowercase();
 
     let mut normalized = String::with_capacity(lowered.len());
@@ -25,10 +26,15 @@ pub fn slugify(title: &str) -> String {
         .join("-");
 
     if slug.is_empty() {
-        "idea".to_string()
+        None
     } else {
-        slug
+        Some(slug)
     }
+}
+
+/// [`try_slugify`] with the `"idea"` fallback for titles that normalize to nothing.
+pub fn slugify(title: &str) -> String {
+    try_slugify(title).unwrap_or_else(|| "idea".to_string())
 }
 
 /// True if `slug` has the canonical shape `slugify` produces: non-empty, only `[a-z0-9-]`.

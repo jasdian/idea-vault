@@ -13,4 +13,6 @@ pub enum MemoryError {
     NotImplemented(&'static str),
     #[error("vault error: {0}")]
     Vault(#[from] crate::vault::VaultError),
+    #[error("ai error: {0}")]
+    Ai(#[from] crate::ai::AiError),
 }

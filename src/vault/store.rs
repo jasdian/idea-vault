@@ -190,6 +190,45 @@ fn memory_index_line(fact: &MemoryFact) -> (MemoryIndexEntry, String) {
     )
 }
 
+/// Read and parse `vault/<idea_slug>/MEMORY.md` directly — the cheap always-on index load of
+/// D13, with no rescan of the `memory/*.md` fact bodies. Missing file = empty index (an idea
+/// that was never stored has no memory). Lines that don't match the
+/// `- [Title](memory/<slug>.md) — <summary>` shape are skipped defensively.
+pub fn read_memory_index(vault_dir: &Path, idea_slug: &str) -> Result<MemoryIndex, VaultError> {
+    let raw = match fs::read_to_string(checked_idea_dir(vault_dir, idea_slug)?.join("MEMORY.md")) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MemoryIndex {
+                entries: Vec::new(),
+            })
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut entries = Vec::new();
+    for line in raw.lines() {
+        let Some(rest) = line.strip_prefix("- [") else {
+            continue;
+        };
+        let Some((_title, rest)) = rest.split_once("](memory/") else {
+            continue;
+        };
+        let Some((slug, summary)) = rest.split_once(".md) — ") else {
+            continue;
+        };
+        // A title containing the separator literals would shift the split; slug validation
+        // turns that into a skipped line instead of silently wrong data.
+        if !crate::domain::slug::is_valid(slug) {
+            continue;
+        }
+        entries.push(MemoryIndexEntry {
+            slug: slug.to_string(),
+            summary: summary.to_string(),
+        });
+    }
+    Ok(MemoryIndex { entries })
+}
+
 /// Rebuild `vault/<idea_slug>/MEMORY.md` (the one-line-per-fact pointer index) by scanning
 /// `vault/<idea_slug>/memory/*.md`, and return the resulting `MemoryIndex`. Entries are sorted
 /// by fact slug so rebuilds are deterministic. With no facts on disk this returns an empty index
