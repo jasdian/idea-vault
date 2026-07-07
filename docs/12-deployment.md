@@ -111,7 +111,7 @@ difference is a single override file merged on top of the base compose.
 ```mermaid
 flowchart TB
     BASE["docker-compose.yml\n(app + ollama + ollama-pull, CPU)"]
-    GPU["docker-compose.gpu.yml\nollama: deploy.resources.reservations.devices\n[driver: nvidia, count: all, capabilities: [gpu]]\n+ NVIDIA_VISIBLE_DEVICES / DRIVER_CAPABILITIES"]
+    GPU["docker-compose.gpu.yml\nollama: deploy.resources.reservations.devices\n[driver: cdi, device_ids: [nvidia.com/gpu=all], capabilities: [gpu]]\n+ NVIDIA_VISIBLE_DEVICES / DRIVER_CAPABILITIES"]
 
     BASE -->|"docker compose up -d"| CPU(["CPU mode — portable, no host GPU tooling"])
     BASE --> MERGE
@@ -124,16 +124,31 @@ volume is shared, so **no re-pull and no app rebuild** when moving between CPU a
 
 ### With GPU — host prerequisites
 
+Modern Docker (25+) exposes NVIDIA GPUs through **CDI** (Container Device Interface), and the
+override requests the CDI device `nvidia.com/gpu=all` — not the legacy `driver: nvidia` runtime.
+
 1. NVIDIA driver installed (`nvidia-smi` works).
-2. NVIDIA Container Toolkit configured for Docker:
+2. NVIDIA Container Toolkit installed and exposing GPUs over CDI:
+   - **NixOS**: `hardware.nvidia-container-toolkit.enable = true;` — regenerates the CDI spec
+     under `/run/cdi` on rebuild and registers **no** docker runtime hook.
+   - **Debian/RHEL**: install `nvidia-container-toolkit`, then generate the spec:
+     ```bash
+     sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+     ```
+3. Verify the daemon discovered the device and it reaches a container:
    ```bash
-   sudo nvidia-ctk runtime configure --runtime=docker
-   sudo systemctl restart docker
+   docker info | grep -A4 'CDI spec'                 # lists nvidia.com/gpu=all
+   docker run --rm --device nvidia.com/gpu=all --entrypoint nvidia-smi ollama/ollama:latest -L
    ```
-3. Verify: `docker run --rm --gpus all ubuntu nvidia-smi`.
+   Note: `docker run --gpus all …` may fail on CDI-only hosts (e.g. `AMD CDI spec not found`);
+   request the device by name instead, as the override does.
 
 Then: `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d`, and confirm with
-`docker compose logs ollama` (look for "offloaded N/N layers to GPU").
+`docker compose logs ollama` (look for an `inference compute … library=CUDA` line naming the GPU).
+
+> **Legacy runtime hosts**: if your host uses the nvidia docker *runtime* (older setups configured
+> via `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker`) rather
+> than CDI, swap the reservation for `driver: nvidia`, `count: all`.
 
 > `cosmic-mmo` runs its LLM sidecar deliberately **CPU-only** (`llama.cpp` with `-ngl 0`, bounded by
 > `cpus`/`mem_limit`), so the nvidia block here is written fresh against the Compose spec, not copied.
@@ -165,9 +180,11 @@ requirement.
   rebuild (so the build args match) — else `EACCES` on vault and index writes.
 - **SQLite WAL**: `index.db-wal`/`-shm` live in the same volume; back up/reset all three together;
   never point two containers at one SQLite file. Losing the volume is recoverable via reindex.
-- **GPU toolkit missing** → the `-f docker-compose.gpu.yml` reservation errors or silently falls back
-  to CPU; verify with `docker run --rm --gpus all ubuntu nvidia-smi`. Needs Compose v2 (the legacy
-  `docker-compose` v1 ignores the reservation block).
+- **GPU toolkit missing / wrong request mechanism** → `could not select device driver "nvidia"`
+  means the host has no legacy nvidia runtime (expected on CDI hosts like NixOS) — the override uses
+  `driver: cdi` + `device_ids: [nvidia.com/gpu=all]` for exactly this reason. Verify the device with
+  `docker run --rm --device nvidia.com/gpu=all --entrypoint nvidia-smi ollama/ollama:latest -L`.
+  Needs Compose v2 (the legacy `docker-compose` v1 ignores the reservation block).
 - **arch**: nvidia passthrough is Linux/amd64 (and Jetson) only; on Apple Silicon the container is
   CPU-only. Build on the arch you deploy (or use `buildx`).
 - **Bundled SQLite** compiles a C file in the builder — fine on `rust:slim` (ships `cc`); if a future

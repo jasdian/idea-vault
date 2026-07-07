@@ -5,9 +5,29 @@
 # GPU benefits ONLY Ollama. The idea-vault (Rust) service is untouched — no
 # override for it here, so it runs identically with or without a GPU.
 #
-# Requires the NVIDIA Container Toolkit on the host:
-#   sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
-#   docker run --rm --gpus all ubuntu nvidia-smi   # verify before using this file
+# Requires the NVIDIA Container Toolkit on the host, exposing GPUs over CDI
+# (Container Device Interface). Verify the toolkit and the CDI device before
+# using this file:
+#   nvidia-smi -L                                    # host sees the GPU
+#   docker info | grep -A4 'CDI spec'                # daemon discovered nvidia.com/gpu=*
+#   docker run --rm --device nvidia.com/gpu=all --entrypoint nvidia-smi ollama/ollama:latest -L
+#
+# Enabling the toolkit is host-specific:
+#   NixOS:        hardware.nvidia-container-toolkit.enable = true;  (regenerates the
+#                 CDI spec under /run/cdi and needs no daemon.json runtime hook)
+#   Debian/RHEL:  install nvidia-container-toolkit, then generate the CDI spec:
+#                 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#
+# Why CDI and not `driver: nvidia`: modern Docker (25+) drives NVIDIA GPUs through
+# CDI, and NixOS's toolkit registers NO legacy `nvidia` docker runtime. The old
+# `deploy…devices: [{driver: nvidia}]` block needs that runtime and fails with
+# `could not select device driver "nvidia" with capabilities: [[gpu]]`. `--gpus all`
+# likewise fails here (`AMD CDI spec not found`). Requesting the CDI device by name
+# is what actually reaches the GPU.
+#
+# Legacy hosts: if your host still uses the nvidia docker *runtime* instead of CDI
+# (older setups configured via `nvidia-ctk runtime configure --runtime=docker`),
+# swap the reservation below for `driver: nvidia`, `count: all`.
 #
 # Linux/amd64 (and Jetson) only. On Apple Silicon the container runs CPU-only.
 services:
@@ -19,6 +39,8 @@ services:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              count: all
+            # CDI device request — matches the name in `docker info` / `/run/cdi`.
+            - driver: cdi
+              device_ids:
+                - nvidia.com/gpu=all
               capabilities: ["gpu"]
