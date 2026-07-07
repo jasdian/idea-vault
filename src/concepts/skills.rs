@@ -150,7 +150,9 @@ pub async fn invoke(
     idea_slug: &str,
     skill: &Skill,
     budget: ContextBudget,
+    progress: &(dyn Fn(&str) + Sync),
 ) -> Result<String, ConceptError> {
+    progress(&format!("running {}", skill.name));
     let context = hydrate_context(vault_dir, idea_slug, budget)?;
     let prompt = skill.prompt.replace("{context}", &context.text);
 

@@ -115,7 +115,8 @@ pub async fn run_workflow(
         })
         .collect();
 
-    let step_results = fan_out(ollama, ai_semaphore, registry, tasks).await;
+    // Workflows don't surface per-step progress (the swarm route does) — pass a no-op reporter.
+    let step_results = fan_out(ollama, ai_semaphore, registry, tasks, &|_, _, _| {}).await;
     let shortlist = judge(&step_results);
     if shortlist.is_empty() {
         return Err(ConceptError::NothingToSynthesize);

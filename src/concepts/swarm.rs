@@ -8,6 +8,7 @@
 //! block, hydrated once (agents are blind to each other — diverse lenses over identical input).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::future::join_all;
 use tokio::sync::Semaphore;
@@ -31,26 +32,39 @@ pub struct SwarmOutcome {
 /// (D19 "a workflow uses the swarm fan-out as its parallel stage"). Polls all futures together;
 /// each `run_agent` acquires its own permit, so in-flight calls never exceed K. A failed agent
 /// becomes `None` (degrade, don't abort).
+///
+/// `on_progress(done, total, angle)` fires as each agent *completes* — a completion counter, so the
+/// note advances genuinely (1/N, 2/N, …) under the serial execution real local models impose,
+/// regardless of poll ordering. `angle` is the completed agent's skill lens (empty for a lensless
+/// role). Kept generic (no message wording) so `workflows` can reuse it with a no-op.
 pub(crate) async fn fan_out(
     ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     registry: &SkillRegistry,
     tasks: Vec<AgentTask>,
+    on_progress: &(dyn Fn(usize, usize, &str) + Sync),
 ) -> Vec<Option<AgentResult>> {
+    let total = tasks.len();
+    let done = AtomicUsize::new(0);
     let futures = tasks.into_iter().map(|task| {
         let label = format!(
             "{}·{}",
             task.role.as_str(),
             task.skill.as_deref().unwrap_or("-")
         );
+        let angle = task.skill.clone().unwrap_or_default();
+        let done = &done;
         async move {
-            match run_agent(ollama, ai_semaphore, registry, task).await {
+            let outcome = match run_agent(ollama, ai_semaphore, registry, task).await {
                 Ok(result) => Some(result),
                 Err(e) => {
                     tracing::warn!(step = %label, error = %e, "fan-out agent failed; skipping");
                     None
                 }
-            }
+            };
+            let k = done.fetch_add(1, Ordering::SeqCst) + 1;
+            on_progress(k, total, &angle);
+            outcome
         }
     });
     join_all(futures).await
@@ -106,6 +120,7 @@ pub(crate) fn judge(results: &[Option<AgentResult>]) -> Vec<&AgentResult> {
 ///
 /// Unknown angles fail fast before any model call. If every agent fails the swarm errors with
 /// [`ConceptError::NothingToSynthesize`] and nothing is appended.
+#[allow(clippy::too_many_arguments)]
 pub async fn swarm(
     ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
@@ -114,6 +129,7 @@ pub async fn swarm(
     idea_slug: &str,
     angles: Vec<String>,
     budget: ContextBudget,
+    progress: &(dyn Fn(&str) + Sync),
 ) -> Result<SwarmOutcome, ConceptError> {
     // Fail fast on a misconfigured request — before any AI call.
     for angle in &angles {
@@ -134,7 +150,15 @@ pub async fn swarm(
             context: context.text.clone(),
         })
         .collect();
-    let agent_results = fan_out(ollama, ai_semaphore, registry, tasks).await;
+    // Report per-angle progress as each agent lands ("swarm · attacking 2/4: constraints").
+    let on_progress = |done: usize, total: usize, angle: &str| {
+        if angle.is_empty() {
+            progress(&format!("swarm · attacking {done}/{total}"));
+        } else {
+            progress(&format!("swarm · attacking {done}/{total}: {angle}"));
+        }
+    };
+    let agent_results = fan_out(ollama, ai_semaphore, registry, tasks, &on_progress).await;
 
     let shortlist = judge(&agent_results);
     if shortlist.is_empty() {
@@ -142,6 +166,7 @@ pub async fn swarm(
     }
 
     // Synthesizer converges the shortlisted findings (one more bounded AI call).
+    progress(&format!("swarm · converging {} findings", shortlist.len()));
     let synthesis = synthesize(ollama, ai_semaphore, registry, &shortlist).await?;
 
     // Persist boundary: the single converged result becomes one assistant turn, only now.

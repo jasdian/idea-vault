@@ -53,6 +53,7 @@ async fn run_swarm(
         "i",
         angles.iter().map(|a| a.to_string()).collect(),
         ContextBudget::new(4096),
+        &|_: &str| {},
     )
     .await
 }

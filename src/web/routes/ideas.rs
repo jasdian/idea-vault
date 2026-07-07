@@ -115,9 +115,19 @@ fn meter_line(
 /// The server-driven "thinking" indicator. It self-polls `/pending` 1.5s after it lands in the
 /// DOM, so it keeps refreshing (and the elapsed count keeps climbing) until the job finishes —
 /// and it re-appears on a fresh page load while a job runs, so navigating away never loses it.
-fn pending_block(slug: &str, secs: u64) -> String {
+///
+/// `note` is the orchestrator's live per-step progress ("swarm · attacking 2/4: constraints"); when
+/// empty the indicator falls back to the generic "the foil is thinking". A Cancel control posts to
+/// `/idea/{slug}/cancel`, aborting the detached task and swapping the (indicator-free) transcript
+/// back in.
+fn pending_block(slug: &str, secs: u64, note: &str) -> String {
+    let status = if note.trim().is_empty() {
+        format!("the foil is thinking — {secs}s")
+    } else {
+        format!("{} — {secs}s", esc(note))
+    };
     format!(
-        r##"<div class="foil-pending" role="status" aria-live="polite" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="#transcript" hx-swap="innerHTML"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>the foil is thinking — {secs}s</span></div>"##
+        r##"<div class="foil-pending" role="status" aria-live="polite" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="#transcript" hx-swap="innerHTML"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="foil-pending__note">{status}</span><form class="foil-cancel" hx-post="/idea/{slug}/cancel" hx-target="#transcript" hx-swap="innerHTML"><button type="submit" class="btn-cancel" title="Stop this run — nothing is saved">cancel</button></form></div>"##
     )
 }
 
@@ -157,7 +167,7 @@ pub(crate) fn transcript_inner(
     }
     html.push_str(&turns_html.concat());
     match pending {
-        Pending::Running(secs) => html.push_str(&pending_block(slug, secs)),
+        Pending::Running { secs, note } => html.push_str(&pending_block(slug, secs, &note)),
         Pending::Failed(msg) => html.push_str(&error_block(&msg)),
         Pending::Idle => {}
     }
@@ -220,6 +230,18 @@ pub async fn pending(
     Path(slug): Path<String>,
 ) -> Result<axum::response::Html<String>, WebError> {
     store::read_idea(&state.config.vault_dir, &slug)?; // 404 if the idea is gone
+    respond_with_transcript(&state, &slug)
+}
+
+/// `POST /idea/{slug}/cancel` — stop a running job: abort its detached task (dropping the in-flight
+/// model future, so nothing partial is persisted) and clear the slot. Returns the transcript with
+/// the indicator gone. Idempotent: cancelling when nothing runs just re-renders the current state.
+pub async fn cancel_job(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<axum::response::Html<String>, WebError> {
+    store::read_idea(&state.config.vault_dir, &slug)?; // 404 if the idea is gone
+    crate::web::jobs::cancel(&state.jobs, &slug);
     respond_with_transcript(&state, &slug)
 }
 

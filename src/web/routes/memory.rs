@@ -133,6 +133,16 @@ fn guard_discussion_state(state: IdeaState) -> Result<(), WebError> {
     }
 }
 
+/// Build the live-progress sink for a background job: a closure the orchestrators call to advance
+/// the job's note (surfaced in the "thinking" indicator). Routed through `jobs::set_note` so every
+/// slot mutation stays behind the `web::jobs` API (D4: `concepts` stays free of `web` — it only
+/// sees a plain `Fn(&str)`), and it is a no-op once the slot is gone (cancelled/finished).
+fn progress_sink(state: &AppState, slug: &str) -> impl Fn(&str) + Send + Sync {
+    let jobs = state.jobs.clone();
+    let slug = slug.to_string();
+    move |note: &str| jobs::set_note(&jobs, &slug, note)
+}
+
 /// R6 — `POST /idea/{slug}/skill/{name}` — apply a named ideation skill as a background job (D18).
 /// Stateless: `invoke` appends the assistant turn post-completion and does not change idea state;
 /// it gates its own AI call on the shared semaphore. Returns the transcript with the indicator.
@@ -154,12 +164,13 @@ pub async fn run_skill(
     }
     let ts = state.clone();
     let tslug = slug.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         match run_skill_work(&ts, &tslug, skill).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
+    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
     respond_with_transcript(&state, &slug)
 }
 
@@ -168,6 +179,7 @@ async fn run_skill_work(
     slug: &str,
     skill: concepts::skills::Skill,
 ) -> Result<(), String> {
+    let progress = progress_sink(state, slug);
     let out = concepts::skills::invoke(
         &state.llm,
         &state.ai_semaphore,
@@ -175,6 +187,7 @@ async fn run_skill_work(
         slug,
         &skill,
         ContextBudget::new(AI_BUDGET_BYTES),
+        &progress,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -245,16 +258,18 @@ pub async fn run_swarm(
     }
     let ts = state.clone();
     let tslug = slug.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         match run_swarm_work(&ts, &tslug, angles).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
+    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
     respond_with_transcript(&state, &slug)
 }
 
 async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Result<(), String> {
+    let progress = progress_sink(state, slug);
     let outcome = concepts::swarm::swarm(
         &state.llm,
         &state.ai_semaphore,
@@ -263,6 +278,7 @@ async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Re
         slug,
         angles,
         ContextBudget::new(AI_BUDGET_BYTES),
+        &progress,
     )
     .await
     .map_err(|e| e.to_string())?;

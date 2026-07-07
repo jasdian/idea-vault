@@ -52,6 +52,8 @@ pub fn build_router(state: AppState) -> Router {
         // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))
         .route("/idea/{slug}/pending", get(ideas::pending))
+        // Cancel a running background job (abort the detached task; nothing partial is saved).
+        .route("/idea/{slug}/cancel", post(ideas::cancel_job))
         // Manual auto-compact fold (docs/adr/0012).
         .route("/idea/{slug}/compact", post(compact::compact))
         // The "btw" history view + fork-to-new-idea.

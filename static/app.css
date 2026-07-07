@@ -218,6 +218,10 @@ h1.title {
   letter-spacing: .12em; color: var(--faint); margin-right: .15rem;
 }
 .moves form { margin: 0; }
+.moves__caption {
+  flex-basis: 100%; font-family: var(--serif); font-size: .78rem; font-style: italic;
+  color: var(--faint); margin-top: -.1rem;
+}
 .chip {
   font-family: var(--mono); font-size: .8rem; color: var(--ink);
   background: var(--surface); border: 1px solid var(--rule-strong);
@@ -288,6 +292,20 @@ h1.title {
 .foil-pending {
   display: flex; align-items: center; gap: .6rem; margin: 1rem 0 .5rem;
   font-family: var(--mono); font-size: .82rem; color: var(--accent);
+}
+.foil-pending__note { flex: 1; }
+.foil-cancel { margin: 0; }
+/* Cancel a running job — subtle, danger-tinted on hover like `.btn-danger`/`.mem-del`. */
+.btn-cancel {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .04em;
+  padding: .18rem .5rem; border-radius: 5px; cursor: pointer;
+  background: transparent; color: var(--faint);
+  border: 1px solid var(--rule-strong);
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.btn-cancel:hover {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 .foil-error {
   margin: 1rem 0 .5rem; padding: .7rem .85rem; border-radius: var(--radius);

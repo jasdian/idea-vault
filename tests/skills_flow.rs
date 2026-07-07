@@ -56,6 +56,7 @@ async fn invoke_hydrates_context_and_appends_assistant_turn() {
         "i",
         skill,
         ContextBudget::new(4096),
+        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -114,6 +115,7 @@ async fn failed_skill_call_appends_nothing() {
         "i",
         registry.get("devils-advocate").unwrap(),
         ContextBudget::new(4096),
+        &|_: &str| {},
     )
     .await;
     assert!(result.is_err());
@@ -144,6 +146,7 @@ async fn invoke_waits_on_the_shared_semaphore() {
         "i",
         &skill,
         ContextBudget::new(4096),
+        &|_: &str| {},
     );
     tokio::pin!(fut);
 

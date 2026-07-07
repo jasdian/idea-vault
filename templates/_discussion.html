@@ -21,8 +21,9 @@
     {% endif %}{% endfor %}
     <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML">
       <button type="submit" class="chip chip--swarm"
-              title="Fan out subagents from many angles, then converge">swarm</button>
+              title="Fans out subagents that attack the idea from 4 angles (premortem, cheapest-disproof, constraints, second-order effects), then converges them into one synthesis. Runs serially on a local model, so it takes a while.">swarm</button>
     </form>
+    <span class="moves__caption">attacks from 4 angles, then converges into one synthesis</span>
   </div>
 
   <div class="capstones">
