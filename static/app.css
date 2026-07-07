@@ -364,3 +364,11 @@ h1.title {
 }
 .settings input:focus, .settings select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .settings .btn { align-self: flex-start; }
+
+/* ---- btw / fork ------------------------------------------------------- */
+.idea-subhead { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap; }
+.btw-link { font-family: var(--mono); font-size: .74rem; color: var(--faint); text-decoration: none; }
+.btw-link:hover { color: var(--accent); }
+.btw__intro { color: var(--muted); margin: .5rem 0 1.25rem; max-width: 34rem; }
+.btw__fork { margin: 0 0 1.5rem; }
+.thread--readonly { opacity: .96; }

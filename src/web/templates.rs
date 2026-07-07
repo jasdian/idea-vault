@@ -53,6 +53,15 @@ pub struct MemoryPanel {
     pub entries: Vec<MemoryIndexEntry>,
 }
 
+/// The "btw" history view (`templates/history.html`): the whole thread on its own page + Fork.
+#[derive(Template, WebTemplate)]
+#[template(path = "history.html")]
+pub struct HistoryPage {
+    pub title: String,
+    pub slug: String,
+    pub transcript_html: String,
+}
+
 /// The settings page shell (`templates/settings.html`); the form is pre-rendered so a save can
 /// swap just the form.
 #[derive(Template, WebTemplate)]

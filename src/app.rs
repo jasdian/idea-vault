@@ -52,6 +52,9 @@ pub fn build_router(state: AppState) -> Router {
         // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))
         .route("/idea/{slug}/pending", get(ideas::pending))
+        // The "btw" history view + fork-to-new-idea.
+        .route("/idea/{slug}/history", get(ideas::history_page))
+        .route("/idea/{slug}/fork", post(ideas::fork_idea))
         // Search.
         .route("/search", get(ideas::search))
         // Live LLM settings (backend toggle + params).

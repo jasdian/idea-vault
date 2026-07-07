@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="crumb" href="/idea/{{ slug }}">← back to the idea</a>
+<h1 class="title">btw — {{ title }}</h1>
+<p class="btw__intro">The whole thread, on its own. Fork it to chase a tangent as a new idea —
+  the full context comes with it, and this line stays untouched.</p>
+
+<form class="btw__fork" hx-post="/idea/{{ slug }}/fork" hx-disabled-elt="find button"
+      hx-confirm="Fork this into a new idea? The conversation and memory are copied.">
+  <button type="submit" class="btn">⑃ Fork into a new idea</button>
+</form>
+
+<div id="transcript" class="thread--readonly">{{ transcript_html|safe }}</div>
+{% endblock %}

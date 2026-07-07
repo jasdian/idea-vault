@@ -190,6 +190,82 @@ pub async fn pending(
     respond_with_transcript(&state, &slug)
 }
 
+/// `GET /idea/{slug}/history` — the "btw" view: the whole thread on its own page, read-only, with a
+/// Fork control. A place to see the full line of thinking and branch off it without derailing it.
+pub async fn history_page(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<crate::web::templates::HistoryPage, WebError> {
+    let vault_dir = &state.config.vault_dir;
+    let idea = store::read_idea(vault_dir, &slug)?; // 404 if missing
+    let conversation = store::read_conversation(vault_dir, &slug)?;
+    let transcript_html = transcript_inner(
+        &slug,
+        &state.llm.model(),
+        &conversation,
+        crate::web::jobs::Pending::Idle,
+    )?;
+    Ok(crate::web::templates::HistoryPage {
+        title: idea.frontmatter.title.clone(),
+        slug,
+        transcript_html,
+    })
+}
+
+/// `POST /idea/{slug}/fork` — branch this idea into a NEW idea carrying its full context forward
+/// (body + conversation + memory), so a tangent can run without disturbing the original. Redirects
+/// (HX-Redirect) to the fork.
+pub async fn fork_idea(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<axum::response::Response, WebError> {
+    use axum::response::IntoResponse;
+    let vault_dir = &state.config.vault_dir;
+    let src = store::read_idea(vault_dir, &slug)?; // 404 if missing
+
+    // Distinct slug derived from the source, disambiguated against existing idea dirs (D22).
+    let base = domain_slug::slugify(&format!("{}-fork", src.frontmatter.title));
+    let base = if base.is_empty() {
+        format!("{slug}-fork")
+    } else {
+        base
+    };
+    let new_slug = domain_slug::disambiguate(&base, |c| vault_dir.join(c).is_dir());
+
+    let now = Utc::now();
+    let fork = Idea {
+        frontmatter: IdeaFrontmatter {
+            title: format!("{} (fork)", src.frontmatter.title),
+            slug: new_slug.clone(),
+            // It carries a conversation forward, so it opens mid-discussion, not as a blank draft.
+            state: IdeaState::InDiscussion,
+            tags: src.frontmatter.tags.clone(),
+            created: now,
+            updated: now,
+        },
+        body: src.body.clone(),
+    };
+    store::create_idea(vault_dir, &fork)?;
+
+    // Carry the full context: the whole transcript and every memory fact.
+    let conversation = store::read_conversation(vault_dir, &slug)?;
+    if !conversation.is_empty() {
+        store::append_conversation(vault_dir, &new_slug, &conversation)?;
+    }
+    for fact in store::read_memory_facts(vault_dir, &slug)? {
+        store::write_memory_fact(vault_dir, &new_slug, &fact)?;
+    }
+    store::rebuild_memory_index(vault_dir, &new_slug)?;
+    crate::web::routes::reindex_logged(&state);
+
+    // HTMX full-page navigation to the fork.
+    Ok((
+        [("HX-Redirect", format!("/idea/{new_slug}"))],
+        axum::http::StatusCode::OK,
+    )
+        .into_response())
+}
+
 /// Build the discussion pane for any discussion-state idea: rendered transcript turns plus the
 /// D20 availability state with its per-state remedy copy. Shared with the reopen route (R5),
 /// which returns this partial directly.
