@@ -43,7 +43,7 @@ async fn chat_persists_both_turns_and_returns_the_transcript() {
     let (status, body) = post_form(state, "/idea/chatty/chat", "message=push%20the%20idea").await;
     assert_eq!(status, StatusCode::OK);
     // The response is the re-rendered transcript HTML: both turns present, remove controls too.
-    assert!(body.contains("turn-user") && body.contains("turn-assistant"));
+    assert!(body.contains("turn--you") && body.contains("turn--foil"));
     assert!(body.contains("push the idea"));
     assert!(body.contains("Steelmanned reply"));
     assert!(

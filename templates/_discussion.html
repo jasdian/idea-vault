@@ -2,38 +2,52 @@
   <div id="transcript">
     {% for t in turns_html %}{{ t|safe }}{% endfor %}
   </div>
+
+  <div class="foil-status" role="status" aria-live="polite">
+    <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span>the foil is thinking — this can take a moment</span>
+  </div>
+
   {% if ai_available %}
-  <form hx-post="/idea/{{ slug }}/chat" hx-target="#transcript" hx-swap="innerHTML"
+  <form class="composer" hx-post="/idea/{{ slug }}/chat"
+        hx-target="#transcript" hx-swap="innerHTML" hx-indicator=".discussion"
         hx-disabled-elt="find button, find textarea"
         hx-on::after-request="if(event.detail.successful) this.reset()">
-    <textarea name="message" placeholder="Push the idea…" rows="3"></textarea>
-    <button type="submit">Send</button>
-    <span class="htmx-indicator muted">thinking…</span>
+    <textarea name="message" rows="3"
+              placeholder="Push the idea — steelman it, then break it."></textarea>
+    <div class="composer__row">
+      <button type="submit" class="btn">Send</button>
+    </div>
   </form>
+
   {% if can_store %}
   <div class="moves">
+    <span class="moves__label">moves</span>
     {% for name in skill_names %}
-    <form hx-post="/idea/{{ slug }}/skill/{{ name }}" hx-target="#transcript" hx-swap="innerHTML"
+    <form hx-post="/idea/{{ slug }}/skill/{{ name }}"
+          hx-target="#transcript" hx-swap="innerHTML" hx-indicator=".discussion"
           hx-disabled-elt="find button">
-      <button type="submit" title="Run the {{ name }} move (D18)">{{ name }}</button>
+      <button type="submit" class="chip" title="Run the {{ name }} move">{{ name }}</button>
     </form>
     {% endfor %}
-    <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML"
+    <form hx-post="/idea/{{ slug }}/swarm"
+          hx-target="#transcript" hx-swap="innerHTML" hx-indicator=".discussion"
           hx-disabled-elt="find button">
-      <button type="submit" title="Fan out subagents and converge (D14)">swarm</button>
+      <button type="submit" class="chip chip--swarm"
+              title="Fan out subagents from many angles, then converge">swarm</button>
     </form>
   </div>
-  <form hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
-        title="Consolidate the idea and extract memory (D12)">
-    <button type="submit">Store it in the vault</button>
-  </form>
+  <div class="commit">
+    <form hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
+          hx-indicator=".discussion" hx-disabled-elt="find button">
+      <button type="submit" class="btn"
+              title="Consolidate the idea and extract durable memory">Store in the vault</button>
+    </form>
+  </div>
   {% endif %}
+
   {% else %}
-  <p class="banner">AI is unavailable — {{ unavailable_hint }}. Browsing still works;
-    the compose box is disabled until the model is ready.</p>
-  <form>
-    <textarea name="message" rows="3" disabled></textarea>
-    <button type="submit" disabled>Send</button>
-  </form>
+  <p class="note">The foil is offline — {{ unavailable_hint }}. Browsing still works; composing
+    resumes once the model is ready.</p>
   {% endif %}
 </div>

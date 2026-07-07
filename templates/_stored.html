@@ -1,7 +1,7 @@
 <div class="stored" data-slug="{{ slug }}">
-  <p class="muted">Stored.</p>
-  <article>{{ body_html|safe }}</article>
+  <p class="stored__label">stored · dormant</p>
+  <div class="statement">{{ body_html|safe }}</div>
   <form hx-post="/idea/{{ slug }}/reopen" hx-target="#discussion" hx-swap="innerHTML">
-    <button type="submit">Reopen</button>
+    <button type="submit" class="btn">Reopen &amp; carry memory forward</button>
   </form>
 </div>

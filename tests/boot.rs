@@ -74,7 +74,7 @@ async fn root_lists_empty_state() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_string(resp).await.contains("No ideas yet"));
+    assert!(body_string(resp).await.contains("Nothing here yet"));
 }
 
 #[tokio::test]

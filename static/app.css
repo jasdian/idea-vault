@@ -1,0 +1,283 @@
+/* idea-vault — an editorial lab notebook for interrogating one idea.
+   Serif thought + monospace machinery; indigo ink accent; annotated-dialogue transcript. */
+
+:root {
+  --paper: #f6f5f1;
+  --surface: #fffffe;
+  --ink: #1b1a17;
+  --muted: #6b6862;
+  --faint: #8f8c84;
+  --rule: #e5e3db;
+  --rule-strong: #d7d4ca;
+  --accent: #4b3fd6;
+  --accent-soft: #efeefc;
+  --ok: #2f7d5b;
+  --ok-soft: #e6f2ec;
+  --warn: #9a6b12;
+  --warn-soft: #f6eede;
+  --danger: #b23b3b;
+
+  --serif: "Iowan Old Style", "Charter", "Palatino Linotype", "Book Antiqua",
+    Palatino, Georgia, "Times New Roman", serif;
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Menlo", "Cascadia Mono",
+    Consolas, monospace;
+
+  --measure: 42rem;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #16161a;
+    --surface: #1e1e24;
+    --ink: #e9e8e3;
+    --muted: #9a988f;
+    --faint: #77746c;
+    --rule: #2b2b33;
+    --rule-strong: #3a3a44;
+    --accent: #8b7cff;
+    --accent-soft: #24223a;
+    --ok: #6bbf95;
+    --ok-soft: #1c2a24;
+    --warn: #d6a75a;
+    --warn-soft: #2a2418;
+    --danger: #e07a7a;
+  }
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: var(--measure); margin: 0 auto; padding: 1.75rem 1.25rem 5rem; }
+
+a { color: var(--accent); text-underline-offset: 2px; text-decoration-thickness: 1px; }
+
+/* ---- masthead --------------------------------------------------------- */
+.topbar {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding-bottom: .75rem; margin-bottom: 1.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+.brand {
+  font-family: var(--mono); font-weight: 600; letter-spacing: .02em;
+  font-size: .95rem; color: var(--ink); text-decoration: none;
+}
+.brand b { color: var(--accent); font-weight: 600; }
+.topbar a.meta { font-family: var(--mono); font-size: .8rem; color: var(--muted); text-decoration: none; }
+.topbar a.meta:hover { color: var(--accent); }
+
+/* ---- crumbs + headings ------------------------------------------------ */
+.crumb {
+  font-family: var(--mono); font-size: .8rem; letter-spacing: .02em;
+  color: var(--muted); text-decoration: none; display: inline-block; margin-bottom: 1.5rem;
+}
+.crumb:hover { color: var(--accent); }
+
+h1.title {
+  font-family: var(--serif); font-weight: 600; font-size: 2.15rem;
+  line-height: 1.12; letter-spacing: -.01em; margin: 0 0 .6rem;
+}
+
+/* ---- state pill ------------------------------------------------------- */
+.state {
+  display: inline-block; font-family: var(--mono); font-size: .68rem;
+  text-transform: uppercase; letter-spacing: .1em; padding: .18rem .5rem;
+  border-radius: 999px; border: 1px solid transparent; vertical-align: middle;
+}
+.state--draft { color: var(--muted); background: transparent; border-color: var(--rule-strong); }
+.state--in_discussion { color: var(--accent); background: var(--accent-soft); }
+.state--reopened { color: var(--warn); background: var(--warn-soft); }
+.state--stored { color: var(--ok); background: var(--ok-soft); }
+
+/* ---- idea statement + memory ----------------------------------------- */
+.statement { margin: 1.5rem 0; }
+.statement > :first-child { margin-top: 0; }
+.statement > :last-child { margin-bottom: 0; }
+
+.memory {
+  margin: 1.75rem 0; padding: 0 0 0 1rem; border-left: 2px solid var(--rule-strong);
+}
+.memory h2 {
+  font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--faint); font-weight: 600; margin: 0 0 .5rem;
+}
+.memory ul { list-style: none; margin: 0; padding: 0; }
+.memory li { font-size: .95rem; margin: .25rem 0; }
+.memory code { font-family: var(--mono); font-size: .82em; color: var(--accent); }
+
+/* ---- discussion + transcript (the signature) -------------------------- */
+.discussion { margin-top: 2rem; }
+#transcript:empty::before {
+  content: "No exchange yet. Push the idea below and let the foil break it.";
+  display: block; color: var(--faint); font-style: italic; padding: .5rem 0 1rem;
+}
+
+.turn { position: relative; padding: .35rem 0 .35rem 0; margin: 1.35rem 0; }
+.turn__tag {
+  display: flex; align-items: center; gap: .5rem;
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .06em;
+  color: var(--faint); margin-bottom: .3rem;
+}
+.turn--foil .turn__tag { color: var(--accent); }
+.turn__body { }
+.turn__body > :first-child { margin-top: 0; }
+.turn__body > :last-child { margin-bottom: 0; }
+
+/* the owner speaks plainly; the foil's replies carry an indigo spine */
+.turn--foil { padding-left: 1rem; border-left: 2px solid var(--accent); }
+.turn--foil .turn__body { color: var(--ink); }
+.turn--you .turn__body { color: color-mix(in srgb, var(--ink) 88%, var(--paper)); }
+
+.turn__del {
+  margin: 0; margin-left: auto;
+  opacity: 0; transition: opacity .12s ease;
+}
+.turn:hover .turn__del, .turn:focus-within .turn__del { opacity: 1; }
+.turn__del button {
+  border: none; background: none; cursor: pointer; color: var(--faint);
+  font-size: .8rem; line-height: 1; padding: .1rem .35rem; border-radius: 4px;
+  font-family: var(--mono);
+}
+.turn__del button:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+.turn__body pre {
+  background: color-mix(in srgb, var(--ink) 5%, var(--paper)); border: 1px solid var(--rule);
+  border-radius: 6px; padding: .6rem .75rem; overflow-x: auto; font-size: .85rem;
+}
+.turn__body code { font-family: var(--mono); font-size: .88em; }
+.turn__body p code { background: color-mix(in srgb, var(--ink) 6%, var(--paper)); padding: .05em .3em; border-radius: 3px; }
+
+/* ---- composer --------------------------------------------------------- */
+.composer {
+  margin: 1.5rem 0 .75rem; background: var(--surface);
+  border: 1px solid var(--rule-strong); border-radius: var(--radius);
+  padding: .75rem; transition: border-color .15s ease, box-shadow .15s ease;
+}
+.composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.composer textarea {
+  width: 100%; border: none; background: none; color: var(--ink);
+  font-family: var(--serif); font-size: 1.03rem; line-height: 1.55; resize: vertical;
+  min-height: 3.4rem; padding: .15rem;
+}
+.composer textarea:focus { outline: none; }
+.composer textarea::placeholder { color: var(--faint); font-style: italic; }
+.composer__row { display: flex; align-items: center; gap: .75rem; margin-top: .4rem; }
+
+/* ---- buttons ---------------------------------------------------------- */
+.btn {
+  font-family: var(--mono); font-size: .82rem; letter-spacing: .02em;
+  padding: .4rem .85rem; border-radius: 6px; border: 1px solid var(--accent);
+  background: var(--accent); color: #fff; cursor: pointer;
+  transition: filter .12s ease, transform .06s ease;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: .55; cursor: progress; }
+.btn--ghost { background: transparent; color: var(--accent); }
+.btn--ghost:hover { background: var(--accent-soft); filter: none; }
+
+/* ---- the foil-is-thinking indicator (shown during any AI request) ----- */
+.foil-status {
+  display: none; align-items: center; gap: .6rem;
+  font-family: var(--mono); font-size: .8rem; color: var(--accent);
+  margin: .25rem 0 .5rem;
+}
+.discussion.htmx-request .foil-status { display: flex; }
+.dots { display: inline-flex; gap: .28rem; }
+.dots i {
+  width: .42rem; height: .42rem; border-radius: 50%; background: var(--accent);
+  display: inline-block; opacity: .3;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dots i { animation: pulse 1.1s ease-in-out infinite; }
+  .dots i:nth-child(2) { animation-delay: .18s; }
+  .dots i:nth-child(3) { animation-delay: .36s; }
+}
+@keyframes pulse { 0%, 100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
+
+/* dim + lock the controls while the foil works */
+.discussion.htmx-request .composer,
+.discussion.htmx-request .moves,
+.discussion.htmx-request .commit { opacity: .5; pointer-events: none; }
+
+/* ---- moves rail (a command palette of ideation moves) ----------------- */
+.moves { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin: .5rem 0 1rem; }
+.moves__label {
+  font-family: var(--mono); font-size: .7rem; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--faint); margin-right: .15rem;
+}
+.moves form { margin: 0; }
+.chip {
+  font-family: var(--mono); font-size: .8rem; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule-strong);
+  border-radius: 6px; padding: .32rem .6rem; cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.chip::before { content: "› "; color: var(--faint); }
+.chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.chip:disabled { opacity: .5; cursor: progress; }
+.chip--swarm { border-color: var(--accent); color: var(--accent); }
+
+.commit { margin-top: .25rem; }
+.commit .btn { background: transparent; color: var(--ink); border-color: var(--rule-strong); }
+.commit .btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); filter: none; }
+
+/* ---- degraded AI note ------------------------------------------------- */
+.note {
+  font-family: var(--mono); font-size: .82rem; line-height: 1.5;
+  color: var(--warn); background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  border-radius: var(--radius); padding: .7rem .85rem; margin: 1rem 0;
+}
+.note code { color: var(--ink); }
+
+/* ---- stored view ------------------------------------------------------ */
+.stored__label {
+  font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--ok); margin: 0 0 .75rem;
+}
+
+/* ---- list page -------------------------------------------------------- */
+.newidea { display: flex; gap: .5rem; margin: 1.25rem 0 .5rem; }
+.newidea input {
+  flex: 1; font-family: var(--serif); font-size: 1rem; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule-strong);
+  border-radius: 6px; padding: .5rem .7rem;
+}
+.newidea input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.search {
+  width: 100%; font-family: var(--mono); font-size: .85rem; color: var(--ink);
+  background: none; border: none; border-bottom: 1px solid var(--rule);
+  padding: .5rem .1rem; margin: .5rem 0 1.25rem;
+}
+.search:focus { outline: none; border-bottom-color: var(--accent); }
+.search::placeholder { color: var(--faint); }
+
+.idea-row { padding: .7rem 0; border-bottom: 1px solid var(--rule); display: flex; align-items: baseline; gap: .6rem; }
+.idea-row a { font-family: var(--serif); font-size: 1.1rem; color: var(--ink); text-decoration: none; }
+.idea-row a:hover { color: var(--accent); }
+.idea-row .idea-meta { font-family: var(--mono); font-size: .72rem; color: var(--faint); margin-left: auto; white-space: nowrap; }
+.idea-row ~ .empty-state { display: none; }
+.empty-state { color: var(--faint); font-style: italic; padding: 1.5rem 0; }
+
+.search-results { list-style: none; margin: .5rem 0; padding: 0; }
+.search-results li { padding: .5rem 0; border-bottom: 1px solid var(--rule); }
+.search-results a { font-family: var(--serif); color: var(--ink); text-decoration: none; }
+.search-results a:hover { color: var(--accent); }
+.search-results .snippet { display: block; font-size: .85rem; color: var(--muted); }
+
+@media (max-width: 34rem) {
+  h1.title { font-size: 1.75rem; }
+  .wrap { padding: 1.25rem 1rem 4rem; }
+}

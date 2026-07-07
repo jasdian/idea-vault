@@ -1,4 +1,5 @@
 <div class="idea-row">
   <a href="/idea/{{ idea.slug }}">{{ idea.title }}</a>
-  <span class="muted">— {{ idea.state }} · {{ idea.updated_at }}</span>
+  <span class="state state--{{ idea.state }}">{{ idea.state }}</span>
+  <span class="idea-meta">{{ idea.updated_at }}</span>
 </div>

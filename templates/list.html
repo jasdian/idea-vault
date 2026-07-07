@@ -1,23 +1,22 @@
 {% extends "base.html" %}
 
 {% block content %}
-<h1>Ideas</h1>
+<h1 class="title">Ideas</h1>
 
-<form hx-post="/ideas" hx-target="#idea-list" hx-swap="afterbegin">
-  <input type="text" name="title" placeholder="Bring an idea…" autocomplete="off" />
-  <button type="submit">New idea</button>
+<form class="newidea" hx-post="/ideas" hx-target="#idea-list" hx-swap="afterbegin"
+      hx-on::after-request="if(event.detail.successful) this.reset()">
+  <input type="text" name="title" placeholder="Bring a raw idea…" autocomplete="off" />
+  <button type="submit" class="btn">New idea</button>
 </form>
 
-<input type="search" name="q" placeholder="Search…" autocomplete="off"
-       hx-get="/search" hx-trigger="keyup changed delay:300ms" hx-target="#results" />
+<input class="search" type="search" name="q" placeholder="Search ideas…" autocomplete="off"
+       hx-get="/search" hx-trigger="keyup changed delay:300ms, search" hx-target="#results" />
 <div id="results"></div>
 
 <div id="idea-list">
   {% for idea in ideas %}
   {% include "_idea_row.html" %}
   {% endfor %}
-  {# Kept as the LAST child so an hx-swap="afterbegin" row insert hides it via CSS —
-     the placeholder must not survive visibly after the first create. #}
-  <p class="muted empty-state">No ideas yet — bring one.</p>
+  <p class="empty-state">Nothing here yet — bring a raw idea and run it into the ground.</p>
 </div>
 {% endblock %}

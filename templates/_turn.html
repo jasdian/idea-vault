@@ -1,11 +1,13 @@
-<div class="turn turn-{{ role }}">
-  <div class="turn-head">
-    <strong>{{ role }}</strong>
-    <form hx-post="/idea/{{ slug }}/turn/{{ index }}/delete"
-          hx-target="#transcript" hx-swap="innerHTML"
-          hx-confirm="Remove this message?">
-      <button type="submit" class="turn-remove" title="Remove this message">✕</button>
-    </form>
+<div class="turn turn--{% if is_user %}you{% else %}foil{% endif %}">
+  <div class="turn__tag">
+    <span>{{ label }}</span>
+    <span class="turn__del">
+      <form hx-post="/idea/{{ slug }}/turn/{{ index }}/delete"
+            hx-target="#transcript" hx-swap="innerHTML"
+            hx-confirm="Remove this message?">
+        <button type="submit" title="Remove this message" aria-label="Remove this message">✕</button>
+      </form>
+    </span>
   </div>
-  <div class="turn-content">{{ content_html|safe }}</div>
+  <div class="turn__body">{{ content_html|safe }}</div>
 </div>

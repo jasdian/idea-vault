@@ -37,19 +37,41 @@ fn turn_role_and_content(turn: &str) -> (String, String) {
     }
 }
 
-/// Render every transcript turn as HTML (role-labelled, markdown → sanitized), each carrying its
-/// 0-based index for the per-turn remove control. Shared by the discussion pane and every action
-/// that mutates the transcript (chat/skill/swarm/delete all re-render and swap `#transcript`).
-fn render_turns(vault_dir: &std::path::Path, slug: &str) -> Result<Vec<String>, WebError> {
+/// Turn the stored role heading into a display label + whether it's the owner's turn:
+/// `user` → `you`; `assistant` → `foil`; `assistant (skill: premortem)` → `foil · premortem`;
+/// `assistant (swarm)` → `foil · swarm`; `assistant (workflow: x)` → `foil · workflow x`.
+fn turn_label(role: &str) -> (String, bool) {
+    if role == "user" {
+        return ("you".to_string(), true);
+    }
+    if let Some(rest) = role.strip_prefix("assistant") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return ("foil".to_string(), false);
+        }
+        let inner = rest.trim_start_matches('(').trim_end_matches(')');
+        let lens = inner
+            .split_once(':')
+            .map(|(_, v)| v.trim())
+            .unwrap_or(inner);
+        return (format!("foil · {lens}"), false);
+    }
+    (role.to_string(), false)
+}
+
+/// Render each turn of a transcript to HTML. Shared by the discussion pane (which has the text)
+/// and [`render_transcript`] (which reads it) so chat/skill/swarm/delete re-render identically.
+fn turns_to_html(slug: &str, conversation: &str) -> Result<Vec<String>, WebError> {
     use askama::Template as _;
-    let conversation = store::read_conversation(vault_dir, slug)?;
-    store::split_turns(&conversation)
+    store::split_turns(conversation)
         .iter()
         .enumerate()
         .map(|(index, turn)| {
             let (role, content) = turn_role_and_content(turn);
+            let (label, is_user) = turn_label(&role);
             crate::web::templates::Turn {
-                role,
+                label,
+                is_user,
                 content_html: crate::web::templates::render_markdown(&content),
                 slug: slug.to_string(),
                 index,
@@ -66,8 +88,9 @@ pub(crate) fn render_transcript(
     vault_dir: &std::path::Path,
     slug: &str,
 ) -> Result<axum::response::Html<String>, WebError> {
+    let conversation = store::read_conversation(vault_dir, slug)?;
     Ok(axum::response::Html(
-        render_turns(vault_dir, slug)?.concat(),
+        turns_to_html(slug, &conversation)?.concat(),
     ))
 }
 
@@ -94,26 +117,8 @@ pub(crate) fn build_discussion(
         ),
     };
 
-    // `build_discussion` receives the conversation text directly (not a vault dir), so render its
-    // turns here with the same indexed shape `render_turns` produces.
-    let turns_html = {
-        use askama::Template as _;
-        store::split_turns(conversation)
-            .iter()
-            .enumerate()
-            .map(|(index, turn)| {
-                let (role, content) = turn_role_and_content(turn);
-                crate::web::templates::Turn {
-                    role,
-                    content_html: crate::web::templates::render_markdown(&content),
-                    slug: slug.to_string(),
-                    index,
-                }
-                .render()
-                .map_err(|e| WebError::Internal(format!("template render: {e}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    // `build_discussion` has the conversation text directly; render turns with the shared helper.
+    let turns_html = turns_to_html(slug, conversation)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),

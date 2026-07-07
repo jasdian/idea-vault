@@ -4,45 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>idea-vault</title>
+    <link rel="stylesheet" href="/static/app.css" />
     <script src="/static/htmx.min.js"></script>
-    <style>
-      :root { color-scheme: light dark; }
-      body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto;
-             padding: 0 1rem; line-height: 1.5; }
-      nav { display: flex; justify-content: space-between; align-items: baseline;
-            border-bottom: 1px solid #8884; padding-bottom: .5rem; margin-bottom: 1.5rem; }
-      nav .brand { font-weight: 600; }
-      input, textarea, button { font: inherit; }
-      .idea-row { padding: .5rem 0; border-bottom: 1px solid #8882; }
-      /* hide the empty-state once any idea row exists (incl. HTMX afterbegin inserts) */
-      .idea-row ~ .empty-state { display: none; }
-      .muted { color: #8888; }
-      .banner { background: #fdd8; border: 1px solid #c003; padding: .5rem; border-radius: .25rem; }
-      /* conversation turns */
-      .turn { padding: .5rem .75rem; margin: .5rem 0; border-radius: .375rem; border: 1px solid #8883; }
-      .turn-user { background: #8881; }
-      .turn-assistant, .turn[class*="assistant"] { background: #7cf1; }
-      .turn-head { display: flex; justify-content: space-between; align-items: center; }
-      .turn-head strong { font-size: .85rem; color: #888; text-transform: lowercase; }
-      .turn-head form { margin: 0; }
-      .turn-remove { border: none; background: none; color: #999; cursor: pointer;
-                     font-size: .9rem; line-height: 1; padding: .1rem .3rem; }
-      .turn-remove:hover { color: #c00; }
-      .turn-content > :first-child { margin-top: .25rem; }
-      .turn-content > :last-child { margin-bottom: 0; }
-      .moves { display: flex; flex-wrap: wrap; gap: .4rem; margin: .5rem 0; }
-      .moves form { margin: 0; }
-      /* htmx request feedback */
-      .htmx-indicator { opacity: 0; margin-left: .5rem; transition: opacity .2s; }
-      .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
-      [disabled], .htmx-request button { opacity: .6; cursor: progress; }
-    </style>
   </head>
   <body>
-    <nav>
-      <span class="brand">idea-vault</span>
-      <a href="/admin/health">health</a>
-    </nav>
-    {% block content %}{% endblock %}
+    <div class="wrap">
+      <nav class="topbar">
+        <a class="brand" href="/">idea·<b>vault</b></a>
+        <a class="meta" href="/admin/health">health</a>
+      </nav>
+      {% block content %}{% endblock %}
+    </div>
   </body>
 </html>

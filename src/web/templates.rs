@@ -51,12 +51,14 @@ pub struct IdeaRow {
     pub idea: IdeaSummary,
 }
 
-/// Partial: one conversation turn (R6/R7/R9, `templates/_turn.html`). Carries its slug + 0-based
-/// transcript index so the template can offer a per-turn remove control.
+/// Partial: one conversation turn (R6/R7/R9, `templates/_turn.html`). Carries a display label
+/// (`you` / `foil · premortem`), whether it's the owner's turn, and its slug + 0-based transcript
+/// index for the per-turn remove control.
 #[derive(Template, WebTemplate)]
 #[template(path = "_turn.html")]
 pub struct Turn {
-    pub role: String,
+    pub label: String,
+    pub is_user: bool,
     pub content_html: String,
     pub slug: String,
     pub index: usize,

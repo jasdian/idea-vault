@@ -1,11 +1,11 @@
 {% if hits.is_empty() %}
-<p class="muted">No matches.</p>
+<p class="empty-state">No matches.</p>
 {% else %}
 <ul class="search-results">
   {% for hit in hits %}
   <li>
     <a href="/idea/{{ hit.slug }}">{{ hit.title }}</a>
-    <span class="muted">{{ hit.snippet }}</span>
+    <span class="snippet">{{ hit.snippet }}</span>
   </li>
   {% endfor %}
 </ul>

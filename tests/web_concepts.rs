@@ -43,10 +43,7 @@ async fn run_skill_returns_turn_partial_and_appends_it() {
     let (status, body) = post_form(state, "/idea/movable/skill/premortem", "").await;
     assert_eq!(status, StatusCode::OK);
     // The _turn.html partial with the labelled role and rendered content.
-    assert!(
-        body.contains("turn-assistant (skill: premortem)")
-            || body.contains("assistant (skill: premortem)")
-    );
+    assert!(body.contains("foil · premortem"));
     assert!(body.contains("Ranked failure causes."));
 
     // Persisted as a labelled assistant turn; the skill template reached the model.
@@ -87,7 +84,7 @@ async fn run_swarm_defaults_to_the_canonical_angles_and_persists_only_synthesis(
 
     let (status, body) = post_form(state, "/idea/movable/swarm", "").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("assistant (swarm)"));
+    assert!(body.contains("foil · swarm"));
     assert!(body.contains("converged finding"));
 
     // Canonical D14 set: 4 angles + 1 synthesizer = 5 model calls.

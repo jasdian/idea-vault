@@ -105,7 +105,7 @@ async fn store_with_ai_down_is_503_and_truth_untouched() {
 
     let (status, body) = post_form(state, "/idea/vaulted/store", "").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body.contains("AI is unavailable"));
+    assert!(body.contains("AI is unavailable")); // the generic 503 body (web/mod.rs)
     assert_eq!(
         store::read_idea(&vault_dir, "vaulted").unwrap(),
         idea_before

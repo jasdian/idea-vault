@@ -36,7 +36,7 @@ async fn create_idea_lands_as_draft_on_disk_and_in_index() {
     let (status, list) = get(state, "/").await;
     assert_eq!(status, StatusCode::OK);
     let row_pos = list.find("Distributed Idea Market").expect("row rendered");
-    let placeholder_pos = list.find("No ideas yet").expect("placeholder in DOM");
+    let placeholder_pos = list.find("Nothing here yet").expect("placeholder in DOM");
     assert!(row_pos < placeholder_pos, "rows precede the empty-state");
 }
 

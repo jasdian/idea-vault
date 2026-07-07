@@ -72,11 +72,11 @@ async fn idea_page_renders_sanitized_body_transcript_and_memory() {
     // Transcript: both turns rendered with roles and markdown.
     assert!(body.contains("<em>probing</em>"));
     assert!(body.contains("a counterpoint"));
-    assert!(body.contains("turn-user") && body.contains("turn-assistant"));
+    assert!(body.contains("turn--you") && body.contains("turn--foil"));
     // Memory panel: index entry visible.
     assert!(body.contains("[[core-tension]]") && body.contains("The one durable conclusion."));
     // Degraded AI (harness refuses): banner with the Unreachable remedy + disabled compose (D20).
-    assert!(body.contains("AI is unavailable"));
+    assert!(body.contains("The foil is offline"));
     assert!(body.contains("ollama serve"), "Unreachable remedy copy");
 }
 
@@ -89,7 +89,7 @@ async fn compose_box_is_live_when_ollama_is_available() {
     let (status, body) = get(state, "/idea/sharp-idea").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("hx-post=\"/idea/sharp-idea/chat\""));
-    assert!(!body.contains("AI is unavailable"));
+    assert!(!body.contains("The foil is offline"));
 }
 
 #[tokio::test]
@@ -104,7 +104,7 @@ async fn stored_idea_shows_reopen_panel_not_compose() {
         !body.contains("/idea/sharp-idea/chat"),
         "no compose when Stored"
     );
-    assert!(body.contains("state: stored"));
+    assert!(body.contains("state--stored"));
 }
 
 #[tokio::test]
@@ -133,10 +133,14 @@ async fn model_missing_disables_compose_with_pull_hint() {
 
     let (status, body) = get(state, "/idea/sharp-idea").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("AI is unavailable"));
+    assert!(body.contains("The foil is offline"));
     assert!(
         body.contains("ollama pull llama3.2"),
         "D20 per-state remedy"
     );
-    assert!(body.contains("disabled"));
+    // No composer is rendered while the model is unavailable — just the note.
+    assert!(
+        !body.contains("/idea/sharp-idea/chat"),
+        "compose box absent when offline"
+    );
 }
