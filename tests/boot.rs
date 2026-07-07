@@ -42,6 +42,7 @@ fn test_state() -> AppState {
         db: Arc::new(Mutex::new(conn)),
         ollama,
         ai_semaphore: Arc::new(Semaphore::new(1)),
+        skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
     }
 }
 

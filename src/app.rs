@@ -22,6 +22,8 @@ pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub ollama: crate::ai::OllamaClient,
     pub ai_semaphore: Arc<Semaphore>,
+    /// Built-in skill registry, populated at boot (docs/06-concepts/skills.md "Registry").
+    pub skills: Arc<crate::concepts::skills::SkillRegistry>,
 }
 
 /// Build the full axum router (D17 route map) with the tracing middleware layer (D16).

@@ -71,6 +71,8 @@ pub struct Discussion {
     /// The D20 per-state remedy shown in the banner when AI is unavailable
     /// (`ollama serve` for Unreachable, `ollama pull <model>` for ModelMissing).
     pub unavailable_hint: String,
+    /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
+    pub skill_names: Vec<String>,
     /// Existing transcript turns, each pre-rendered via [`Turn`] (single source: `_turn.html`).
     pub turns_html: Vec<String>,
 }

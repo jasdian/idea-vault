@@ -65,11 +65,13 @@ async fn main() -> anyhow::Result<()> {
     // 6. Shared state.
     let ai_concurrency = config.ai_concurrency.max(1);
     let bind = config.bind.clone();
+    let skills = Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin());
     let state = AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
         ollama,
         ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
+        skills,
     };
 
     // 7. Router + serve.

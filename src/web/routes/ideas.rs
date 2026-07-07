@@ -46,6 +46,7 @@ pub(crate) fn build_discussion(
     health: crate::ai::AiHealth,
     model: &str,
     can_store: bool,
+    skill_names: Vec<String>,
 ) -> Result<crate::web::templates::Discussion, WebError> {
     use askama::Template as _;
 
@@ -79,6 +80,7 @@ pub(crate) fn build_discussion(
         ai_available,
         can_store,
         unavailable_hint,
+        skill_names,
         turns_html,
     })
 }
@@ -92,6 +94,7 @@ fn render_panel(
     conversation: &str,
     health: crate::ai::AiHealth,
     model: &str,
+    skill_names: Vec<String>,
 ) -> Result<String, WebError> {
     use askama::Template as _;
 
@@ -112,6 +115,7 @@ fn render_panel(
         health,
         model,
         can_store,
+        skill_names,
     )?
     .render()
     .map_err(|e| WebError::Internal(format!("template render: {e}")))
@@ -133,7 +137,14 @@ pub async fn idea_page(
     // most that per page view.
     let health = state.ollama.probe().await;
 
-    let panel_html = render_panel(&idea, &conversation, health, state.ollama.model())?;
+    let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
+    let panel_html = render_panel(
+        &idea,
+        &conversation,
+        health,
+        state.ollama.model(),
+        skill_names,
+    )?;
     Ok(IdeaPage {
         title: idea.frontmatter.title.clone(),
         slug: idea.frontmatter.slug.clone(),

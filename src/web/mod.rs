@@ -76,9 +76,17 @@ impl IntoResponse for WebError {
             }
             // AI-rooted failures are a degraded state, not an internal fault (D20/D24):
             // the local model is down/slow — tell the owner, don't masquerade as a server bug.
+            // A client-supplied unknown skill/workflow name is their mistake, not ours.
+            WebError::Concept(crate::concepts::ConceptError::UnknownSkill(name))
+            | WebError::Concept(crate::concepts::ConceptError::UnknownWorkflow(name)) => (
+                StatusCode::BAD_REQUEST,
+                format!("bad request: unknown skill/workflow: {name}"),
+            )
+                .into_response(),
             WebError::Ai(_)
             | WebError::Memory(crate::memory::MemoryError::Ai(_))
-            | WebError::Concept(crate::concepts::ConceptError::Ai(_)) => (
+            | WebError::Concept(crate::concepts::ConceptError::Ai(_))
+            | WebError::Concept(crate::concepts::ConceptError::NothingToSynthesize) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "AI is unavailable — check that Ollama is running and the model is pulled"
                     .to_string(),

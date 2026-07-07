@@ -8,6 +8,16 @@
     <button type="submit">Send</button>
   </form>
   {% if can_store %}
+  <div class="moves">
+    {% for name in skill_names %}
+    <form hx-post="/idea/{{ slug }}/skill/{{ name }}" hx-target="#transcript" hx-swap="beforeend">
+      <button type="submit" title="Run the {{ name }} move (D18)">{{ name }}</button>
+    </form>
+    {% endfor %}
+    <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="beforeend">
+      <button type="submit" title="Fan out subagents and converge (D14)">swarm</button>
+    </form>
+  </div>
   <form hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
         title="Consolidate the idea and extract memory (D12)">
     <button type="submit">Store it in the vault</button>
