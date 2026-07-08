@@ -42,6 +42,12 @@ variables** (`IDEA_VAULT_*`) instead of hardcoded `localhost`. The **`vault/` is
   until `ollama-pull` completes. This is deliberate — it avoids blocking boot on a multi-GB download.
 - **Truth stays on the host.** `vault/` never enters an image layer (`.dockerignore`) and lives as
   plain files the owner can back up and git independently — preserving [ADR-0002](./0002-markdown-source-of-truth-sqlite-index.md).
+- **Host publish IP is env-driven.** The `idea-vault` service's host-side port publish is
+  `${IDEA_VAULT_HOST_BIND_IP:-127.0.0.1}:${IDEA_VAULT_HOST_PORT:-3000}:3000`, so setting
+  `IDEA_VAULT_HOST_BIND_IP=0.0.0.0` (or a specific LAN interface IP) opts the web UI into LAN
+  exposure — the app has no auth of its own, so this is an explicit opt-in, documented in
+  `.env.example` with that caveat. `ollama`'s publish (`127.0.0.1:11434:11434`) is deliberately
+  **not** tied to this var and stays loopback-only always, since Ollama has no auth.
 
 ## Alternatives considered
 

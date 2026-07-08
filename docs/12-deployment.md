@@ -15,8 +15,10 @@ Two long-lived containers on one Compose network: **`idea-vault`** (the Rust axu
 **`ollama`** (the local model server). The app reaches Ollama by **service DNS** (`http://ollama:11434`),
 not `localhost`. The owner's **`vault/` is a host bind mount** (source of truth they own and back up);
 the **SQLite index and Ollama models are named volumes** (rebuildable / re-pullable). A GPU changes
-**only** the `ollama` service. Everything is published to **loopback** — a local tool, not a network
-service.
+**only** the `ollama` service. The web UI's host-side publish is **loopback by default** but can opt
+into LAN exposure via `IDEA_VAULT_HOST_BIND_IP` (the app has no built-in auth — only do this on a
+trusted network); **Ollama's publish stays loopback-only always**, since Ollama has no auth of its
+own and isn't meant to be reachable off-host.
 
 ## D26 — Deployment topology
 
@@ -65,6 +67,7 @@ Containerization requires the app to stop assuming `localhost`. `config.rs`
 | Env var | Default (bare run) | In compose | Purpose |
 |---------|--------------------|------------|---------|
 | `IDEA_VAULT_BIND` | `127.0.0.1:3000` | `0.0.0.0:3000` | axum bind. **Must be `0.0.0.0` in a container** or the host port publish can't connect. |
+| `IDEA_VAULT_HOST_BIND_IP` | `127.0.0.1` | `0.0.0.0` for LAN opt-in | compose-interpolation var, not read by `config.rs`: the **host-side** IP the `idea-vault` service's port is published on (`${IDEA_VAULT_HOST_BIND_IP:-127.0.0.1}:${IDEA_VAULT_HOST_PORT:-3000}:3000`). Distinct from `IDEA_VAULT_BIND` (the in-container axum bind, unchanged at `0.0.0.0:3000`) — this only controls who on the host/LAN can reach that published port. No built-in auth, so only set to `0.0.0.0`/a LAN IP on a trusted network. Ollama's own publish stays loopback-only always, independent of this var. |
 | `IDEA_VAULT_VAULT_DIR` | `./vault` | `/vault` | vault root ([03-data-model](./03-data-model.md)). |
 | `IDEA_VAULT_INDEX_PATH` | `./index.db` | `/data/index.db` | SQLite index path. |
 | `IDEA_VAULT_OLLAMA_URL` | `http://localhost:11434` | `http://ollama:11434` | Ollama base URL ([05-ai-integration](./05-ai-integration.md)). **No code path hardcodes `localhost:11434`.** |

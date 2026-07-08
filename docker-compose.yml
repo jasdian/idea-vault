@@ -28,10 +28,12 @@ services:
       IDEA_VAULT_OLLAMA_CTX_TOKENS: "${IDEA_VAULT_OLLAMA_CTX_TOKENS:-0}"
       RUST_LOG: "${RUST_LOG:-info}"
     ports:
-      # Loopback-only: open http://localhost:<IDEA_VAULT_HOST_PORT> on the host, not
-      # exposed to LAN. Only the HOST port is configurable (set it in .env to avoid a
-      # clash); the container always listens on 3000 (see IDEA_VAULT_BIND above).
-      - "127.0.0.1:${IDEA_VAULT_HOST_PORT:-3000}:3000"
+      # Loopback by default: open http://localhost:<IDEA_VAULT_HOST_PORT> on the host,
+      # not exposed to LAN. Set IDEA_VAULT_HOST_BIND_IP=0.0.0.0 (or a specific LAN
+      # interface IP) in .env to opt in to LAN exposure — the app has no auth of its
+      # own, so only do this on a trusted network. The container always listens on
+      # 3000 (see IDEA_VAULT_BIND above).
+      - "${IDEA_VAULT_HOST_BIND_IP:-127.0.0.1}:${IDEA_VAULT_HOST_PORT:-3000}:3000"
     volumes:
       # SOURCE OF TRUTH: bind mount the user-owned vault directory.
       - ./vault:/vault
@@ -57,7 +59,9 @@ services:
     container_name: idea-vault-ollama
     restart: unless-stopped
     ports:
-      # Loopback-only so the host `ollama` CLI can pull/manage models.
+      # Loopback-only so the host `ollama` CLI can pull/manage models. Intentionally
+      # NOT tied to IDEA_VAULT_HOST_BIND_IP: Ollama has no auth, so it stays
+      # loopback-only even when the app itself is opted in to LAN exposure.
       # The app does NOT use this; it talks over the compose network.
       - "127.0.0.1:11434:11434"
     volumes:
