@@ -65,15 +65,19 @@
       // Command palette: global search + new-idea from any page. Opens on the rail Search button
       // or ⌘K/Ctrl+K; closes on Esc or a backdrop click. The input reuses the live /search endpoint.
       (function () {
-        var pal = document.getElementById("palette");
-        var input = document.getElementById("palette-input");
+        // Resolve the palette lazily: this script lives in <head>, so #palette (end of <body>)
+        // doesn't exist yet at parse time. Looking it up on demand avoids a stale null capture
+        // that would make every open() a silent no-op.
         function open() {
+          var pal = document.getElementById("palette");
           if (!pal) return;
           pal.hidden = false;
           document.body.classList.add("palette-open");
+          var input = document.getElementById("palette-input");
           if (input) { input.focus(); input.select(); }
         }
         function close() {
+          var pal = document.getElementById("palette");
           if (!pal || pal.hidden) return;
           pal.hidden = true;
           document.body.classList.remove("palette-open");
@@ -81,6 +85,7 @@
         document.addEventListener("DOMContentLoaded", function () {
           var openBtn = document.getElementById("palette-open");
           if (openBtn) openBtn.addEventListener("click", open);
+          var pal = document.getElementById("palette");
           if (pal) pal.querySelectorAll("[data-palette-close]").forEach(function (el) {
             el.addEventListener("click", close);
           });
@@ -88,6 +93,16 @@
         document.addEventListener("keydown", function (e) {
           if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); open(); }
           else if (e.key === "Escape") { close(); }
+        });
+      })();
+
+      // OS-aware shortcut label: the ⌘ glyph is a lie off macOS. Rewrite marked badges to "Ctrl K"
+      // on non-Mac platforms so Linux/Windows owners see the key they actually press.
+      (function () {
+        var mac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+        if (mac) return;
+        document.addEventListener("DOMContentLoaded", function () {
+          document.querySelectorAll('[data-kbd="mod-k"]').forEach(function (el) { el.textContent = "Ctrl K"; });
         });
       })();
 
@@ -121,7 +136,7 @@
         <div class="rail__actions">
           <a class="rail__action" href="/#new">＋&nbsp;New idea</a>
           <button type="button" class="rail__action" id="palette-open" aria-haspopup="dialog">
-            ⌕&nbsp;Search <kbd class="rail__kbd">⌘K</kbd>
+            ⌕&nbsp;Search <kbd class="rail__kbd" data-kbd="mod-k">⌘K</kbd>
           </button>
         </div>
 
