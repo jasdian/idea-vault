@@ -30,7 +30,66 @@ conclusions reached. Output only the new statement, no preamble.";
 
 const EXTRACT_INSTRUCTION: &str = "Extract the durable conclusions from this idea discussion as \
 at most 7 facts. Format each fact EXACTLY as a line `FACT: <short title>` followed by a 1-3 \
-sentence body on the next line(s). Output nothing else.";
+sentence body on the next line(s). When a fact builds on, constrains, or contradicts ANOTHER \
+fact in your list, reference that other fact inside its body by its exact title in double \
+square brackets, e.g. `this only holds if [[cheapest disproof comes first]]`. Output nothing \
+else.";
+
+/// Minimum title length (chars) for the unbracketed title-mention auto-link in
+/// [`cross_link`] — short generic titles ("scope", "risks") would spray links everywhere.
+const MIN_TITLE_LINK_CHARS: usize = 12;
+
+/// Cross-link one freshly-extracted fact against the whole known fact set (this batch + what is
+/// already on disk) — the deterministic leaf behind "link related memories with `[[slug]]`"
+/// (docs/03). The model can't know slugs (they are derived server-side from titles), so the
+/// prompt asks it to reference related facts by TITLE in `[[…]]`; this pass makes those
+/// references canonical and mines the frontmatter `links`:
+/// 1. Every `[[text]]` whose slugified text matches a known fact becomes `[[that-slug]]` in the
+///    persisted body — so `extract_links`, reindex's backlink mining, and a reader's mental
+///    model all see the same canonical form. Unknown references stay verbatim (dangling links
+///    are legal, same as idea bodies).
+/// 2. A body that quotes another fact's exact title unbracketed (case-insensitive, and only for
+///    titles ≥ [`MIN_TITLE_LINK_CHARS`] so short generic titles don't spray links) links to it
+///    too — small local models often mention the related fact but forget the brackets.
+///
+/// Returns the normalized body and the deduped link list (self-references dropped).
+fn cross_link(self_slug: &str, body: &str, known: &[(String, String)]) -> (String, Vec<String>) {
+    // Pass 1: normalize [[Title Form]] → [[slug]].
+    let mut normalized = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        let after_open = &rest[start + 2..];
+        let Some(end) = after_open.find("]]") else {
+            break;
+        };
+        let inner = &after_open[..end];
+        let canonical = domain_slug::try_slugify(inner)
+            .filter(|candidate| known.iter().any(|(s, _)| s == candidate))
+            .unwrap_or_else(|| inner.to_string());
+        normalized.push_str(&rest[..start]);
+        normalized.push_str("[[");
+        normalized.push_str(&canonical);
+        normalized.push_str("]]");
+        rest = &after_open[end + 2..];
+    }
+    normalized.push_str(rest);
+
+    let mut fact_links = links::extract_links(&normalized);
+    // Pass 2: unbracketed title mentions.
+    let lower = normalized.to_lowercase();
+    for (k_slug, k_title) in known {
+        if k_slug == self_slug || fact_links.iter().any(|l| l == k_slug) {
+            continue;
+        }
+        if k_title.chars().count() >= MIN_TITLE_LINK_CHARS
+            && lower.contains(&k_title.to_lowercase())
+        {
+            fact_links.push(k_slug.clone());
+        }
+    }
+    fact_links.retain(|l| l != self_slug);
+    (normalized, fact_links)
+}
 
 /// What a Store produced, for the caller to render and log.
 #[derive(Debug)]
@@ -147,6 +206,9 @@ pub async fn extract_and_store(
         // format — surface it rather than silently storing factless (D24: surface, not swallow).
         tracing::warn!(slug, "fact extraction yielded no parseable FACT: blocks");
     }
+    // First pass: settle every new fact's slug (the batch's slugs must all be known before any
+    // body can be cross-linked against them).
+    let mut drafts: Vec<(String, String, String)> = Vec::new(); // (slug, title, body)
     for (title, body) in candidates {
         let fact_slug = match domain_slug::try_slugify(&title) {
             // A junk title (emoji-only, symbols) must not alias a real fact via the shared
@@ -160,13 +222,26 @@ pub async fn extract_and_store(
             }
         };
         taken.push(fact_slug.clone());
+        drafts.push((fact_slug, title, body));
+    }
+
+    // Second pass: cross-link (the memory-graph leaf — "link related memories with [[slug]]").
+    // Candidates are the batch itself plus what is already on disk, so a re-store can link new
+    // facts back into old ones.
+    let known: Vec<(String, String)> = existing
+        .iter()
+        .map(|f| (f.frontmatter.slug.clone(), f.frontmatter.title.clone()))
+        .chain(drafts.iter().map(|(s, t, _)| (s.clone(), t.clone())))
+        .collect();
+    for (fact_slug, title, body) in drafts {
+        let (body, fact_links) = cross_link(&fact_slug, &body, &known);
         new_facts.push(MemoryFact {
             frontmatter: MemoryFactFrontmatter {
                 slug: fact_slug,
                 title,
                 tags: Vec::new(),
                 created: now,
-                links: links::extract_links(&body),
+                links: fact_links,
             },
             body: format!("{body}\n"),
         });
