@@ -71,20 +71,54 @@ impl ClaudeCodeClient {
     /// Health probe: does the `claude` binary run at all? `claude --version` succeeding is treated
     /// as [`AiHealth::Available`]; anything else is [`AiHealth::Unreachable`]. (There is no
     /// `ModelMissing` analogue — an auth failure surfaces per-call as an [`AiError::Backend`].)
+    ///
+    /// Every non-`Available` outcome is `tracing::warn!`-logged with its distinct cause
+    /// (spawn error / non-zero exit + stderr / timeout) — otherwise "unreachable" is
+    /// undiagnosable, and the most common cause (the binary not being on the server's PATH)
+    /// looks identical to an auth or version failure.
     pub async fn probe(&self) -> AiHealth {
+        // `.output()` (not `.status()`) so a non-zero exit's stderr is captured for the log.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             Command::new(&self.binary)
                 .arg("--version")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status(),
+                .stderr(Stdio::piped())
+                .output(),
         )
         .await;
         match result {
-            Ok(Ok(status)) if status.success() => AiHealth::Available,
-            _ => AiHealth::Unreachable,
+            // Ran and exited 0 — the CLI is usable.
+            Ok(Ok(output)) if output.status.success() => AiHealth::Available,
+            // Ran but exited non-zero — surface the code + stderr so the cause is visible.
+            Ok(Ok(output)) => {
+                tracing::warn!(
+                    binary = %self.binary,
+                    code = output.status.code().unwrap_or(-1),
+                    stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                    "claude-code probe: `claude --version` exited non-zero"
+                );
+                AiHealth::Unreachable
+            }
+            // Failed to spawn — almost always the binary isn't on the server process's PATH.
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    binary = %self.binary,
+                    error = %e,
+                    "claude-code probe: could not run `claude` — is it installed and on the \
+                     server's PATH? Set IDEA_VAULT_CLAUDE_BIN to its absolute path"
+                );
+                AiHealth::Unreachable
+            }
+            // Exceeded the 5s bound.
+            Err(_) => {
+                tracing::warn!(
+                    binary = %self.binary,
+                    "claude-code probe: `claude --version` did not return within 5s"
+                );
+                AiHealth::Unreachable
+            }
         }
     }
 

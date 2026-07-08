@@ -22,7 +22,11 @@ Submodules:
 - `ai::ollama` — HTTP client to the configured Ollama URL (`/api/chat`, `/api/tags`), plus health
   probe.
 - `ai::claude_code` — spawns the local `claude` CLI as a one-shot agentic process per turn
-  ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)).
+  ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)). Its health probe (`claude
+  --version`, 5s bound) `tracing::warn!`-logs the distinct cause of a non-`Available` result —
+  spawn error (binary not on PATH), non-zero exit (with captured stderr), or timeout — so
+  "unreachable" is diagnosable from the server log rather than collapsing to one opaque state; the
+  `AiHealth` contract itself (`Available`/`ModelMissing`/`Unreachable`) is unchanged.
 - `ai::backend` — `LlmBackend`, the **live router**: a struct holding both clients plus
   `Arc<RwLock<LlmSettings>>`; every call re-reads the current settings to pick the backend and its
   tuned parameters (Ollama temperature; claude-code model + effort), so the Settings page
@@ -182,6 +186,15 @@ stateDiagram-v2
 Guarantees: browsing/reading the vault works with Ollama down (it needs only vault+index); only AI
 actions are gated. No AI call blocks the request thread — every AI call runs inside a detached
 background job ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) with a hard timeout.
+
+The diagram above is drawn for the Ollama backend (`Absent`'s `ollama serve` copy); the same
+`Unreachable` state under the claude-code backend ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md))
+shows backend-specific remedy text instead — "the `claude` CLI isn't runnable — check it's
+installed and on the server's PATH, or set `IDEA_VAULT_CLAUDE_BIN` to its absolute path" — per
+ADR-0011's "health/model-label reporting follows the toggle" guarantee. Operationally: a **native**
+(non-container) run's server process often has a narrower `PATH` than an interactive shell, so set
+`IDEA_VAULT_CLAUDE_BIN` to an absolute path if the claude backend reports `Unreachable` (see
+`.env.example`).
 
 ## D24 — Error / failure taxonomy
 

@@ -343,28 +343,49 @@ pub async fn delete_idea(
 /// Build the discussion pane for any discussion-state idea: rendered transcript turns plus the
 /// D20 availability state with its per-state remedy copy. Shared with the reopen route (R5),
 /// which returns this partial directly.
+/// Resolve the compose-box availability flag + D20 remedy copy for the current backend and health.
+/// Split out of [`build_discussion`] so the per-backend wording is unit-testable without a vault.
+/// `ModelMissing` is an Ollama-only signal (the claude probe never returns it), so its copy stays
+/// Ollama-worded; `Unreachable` is reachable by both backends and so is worded per-backend.
+fn availability_hint(
+    backend: crate::config::LlmBackendKind,
+    health: crate::ai::AiHealth,
+    model: &str,
+) -> (bool, String) {
+    use crate::ai::AiHealth;
+    use crate::config::LlmBackendKind;
+    match health {
+        AiHealth::Available => (true, String::new()),
+        AiHealth::ModelMissing => (false, format!("pull a model: `ollama pull {model}`")),
+        AiHealth::Unreachable => {
+            let hint = match backend {
+                LlmBackendKind::Ollama => {
+                    "Ollama is not reachable — start it with `ollama serve`".to_string()
+                }
+                LlmBackendKind::ClaudeCode => "the `claude` CLI isn't runnable — check it's \
+                     installed and on the server's PATH, or set IDEA_VAULT_CLAUDE_BIN to its \
+                     absolute path"
+                    .to_string(),
+            };
+            (false, hint)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_discussion(
     vault_dir: &std::path::Path,
     slug: &str,
     conversation: &str,
     health: crate::ai::AiHealth,
+    backend: crate::config::LlmBackendKind,
     model: &str,
     can_store: bool,
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
 ) -> Result<crate::web::templates::Discussion, WebError> {
     // D20 per-state remedy copy (docs/05-ai-integration.md).
-    let (ai_available, unavailable_hint) = match health {
-        crate::ai::AiHealth::Available => (true, String::new()),
-        crate::ai::AiHealth::ModelMissing => {
-            (false, format!("pull a model: `ollama pull {model}`"))
-        }
-        crate::ai::AiHealth::Unreachable => (
-            false,
-            "Ollama is not reachable — start it with `ollama serve`".to_string(),
-        ),
-    };
+    let (ai_available, unavailable_hint) = availability_hint(backend, health, model);
 
     // The #transcript inner is the one shared renderer — so a fresh page load carries the same
     // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
@@ -384,11 +405,13 @@ pub(crate) fn build_discussion(
 /// `_discussion.html` (transcript + compose box, disabled when AI is unavailable — D20) for
 /// every discussion state. Pre-rendered so the partials stay the single source of truth for
 /// both this full page and the HTMX swaps that replace `#discussion` later.
+#[allow(clippy::too_many_arguments)]
 fn render_panel(
     vault_dir: &std::path::Path,
     idea: &Idea,
     conversation: &str,
     health: crate::ai::AiHealth,
+    backend: crate::config::LlmBackendKind,
     model: &str,
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
@@ -411,6 +434,7 @@ fn render_panel(
         &idea.frontmatter.slug,
         conversation,
         health,
+        backend,
         model,
         can_store,
         skill_names,
@@ -445,6 +469,7 @@ pub async fn idea_page(
         &idea,
         &conversation,
         health,
+        state.llm.settings().backend,
         &state.llm.model(),
         skill_names,
         pending,
@@ -562,4 +587,46 @@ pub async fn search(
         queries::search(&conn, &query.q)?
     };
     Ok(SearchResults { hits })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::availability_hint;
+    use crate::ai::AiHealth;
+    use crate::config::LlmBackendKind;
+
+    #[test]
+    fn available_enables_compose_with_no_hint() {
+        let (ok, hint) = availability_hint(LlmBackendKind::Ollama, AiHealth::Available, "qwen");
+        assert!(ok);
+        assert!(hint.is_empty());
+    }
+
+    #[test]
+    fn ollama_unreachable_points_at_ollama() {
+        let (ok, hint) = availability_hint(LlmBackendKind::Ollama, AiHealth::Unreachable, "qwen");
+        assert!(!ok);
+        assert!(hint.contains("ollama serve"));
+    }
+
+    #[test]
+    fn claude_unreachable_names_the_cli_not_ollama() {
+        // The bug this guards: a claude-code run showing "start it with `ollama serve`".
+        let (ok, hint) =
+            availability_hint(LlmBackendKind::ClaudeCode, AiHealth::Unreachable, "opus");
+        assert!(!ok);
+        assert!(
+            hint.contains("claude"),
+            "hint should name the claude CLI: {hint}"
+        );
+        assert!(hint.contains("IDEA_VAULT_CLAUDE_BIN"));
+        assert!(!hint.contains("ollama"), "must not blame Ollama: {hint}");
+    }
+
+    #[test]
+    fn model_missing_is_ollama_pull_copy() {
+        let (ok, hint) = availability_hint(LlmBackendKind::Ollama, AiHealth::ModelMissing, "qwen3");
+        assert!(!ok);
+        assert!(hint.contains("ollama pull qwen3"));
+    }
 }

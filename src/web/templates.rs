@@ -115,8 +115,9 @@ pub struct Discussion {
     /// Whether Store is a legal D9 transition from the idea's current state
     /// (InDiscussion/Reopened yes; Draft no — the UI must not offer a guaranteed 400).
     pub can_store: bool,
-    /// The D20 per-state remedy shown in the banner when AI is unavailable
-    /// (`ollama serve` for Unreachable, `ollama pull <model>` for ModelMissing).
+    /// The D20 per-state remedy shown in the banner when AI is unavailable. Backend-aware
+    /// (`routes::ideas::availability_hint`): `ollama pull <model>` for ModelMissing; for
+    /// Unreachable, `ollama serve` under the Ollama backend or a `claude`-CLI hint under claude-code.
     pub unavailable_hint: String,
     /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
     pub skill_names: Vec<String>,
