@@ -32,8 +32,38 @@ const EXTRACT_INSTRUCTION: &str = "Extract the durable conclusions from this ide
 at most 7 facts. Format each fact EXACTLY as a line `FACT: <short title>` followed by a 1-3 \
 sentence body on the next line(s). When a fact builds on, constrains, or contradicts ANOTHER \
 fact in your list, reference that other fact inside its body by its exact title in double \
-square brackets, e.g. `this only holds if [[cheapest disproof comes first]]`. Output nothing \
-else.";
+square brackets, e.g. `this only holds if [[cheapest disproof comes first]]`. After the last \
+fact, end with ONE final line `TAGS: <3-5 short lowercase topic tags, comma-separated>` \
+classifying the idea (domain, kind, stage). Output nothing else.";
+
+/// Cap on model-suggested tags merged into the idea per store (owner-set tags are never
+/// removed; the model only ever adds).
+const MAX_NEW_TAGS: usize = 5;
+
+/// Parse the extraction output's final `TAGS: a, b, c` line into clean slug-form tags: split on
+/// commas, slugify each (dropping junk the same way fact titles do), dedupe, cap. The LAST such
+/// line wins if the model emits several (defensive, like [`parse_facts`]).
+fn parse_tags(raw: &str) -> Vec<String> {
+    let Some(line) = raw
+        .lines()
+        .rev()
+        .find_map(|l| l.trim_start().strip_prefix("TAGS:"))
+    else {
+        return Vec::new();
+    };
+    let mut tags: Vec<String> = Vec::new();
+    for token in line.split(',') {
+        if let Some(tag) = domain_slug::try_slugify(token.trim()) {
+            if !tags.iter().any(|t| t == &tag) {
+                tags.push(tag);
+            }
+        }
+        if tags.len() == MAX_NEW_TAGS {
+            break;
+        }
+    }
+    tags
+}
 
 /// Minimum title length (chars) for the unbracketed title-mention auto-link in
 /// [`cross_link`] — short generic titles ("scope", "risks") would spray links everywhere.
@@ -115,6 +145,12 @@ fn parse_facts(raw: &str) -> Vec<(String, String)> {
             let title = title.trim();
             if !title.is_empty() {
                 current = Some((title.to_string(), String::new()));
+            }
+        } else if line.trim_start().starts_with("TAGS:") {
+            // The trailing tag line (parsed separately by `parse_tags`) is metadata, not the
+            // last fact's body.
+            if let Some(done) = current.take() {
+                facts.push(done);
             }
         } else if let Some((_, body)) = current.as_mut() {
             body.push_str(line);
@@ -247,6 +283,16 @@ pub async fn extract_and_store(
         });
     }
 
+    // Merge model-suggested tags (additive only: owner-set tags are never removed, and a
+    // re-store can only grow the set — same "memory only grows" posture as facts). The tags
+    // land in idea.md frontmatter, which reindex mines into the tags tables and the
+    // `kind='tags'` search rows.
+    for tag in parse_tags(&facts_raw) {
+        if !idea.frontmatter.tags.iter().any(|t| t == &tag) {
+            idea.frontmatter.tags.push(tag);
+        }
+    }
+
     // Writes, in D12 order: consolidated idea.md (state=stored) → facts → MEMORY.md.
     idea.frontmatter.state = IdeaState::Stored;
     idea.frontmatter.updated = now;
@@ -266,6 +312,87 @@ pub async fn extract_and_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_tags_reads_the_last_tags_line_slugified_and_capped() {
+        let raw = "FACT: One\nBody.\nTAGS: ignored, earlier\nFACT: Two\nBody two.\n\
+                   TAGS: Trading Tools, MVP!, trading tools, a, b, c, d, e\n";
+        assert_eq!(
+            parse_tags(raw),
+            vec!["trading-tools", "mvp", "a", "b", "c"],
+            "last line wins; slugified; deduped; capped at MAX_NEW_TAGS"
+        );
+        assert!(
+            parse_tags("FACT: One\nBody.\n").is_empty(),
+            "no TAGS line ⇒ none"
+        );
+    }
+
+    #[test]
+    fn parse_facts_does_not_swallow_the_tags_line_into_a_body() {
+        let facts = parse_facts("FACT: One\nBody line.\nTAGS: x, y\n");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].1, "Body line.", "TAGS: is metadata, not body");
+    }
+
+    #[test]
+    fn cross_link_normalizes_title_refs_and_mines_links() {
+        let known = vec![
+            (
+                "cheapest-disproof-comes-first".to_string(),
+                "Cheapest disproof comes first".to_string(),
+            ),
+            (
+                "sim-live-parity-is-the-game".to_string(),
+                "Sim live parity is the game".to_string(),
+            ),
+        ];
+        let (body, links) = cross_link(
+            "self-fact",
+            "This only holds if [[Cheapest Disproof Comes First]] is done.",
+            &known,
+        );
+        assert!(body.contains("[[cheapest-disproof-comes-first]]"), "{body}");
+        assert_eq!(links, vec!["cheapest-disproof-comes-first"]);
+    }
+
+    #[test]
+    fn cross_link_auto_links_unbracketed_title_mentions() {
+        let known = vec![(
+            "sim-live-parity-is-the-game".to_string(),
+            "Sim live parity is the game".to_string(),
+        )];
+        let (_, links) = cross_link(
+            "self-fact",
+            "Remember that sim live parity is the game here.",
+            &known,
+        );
+        assert_eq!(links, vec!["sim-live-parity-is-the-game"]);
+    }
+
+    #[test]
+    fn cross_link_skips_self_short_titles_and_unknown_refs() {
+        let known = vec![
+            (
+                "self-fact".to_string(),
+                "A fact that mentions itself right here".to_string(),
+            ),
+            ("scope".to_string(), "scope".to_string()), // < MIN_TITLE_LINK_CHARS
+        ];
+        let (body, links) = cross_link(
+            "self-fact",
+            "A fact that mentions itself right here; the scope is unclear; see [[some-unknown-thing]].",
+            &known,
+        );
+        // The dangling-but-valid-slug ref IS a link (same contract as idea bodies: the
+        // backlinks table tolerates unresolved targets) — what must NOT appear is the self
+        // link or the too-short title mention.
+        assert_eq!(links, vec!["some-unknown-thing"]);
+        assert!(
+            body.contains("[[some-unknown-thing]]"),
+            "unknown ref stays verbatim"
+        );
+    }
 
     #[test]
     fn parse_facts_reads_fact_blocks_and_skips_junk() {

@@ -1,5 +1,6 @@
 <div class="idea-row">
   <a href="/idea/{{ idea.slug }}">{{ idea.title }}</a>
   <span class="state state--{{ idea.state }}">{{ idea.state }}</span>
+  {% for tag in idea.tags %}<a class="tagchip" href="/?tag={{ tag }}" title="Show every idea tagged #{{ tag }}">#{{ tag }}</a>{% endfor %}
   <span class="idea-meta">{{ idea.updated_at }}</span>
 </div>

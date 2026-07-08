@@ -42,6 +42,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ideas", post(ideas::create_idea))
         // Rename (title only — not a D9 transition; legal in every state, slug never changes).
         .route("/idea/{slug}/rename", post(ideas::rename_idea))
+        .route("/idea/{slug}/tags", post(ideas::set_tags))
         .route("/idea/{slug}/store", post(memory::store_idea))
         .route("/idea/{slug}/reopen", post(memory::reopen_idea))
         .route("/idea/{slug}/skill/{name}", post(memory::run_skill))

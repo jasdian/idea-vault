@@ -1,0 +1,22 @@
+{# The idea's tag row: clickable filter chips + a quiet inline editor (same <details> pattern as
+   the title's rename — no JS build step, closing the disclosure is cancel). Swapped whole via
+   #idea-tags-row by POST /idea/{slug}/tags. #}
+<div class="tags-row" id="idea-tags-row">
+  {% for tag in tags %}
+  <a class="tagchip" href="/?tag={{ tag }}" title="Show every idea tagged #{{ tag }}">#{{ tag }}</a>
+  {% endfor %}
+  <details class="rename-toggle">
+    <summary class="rename-toggle__summary"
+             title="Edit this idea's tags (comma-separated; lowercase slugs)">tags</summary>
+    {# hx-on: a non-2xx (busy idea) is otherwise silently dropped by htmx — surface the message. #}
+    <form class="rename-form" hx-post="/idea/{{ slug }}/tags"
+          hx-target="#idea-tags-row" hx-swap="outerHTML"
+          hx-on::after-request="if(!event.detail.successful) alert(event.detail.xhr.responseText)">
+      <input type="text" name="tags" value="{{ tags_joined }}" maxlength="200"
+             placeholder="trading, tooling, mvp" />
+      <button type="submit" class="btn btn--ghost">save</button>
+    </form>
+    <p class="field__hint">comma-separated; each becomes a lowercase slug — the model may add
+      more at store time, never remove yours</p>
+  </details>
+</div>

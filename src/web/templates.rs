@@ -7,7 +7,7 @@ use askama::Template;
 use askama_web::WebTemplate;
 
 use crate::domain::memory::MemoryIndexEntry;
-use crate::index::queries::{IdeaSummary, SearchHit};
+use crate::index::queries::IdeaSummary;
 
 /// Render markdown to sanitized HTML (docs/09-web-ui.md: "the browser only receives HTML").
 /// Sanitization is unconditional — idea bodies, memory facts, and conversation turns all carry
@@ -27,6 +27,9 @@ pub fn render_markdown(markdown: &str) -> String {
 #[template(path = "list.html")]
 pub struct ListPage {
     pub ideas: Vec<IdeaSummary>,
+    /// `Some(tag)` when the list is filtered to one tag (`GET /?tag=x`) — renders the
+    /// "filtered by #x · clear" line.
+    pub filter_tag: Option<String>,
 }
 
 /// Full page: one idea (body, conversation, memory) (R2, `templates/idea.html`).
@@ -44,6 +47,8 @@ pub struct IdeaPage {
     pub panel_html: String,
     /// The artifacts panel, pre-rendered (`_artifacts.html`) so a file deletion can swap it.
     pub artifacts_html: String,
+    /// The tag row (`_idea_tags.html`), pre-rendered so the tags editor can swap just it.
+    pub tags_html: String,
 }
 
 /// Partial: the idea-page title block (`templates/_idea_title.html`) — the `h1` plus its inline
@@ -57,6 +62,18 @@ pub struct IdeaPage {
 pub struct IdeaTitle {
     pub title: String,
     pub slug: String,
+}
+
+/// Partial: the idea's tag chips + inline editor (`templates/_idea_tags.html`), swapped whole
+/// by `POST /idea/{slug}/tags`.
+#[derive(Template, WebTemplate)]
+#[template(path = "_idea_tags.html")]
+pub struct IdeaTags {
+    pub slug: String,
+    pub tags: Vec<String>,
+    /// The comma-joined form-input prefill ("trading, tooling") — precomputed because Askama
+    /// templates shouldn't be doing string joins.
+    pub tags_joined: String,
 }
 
 /// Partial: the memory panel (`templates/_memory.html`) — the MEMORY.md index with a per-fact
@@ -308,9 +325,24 @@ pub struct McpStatus {
     pub errored: bool,
 }
 
+/// One search hit, pre-rendered for `_search_results.html` from `index::queries::SearchHit` by
+/// `routes::ideas::search`: the snippet is escaped-then-highlighted HTML (never the raw
+/// sentinel-delimited plain text `SearchHit::snippet` carries — see `routes::ideas::highlight_snippet`
+/// for the escape-first XSS-boundary contract), and the provenance kind is resolved to display
+/// chip text (empty = no chip) rather than the raw `search_fts.kind` string.
+pub struct SearchHitView {
+    pub slug: String,
+    pub title: String,
+    /// Escaped-then-`<mark>`-highlighted HTML — safe to render with `|safe`.
+    pub snippet_html: String,
+    /// Provenance chip text ("tags" / "memory" / "artifact" / "conversation"); empty for `title`
+    /// and `idea_body` hits, which need no chip since the owner already expects a match there.
+    pub kind_chip: String,
+}
+
 /// Partial: full-text search results (R8, `templates/_search_results.html`).
 #[derive(Template, WebTemplate)]
 #[template(path = "_search_results.html")]
 pub struct SearchResults {
-    pub hits: Vec<SearchHit>,
+    pub hits: Vec<SearchHitView>,
 }

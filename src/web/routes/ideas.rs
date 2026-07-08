@@ -13,16 +13,36 @@ use crate::vault::store;
 use crate::web::templates::{IdeaPage, IdeaRow, ListPage, SearchResults};
 use crate::web::WebError;
 
-/// R1 — `GET /` — the vault overview: every idea, most-recently-updated first.
-pub async fn list_page(State(state): State<AppState>) -> Result<ListPage, WebError> {
+/// Query for R1: an optional `?tag=x` narrows the overview to one tag (the chips link here).
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+/// R1 — `GET /` — the vault overview: every idea, most-recently-updated first; `?tag=x`
+/// filters via the tags index (the previously-unrouted `ideas_with_tag` reader).
+pub async fn list_page(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> Result<ListPage, WebError> {
+    let filter_tag = query
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
     let ideas = {
         let conn = state
             .db
             .lock()
             .map_err(|e| WebError::Internal(format!("db mutex poisoned: {e}")))?;
-        queries::list_ideas(&conn)?
+        match &filter_tag {
+            Some(tag) => queries::ideas_with_tag(&conn, tag)?,
+            None => queries::list_ideas(&conn)?,
+        }
     };
-    Ok(ListPage { ideas })
+    Ok(ListPage { ideas, filter_tag })
 }
 
 /// Split one transcript turn into (role, markdown content): the first line's `## <role>`
@@ -630,6 +650,12 @@ pub async fn idea_page(
     )?;
     let artifacts_html =
         crate::web::routes::artifacts::render_artifacts_panel(vault_dir, &slug, false)?;
+    let tags_html = {
+        use askama::Template as _;
+        render_idea_tags(&idea.frontmatter.slug, &idea.frontmatter.tags)
+            .render()
+            .map_err(|e| WebError::Internal(format!("template render: {e}")))?
+    };
     Ok(IdeaPage {
         title: idea.frontmatter.title.clone(),
         slug: idea.frontmatter.slug.clone(),
@@ -638,6 +664,7 @@ pub async fn idea_page(
         memory_html,
         panel_html,
         artifacts_html,
+        tags_html,
     })
 }
 
@@ -709,6 +736,69 @@ pub async fn rename_idea(
     crate::web::routes::reindex_logged(&state);
 
     Ok(crate::web::templates::IdeaTitle { title, slug })
+}
+
+/// Render the idea's tag row (`_idea_tags.html`) — shared by the full page and the editor swap.
+pub(crate) fn render_idea_tags(slug: &str, tags: &[String]) -> crate::web::templates::IdeaTags {
+    crate::web::templates::IdeaTags {
+        slug: slug.to_string(),
+        tags: tags.to_vec(),
+        tags_joined: tags.join(", "),
+    }
+}
+
+/// Form body for `POST /idea/{slug}/tags` — the full comma-separated tag set (replace semantics:
+/// the editor shows the current set prefilled, so what the owner saves is what they mean).
+#[derive(Debug, Deserialize)]
+pub struct TagsForm {
+    #[serde(default)]
+    pub tags: String,
+}
+
+/// Cap on the owner-edited tag set — enough to classify, few enough to stay chips not prose.
+const MAX_TAGS: usize = 10;
+
+/// `POST /idea/{slug}/tags` — replace the idea's tag set. Tokens are slugified (the tag alphabet
+/// is the slug alphabet — that is what reindex, the `kind='tags'` search rows, and the chip URLs
+/// all assume); junk tokens drop silently; empty input clears the set. Like rename, this is a
+/// whole-file read-modify-write, so it claims the per-idea job slot to never interleave with a
+/// running job's own write-back.
+pub async fn set_tags(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Form(form): Form<TagsForm>,
+) -> Result<crate::web::templates::IdeaTags, WebError> {
+    let mut tags: Vec<String> = Vec::new();
+    for token in form.tags.split(',') {
+        if let Some(tag) = domain_slug::try_slugify(token.trim()) {
+            if !tags.iter().any(|t| t == &tag) {
+                tags.push(tag);
+            }
+        }
+        if tags.len() == MAX_TAGS {
+            break;
+        }
+    }
+
+    if !crate::web::jobs::try_claim(&state.jobs, &slug) {
+        return Err(WebError::BadRequest(
+            "a run is in progress for this idea — wait for it to finish (or cancel it) before editing tags"
+                .into(),
+        ));
+    }
+    let result = (|| {
+        let vault_dir = &state.config.vault_dir;
+        let mut idea = store::read_idea(vault_dir, &slug)?; // 404 if missing
+        idea.frontmatter.tags = tags.clone();
+        idea.frontmatter.updated = Utc::now();
+        store::write_idea(vault_dir, &idea)?;
+        Ok::<_, WebError>(())
+    })();
+    crate::web::jobs::mark_done(&state.jobs, &slug);
+    result?;
+
+    crate::web::routes::reindex_logged(&state);
+    Ok(render_idea_tags(&slug, &tags))
 }
 
 /// Form body for R3 (the `list.html` new-idea form posts `title`; a seed body is optional).
@@ -787,6 +877,7 @@ pub async fn create_idea(
             slug,
             title: idea.frontmatter.title.clone(),
             state: idea.frontmatter.state.as_str().to_string(),
+            tags: idea.frontmatter.tags.clone(),
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         },
     })
@@ -797,6 +888,63 @@ pub async fn create_idea(
 pub struct SearchQuery {
     #[serde(default)]
     pub q: String,
+}
+
+/// Turn a search hit's sentinel-delimited plain-text snippet (`index::SNIPPET_MATCH_OPEN`/
+/// `SNIPPET_MATCH_CLOSE`, see the contract doc on those constants and on
+/// [`queries::SearchHit::snippet`]) into safe, highlighted HTML.
+///
+/// **This ordering is the XSS boundary: HTML-escape the *entire* snippet FIRST, then translate the
+/// sentinel pair into `<mark>`/`</mark>`.** Escaping first neutralizes every byte that originated in
+/// owner/AI-authored vault content — none of it can become live markup — and only *after* that do
+/// we splice in our own hardcoded, trusted `<mark>` tags around the matched span. Doing it in the
+/// other order (mark first, escape second) would let the escape pass mangle our own tags right back
+/// into inert text (`<mark>` → `&lt;mark&gt;`), silently defeating the highlight — or worse, if
+/// escaping were skipped after marking, would let matched *content* itself carry live HTML.
+///
+/// A stray/unmatched sentinel is stripped, never rendered: an open with no following close is
+/// emitted as plain (already-escaped) text, not left as a dangling `<mark>`; a close with no
+/// preceding open is dropped. `reindex::sanitized` already strips literal sentinel codepoints from
+/// every string that reaches `search_fts`, so this is belt-and-suspenders against a future
+/// searchable surface skipping that step, not the primary defense.
+pub(crate) fn highlight_snippet(snippet: &str) -> String {
+    use crate::index::{SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
+    let escaped = esc(snippet);
+    let mut out = String::with_capacity(escaped.len());
+    let mut in_mark = false;
+    for ch in escaped.chars() {
+        match ch {
+            SNIPPET_MATCH_OPEN if !in_mark => {
+                out.push_str("<mark>");
+                in_mark = true;
+            }
+            SNIPPET_MATCH_CLOSE if in_mark => {
+                out.push_str("</mark>");
+                in_mark = false;
+            }
+            // A stray sentinel — a close with no open, or a nested/duplicate open while already
+            // marking — is dropped rather than emitted or allowed to reopen a second span.
+            SNIPPET_MATCH_OPEN | SNIPPET_MATCH_CLOSE => {}
+            _ => out.push(ch),
+        }
+    }
+    if in_mark {
+        // An unterminated open (should not happen — `snippet()` always emits balanced pairs):
+        // close it out rather than leave a dangling unclosed tag in the response.
+        out.push_str("</mark>");
+    }
+    out
+}
+
+/// The provenance chip text for a search hit's best-matching `kind` — empty (no chip) for `title`
+/// and `idea_body`, the two surfaces the owner already expects a match to live in; a chip only for
+/// the surfaces where "why did this idea match?" would otherwise be invisible (a tag, a distilled
+/// memory fact, an AI-generated artifact, or a conversation turn rather than the idea statement).
+fn kind_chip(kind: &str) -> String {
+    match kind {
+        "tags" | "memory" | "artifact" | "conversation" => kind.to_string(),
+        _ => String::new(), // "title", "idea_body", and any future/unknown kind: no chip.
+    }
 }
 
 /// R8 — `GET /search?q=` — full-text search results fragment.
@@ -813,14 +961,80 @@ pub async fn search(
         // empty/whitespace input yields no hits (the fragment renders its empty state).
         queries::search(&conn, &query.q)?
     };
+    let hits = hits
+        .into_iter()
+        .map(|h| crate::web::templates::SearchHitView {
+            slug: h.slug,
+            title: h.title,
+            snippet_html: highlight_snippet(&h.snippet),
+            kind_chip: kind_chip(&h.kind),
+        })
+        .collect();
     Ok(SearchResults { hits })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::availability_hint;
+    use super::{availability_hint, highlight_snippet, kind_chip};
     use crate::ai::AiHealth;
     use crate::config::LlmBackendKind;
+    use crate::index::{SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
+
+    #[test]
+    fn highlight_snippet_wraps_the_matched_span_in_mark() {
+        let raw = format!("before {SNIPPET_MATCH_OPEN}zebra{SNIPPET_MATCH_CLOSE} after");
+        assert_eq!(highlight_snippet(&raw), "before <mark>zebra</mark> after");
+    }
+
+    #[test]
+    fn highlight_snippet_escapes_html_before_marking_never_after() {
+        // The XSS boundary: hostile content escaped, but our own <mark> tags survive intact —
+        // proof the escape pass ran before the sentinel-to-markup translation, not after.
+        let raw = format!(
+            "<script>alert(1)</script> {SNIPPET_MATCH_OPEN}<b>zebra</b>{SNIPPET_MATCH_CLOSE}"
+        );
+        let out = highlight_snippet(&raw);
+        assert!(!out.contains("<script>"), "{out}");
+        assert!(out.contains("&lt;script&gt;"), "{out}");
+        assert!(
+            out.contains("<mark>&lt;b&gt;zebra&lt;/b&gt;</mark>"),
+            "matched span content must be escaped too, just wrapped in a real <mark>: {out}"
+        );
+    }
+
+    #[test]
+    fn highlight_snippet_drops_stray_sentinels_without_faking_a_mark() {
+        // A close with no preceding open: dropped, not rendered as a bogus </mark>.
+        let stray_close = format!("plain {SNIPPET_MATCH_CLOSE}text");
+        assert_eq!(highlight_snippet(&stray_close), "plain text");
+
+        // A lone open with no close: emitted as plain text (not left as a dangling raw sentinel
+        // or a fake opening tag with no visible highlight).
+        let stray_open = format!("plain {SNIPPET_MATCH_OPEN}text");
+        let out = highlight_snippet(&stray_open);
+        assert!(!out.contains(SNIPPET_MATCH_OPEN), "{out}");
+        assert!(out.contains("text"), "{out}");
+    }
+
+    #[test]
+    fn highlight_snippet_never_emits_raw_sentinel_codepoints() {
+        let raw = format!("{SNIPPET_MATCH_OPEN}hit{SNIPPET_MATCH_CLOSE}");
+        let out = highlight_snippet(&raw);
+        assert!(!out.contains(SNIPPET_MATCH_OPEN));
+        assert!(!out.contains(SNIPPET_MATCH_CLOSE));
+    }
+
+    #[test]
+    fn kind_chip_is_empty_for_title_and_body_shown_for_the_rest() {
+        assert_eq!(kind_chip("title"), "");
+        assert_eq!(kind_chip("idea_body"), "");
+        assert_eq!(kind_chip("tags"), "tags");
+        assert_eq!(kind_chip("memory"), "memory");
+        assert_eq!(kind_chip("artifact"), "artifact");
+        assert_eq!(kind_chip("conversation"), "conversation");
+        // An unrecognized future kind degrades to no chip rather than a raw internal label.
+        assert_eq!(kind_chip("something-new"), "");
+    }
 
     #[test]
     fn meter_line_shows_the_tools_term_only_when_tools_ride_the_context() {

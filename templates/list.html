@@ -2,6 +2,9 @@
 
 {% block content %}
 <h1 class="title">Ideas</h1>
+{% if let Some(tag) = filter_tag %}
+<p class="tags-filter">filtered by <span class="tagchip">#{{ tag }}</span> · <a href="/">clear</a></p>
+{% endif %}
 
 <form class="newidea" hx-post="/ideas" hx-target="#idea-list" hx-swap="afterbegin"
       hx-on::after-request="if(event.detail.successful) this.reset()">
