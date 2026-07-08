@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use chrono::{TimeZone, Utc};
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState};
 use idea_vault::vault::store;
-use support::web::{post_form, test_state_with_ollama};
+use support::web::{poll_until, post_form, test_state_with_ollama};
 use support::{spawn_sequence, ChatScript};
 
 fn seed(vault: &std::path::Path, state: IdeaState, with_turns: bool) {
@@ -51,11 +51,20 @@ async fn store_consolidates_extracts_and_lands_stored() {
     seed(&vault_dir, IdeaState::InDiscussion, true);
     let convo_before = store::read_conversation(&vault_dir, "vaulted").unwrap();
 
-    let (status, body) = post_form(state, "/idea/vaulted/store", "").await;
+    let (status, body) = post_form(state.clone(), "/idea/vaulted/store", "").await;
     assert_eq!(status, StatusCode::OK);
-    // The stored partial: consolidated body + reopen affordance + the OOB subhead badge flip
-    // (the store form swaps #discussion, but the badge lives outside it).
-    assert!(body.contains("Consolidated best statement."));
+    // A background job (ADR-0010): the immediate response is the transcript with the thinking
+    // indicator, not the stored view.
+    assert!(body.contains("foil-pending"), "indicator shows immediately");
+
+    // The /pending poll delivers the stored partial once the job lands: consolidated body +
+    // reopen affordance + the OOB subhead badge flip (the badge lives outside #discussion).
+    let body = poll_until(
+        state,
+        "/idea/vaulted/pending",
+        "Consolidated best statement.",
+    )
+    .await;
     assert!(body.contains("hx-post=\"/idea/vaulted/reopen\""));
     assert!(body.contains("state--stored") && body.contains("hx-swap-oob"));
 
@@ -100,14 +109,23 @@ async fn store_guards_draft_no_turns_and_already_stored() {
 }
 
 #[tokio::test]
-async fn store_with_ai_down_is_503_and_truth_untouched() {
+async fn store_with_ai_down_surfaces_a_job_error_and_truth_untouched() {
     let (state, vault_dir) = support::web::test_state(); // refused Ollama
     seed(&vault_dir, IdeaState::InDiscussion, true);
     let idea_before = store::read_idea(&vault_dir, "vaulted").unwrap();
 
-    let (status, body) = post_form(state, "/idea/vaulted/store", "").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body.contains("AI is unavailable")); // the generic 503 body (web/mod.rs)
+    // The job pattern: the POST succeeds (indicator shown), the AI failure surfaces on the next
+    // poll as the consumed-once error block — same contract as chat/skill/swarm.
+    let (status, body) = post_form(state.clone(), "/idea/vaulted/store", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("foil-pending"));
+    poll_until(
+        state,
+        "/idea/vaulted/pending",
+        "The foil could not respond.",
+    )
+    .await;
+
     assert_eq!(
         store::read_idea(&vault_dir, "vaulted").unwrap(),
         idea_before
@@ -132,6 +150,7 @@ async fn reopen_flips_state_loads_context_and_returns_discussion() {
     seed(&vault_dir, IdeaState::InDiscussion, true);
     let (status, _) = post_form(state.clone(), "/idea/vaulted/store", "").await;
     assert_eq!(status, StatusCode::OK);
+    poll_until(state.clone(), "/idea/vaulted/pending", "Stored statement.").await;
     let body_before = store::read_idea(&vault_dir, "vaulted").unwrap().body;
     let facts_before = store::read_memory_facts(&vault_dir, "vaulted").unwrap();
 
@@ -173,10 +192,12 @@ async fn restore_from_reopened_merges_memory_without_turn_guard() {
 
     let (s, _) = post_form(state.clone(), "/idea/vaulted/store", "").await;
     assert_eq!(s, StatusCode::OK);
+    poll_until(state.clone(), "/idea/vaulted/pending", "v1.").await;
     let (s, _) = post_form(state.clone(), "/idea/vaulted/reopen", "").await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = post_form(state, "/idea/vaulted/store", "").await;
+    let (s, _) = post_form(state.clone(), "/idea/vaulted/store", "").await;
     assert_eq!(s, StatusCode::OK, "Reopened→Stored needs no new turns");
+    poll_until(state, "/idea/vaulted/pending", "v2 after reopen.").await;
 
     let idea = store::read_idea(&vault_dir, "vaulted").unwrap();
     assert_eq!(idea.frontmatter.state, IdeaState::Stored);

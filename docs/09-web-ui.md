@@ -17,10 +17,11 @@ response anywhere in the app:
 - **Full page** — initial navigations (list, idea view, history, settings). Rendered from a base
   Askama layout.
 - **Partial** — an HTML fragment swapped into the DOM by HTMX (e.g. a new idea row, an appended
-  turn, a re-rendered transcript/memory panel). AI-driven routes (chat/skill/swarm) return a
+  turn, a re-rendered transcript/memory panel). AI-driven routes (chat/skill/swarm/store) return a
   partial immediately — a transcript plus a "thinking" indicator — and the indicator self-repolls
   `GET /idea/:slug/pending` until the background job finishes
-  ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md), [D11](./05-ai-integration.md)).
+  ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md), [D11](./05-ai-integration.md)); store's
+  poll response widens to the stored view once its job lands (D12).
 
 ## D17 — Route map
 
@@ -37,7 +38,7 @@ flowchart LR
     end
     subgraph partials["HTMX partials"]
         R3["POST /ideas — create (D10) → idea row / redirect"]
-        R4["POST /idea/:slug/store — Store (D12) → stored view"]
+        R4["POST /idea/:slug/store — Store (D12, job) → transcript + indicator"]
         R5["POST /idea/:slug/reopen — Reopen (D13) → discussion view"]
         R6["POST /idea/:slug/skill/:name — run skill (D18, job) → transcript + indicator"]
         R7["POST /idea/:slug/swarm — run swarm (D14, job) → transcript + indicator"]
@@ -61,13 +62,14 @@ flowchart LR
     R1 --> T_LIST["templates/list.html"]
     R2 --> T_IDEA["templates/idea.html"]
     R3 --> T_ROW["templates/_idea_row.html"]
-    R4 --> T_STORED["templates/_stored.html"]
+    R4 --> T_TURN["templates/_turn.html (via transcript partial)"]
     R5 --> T_DISC["templates/_discussion.html"]
-    R6 --> T_TURN["templates/_turn.html (via transcript partial)"]
+    R6 --> T_TURN
     R7 --> T_TURN
     R8 --> T_RESULTS["templates/_search_results.html"]
     R9 --> T_TURN
     R9b --> T_TURN
+    R9b -.->|"store job lands"| T_STORED["templates/_stored.html (HX-Retarget #discussion)"]
     R12 --> T_HIST["templates/history.html"]
     R13 --> T_SET["templates/settings.html"]
     R13b --> T_SETF["templates/_settings.html"]
@@ -99,7 +101,7 @@ flowchart TD
     ROUTE --> HANDLER["handler"]
     HANDLER --> BRANCH{"AI-driven route?"}
     BRANCH -- "no (page / partial)" --> RENDER["Askama render → HTML"]
-    BRANCH -- "yes (chat/skill/swarm/extract)" --> JOBBR["try_claim + persist up front + tokio::spawn detached task (D11, ADR-0010)"]
+    BRANCH -- "yes (chat/skill/swarm/store/extract/compact)" --> JOBBR["try_claim + persist up front + tokio::spawn detached task (D11, ADR-0010)"]
     JOBBR --> RENDER2["render transcript + thinking indicator → HTML"]
     RENDER --> ERRMAP
     RENDER2 --> ERRMAP
@@ -122,7 +124,9 @@ templates/
   _turn.html             # partial — one conversation turn (user/assistant); also the poll-target shape
   _discussion.html       # partial — the discussion pane (compose box + transcript/poll target)
   _actions.html          # partial — the #idea-actions block (moves/swarm/store); also sent OOB
-  _stored.html           # partial — stored view (consolidated body + memory facts)
+  _stored.html           # partial — stored view (consolidated body + memory facts); delivered by
+                          #   the R9b poll once a store job (R4) lands truth as Stored, via
+                          #   HX-Retarget #discussion (respond_discussion_or_stored)
   _search_results.html   # partial — FTS results
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
   _settings.html          # partial — the settings form (re-rendered after a save)
@@ -138,8 +142,8 @@ base.html`.
 ## HTMX / polling patterns
 
 - **Create / actions:** `hx-post` on forms/buttons; server returns a partial that `hx-swap` inserts.
-- **Chat / skill / swarm / extract / compact (background job + poll):** the compose form (or a
-  skill/swarm/compact button) posts to its route; the handler claims the per-idea job slot,
+- **Chat / skill / swarm / store / extract / compact (background job + poll):** the compose form (or
+  a skill/swarm/store/compact button) posts to its route; the handler claims the per-idea job slot,
   persists what it can up front, spawns a detached task, and immediately returns a transcript
   partial ending in a "thinking…" indicator block. That block is itself an HTMX fragment
   (`hx-get="/idea/:slug/pending" hx-trigger="load delay:1500ms" hx-target="#transcript"`) that
@@ -149,14 +153,29 @@ base.html`.
   on read the same way, currently only emitted by the manual compact route's `NothingToFold`
   outcome, [ADR-0016](./adr/0016-forced-compact-folds-fully.md)), or the finished transcript with
   no further trigger (job done). This survives navigation because the underlying model call runs in
-  a task detached from any one request ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
-- **Out-of-band state refresh:** transcript responses (chat, poll, cancel, skill, swarm, extract,
-  compact, delete-turn) append two top-level `hx-swap-oob="true"` fragments after the `#transcript` inner
-  HTML: the `#idea-state` subhead badge and the `#idea-actions` block (`_actions.html`, an
-  always-present container so a Draft page still has the OOB target). This is how the first chat
-  turn's Draft → InDiscussion flip becomes visible — badge and moves/store controls update without
-  a reload, while the composer (outside `#transcript`) survives a poll completing mid-typing.
-  Store and reopen swap all of `#discussion`, so they carry only the OOB badge.
+  a task detached from any one request ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)). The
+  store route (R4, D12) is the one exception to "finished transcript with no further trigger": when
+  its job lands, truth has already flipped to `Stored`, so the poll response instead widens to the
+  stored view — see the next bullet.
+- **Store's finish path — poll widens to the stored view:** because only the store job can leave an
+  idea `Stored` (every other job route guards on the discussion states), the shared poll handler
+  (`web::routes::ideas::respond_discussion_or_stored`, serving both R9b and cancel) checks the
+  on-disk state on every poll: while `InDiscussion`/`Reopened` it returns the normal transcript
+  poll response, but once state is `Stored` it instead renders `_stored.html` (consolidated body +
+  memory facts) plus the OOB `state--stored` badge, and sends `HX-Retarget: #discussion` /
+  `HX-Reswap: innerHTML` response headers so HTMX swaps the *whole* discussion panel (composer and
+  actions included) instead of just `#transcript` — the same swap the old synchronous store
+  response used to perform directly.
+- **Out-of-band state refresh:** transcript responses (chat, poll, cancel, skill, swarm, store,
+  extract, compact, delete-turn) append two top-level `hx-swap-oob="true"` fragments after the
+  `#transcript` inner HTML: the `#idea-state` subhead badge and the `#idea-actions` block
+  (`_actions.html`, an always-present container so a Draft page still has the OOB target). This is
+  how the first chat turn's Draft → InDiscussion flip becomes visible — badge and moves/store
+  controls update without a reload, while the composer (outside `#transcript`) survives a poll
+  completing mid-typing. Store's own immediate response follows this same shape (transcript +
+  indicator + OOB badge/actions, `hx-target="#transcript"`); it's only the poll response once the
+  store job *lands* that swaps all of `#discussion` (previous bullet). Reopen still swaps all of
+  `#discussion` synchronously, so it carries only the OOB badge.
 - **Markdown rendering:** idea bodies and memory facts are rendered server-side (markdown → sanitized
   HTML) before templating; the browser only receives HTML.
 - **Degraded AI:** when `/admin/health` (or the boot probe) reports the active LLM backend absent,
@@ -170,7 +189,7 @@ base.html`.
 |-------|----------|
 | Router + AppState + middleware | `app.rs` |
 | Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts,compact}` |
-| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, extract R18, compact R21, and the R9b poll endpoint) |
+| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, store R4, extract R18, compact R21, and the R9b poll endpoint) |
 | Template structs | `web::templates` |
 | Template sources | `templates/*.html` |
 

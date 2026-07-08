@@ -19,21 +19,30 @@ cross-links — see [00-vision](../00-vision.md).
 ## D12 — Store → memory extraction
 
 Fires on the `InDiscussion→Stored` (or `Reopened→Stored`) transition ([D9](../04-state-machine.md)).
-Consolidates the idea and distils memory.
+Consolidates the idea and distils memory. Like every other model-calling route, the two AI calls
+run as a detached, claim-guarded **background job** ([ADR-0010](../adr/0010-ai-turns-as-background-jobs.md)):
+the request returns immediately with the transcript + a "thinking" indicator, and the owner-visible
+Stored view only appears once the job lands and the browser's next poll picks up the state flip.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as Owner ("store it")
-    participant H as web::routes (store)
+    participant H as web::routes::memory (store)
+    participant J as web::jobs
+    participant Task as detached tokio task
     participant Ex as memory::extract
     participant AI as ai (Ollama)
     participant V as vault::store
     participant Idx as index
+    participant B as Browser (HTMX, polling)
 
     U->>H: POST /idea/:slug/store
-    H->>V: read conversation.md + idea.md
-    H->>Ex: extract(idea, conversation)
+    H->>H: guard state (D9): InDiscussion needs ≥1 turn; Draft/Stored rejected
+    H->>J: try_claim(slug) — one job per idea
+    H-->>U: 200 transcript + "thinking…" indicator (self-repolling)
+    H->>Task: tokio::spawn (detached — outlives the request)
+    Task->>Ex: extract_and_store(idea, conversation)
     Ex->>AI: prompt: consolidate best statement
     AI-->>Ex: updated idea body
     Ex->>AI: prompt: extract durable facts (bounded set)
@@ -42,11 +51,25 @@ sequenceDiagram
         Ex->>V: read existing memory/*.md
         Ex->>Ex: merge + dedupe against existing
     end
-    Ex->>V: write idea.md body (consolidated), state=stored
-    Ex->>V: write memory/<fact-slug>.md (one per fact)
-    Ex->>V: rebuild MEMORY.md index
-    Ex->>Idx: upsert ideas, memory_facts, backlinks, search_fts
-    H-->>U: Stored view (partial)
+    alt both AI calls succeed
+        Ex->>V: write idea.md body (consolidated), state=stored
+        Ex->>V: write memory/<fact-slug>.md (one per fact)
+        Ex->>V: rebuild MEMORY.md index
+        Ex->>Idx: upsert ideas, memory_facts, backlinks, search_fts
+        Task->>J: mark_done(slug)
+    else failure (either AI call)
+        Task->>J: mark_failed(slug, message)
+    end
+    loop every ~1.5s until Idle
+        B->>H: GET /idea/:slug/pending
+        H->>J: peek(slug)
+        H->>V: read idea state
+        alt state == Stored
+            H-->>B: Stored view (partial) + OOB badge, HX-Retarget #discussion
+        else still running / failed
+            H-->>B: re-emit "thinking…" | error block
+        end
+    end
 ```
 
 Rules:
@@ -58,6 +81,11 @@ Rules:
 - **Merge on re-store:** a `Reopened→Stored` merges and dedupes against existing `memory/` — memory
   only grows or consolidates, never silently drops ([D9](../04-state-machine.md) invariant).
 - **Truth first:** markdown written before index upsert ([ADR-0002](../adr/0002-markdown-source-of-truth-sqlite-index.md)).
+- **Nothing partial on failure/cancel:** truth is only touched after both AI calls succeed — an
+  aborted or failed job leaves the idea in its prior state, still `InDiscussion`/`Reopened`
+  ([ADR-0010](../adr/0010-ai-turns-as-background-jobs.md)).
+- **One job per idea:** `try_claim` refuses a second concurrent job for the same idea, same as
+  chat/skill/swarm ([D11](../05-ai-integration.md)).
 
 ## D13 — Reopen → load memory as context
 

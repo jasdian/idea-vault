@@ -13,17 +13,18 @@ use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::{build_discussion, respond_with_transcript, state_badge_oob};
 use crate::web::routes::reindex_logged;
-use crate::web::templates::{render_markdown, Stored};
 
 use crate::web::WebError;
 use askama::Template as _;
 
-/// R4 — `POST /idea/{slug}/store` — consolidate + extract memory, transition to `Stored` (D12).
+/// R4 — `POST /idea/{slug}/store` — consolidate + extract memory as a background job (D12),
+/// transitioning to `Stored` when it lands.
 ///
-/// Guards (D9): only `InDiscussion`/`Reopened` can store; an `InDiscussion` store needs at
-/// least one turn. The extraction pipeline runs both AI calls (self-gated by the shared
-/// semaphore, scoped to the calls only) before touching truth; the route then reindexes
-/// (log-not-fail — truth already landed) and renders `_stored.html`.
+/// Guards (D9) stay synchronous: only `InDiscussion`/`Reopened` can store; an `InDiscussion`
+/// store needs at least one turn. The two AI calls then run as a detached, claim-guarded job
+/// like every other model-calling route (ADR-0010) — the immediate response is the transcript
+/// with the "thinking" indicator, and once the job flips truth to `Stored` the `/pending` poll
+/// swaps `_stored.html` into `#discussion` (HX-Retarget, see `respond_discussion_or_stored`).
 pub async fn store_idea(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -50,29 +51,45 @@ pub async fn store_idea(
         IdeaState::Reopened => {} // re-store merges memory, no turn guard (D9 table)
     }
 
-    // The extraction pipeline acquires the shared permit itself, scoped to exactly its two
-    // AI calls (ADR-0006) — this route must not hold one around it (deadlock rule).
+    // Busy already: don't queue a second job — just re-show the in-flight state.
+    if !jobs::try_claim(&state.jobs, &slug) {
+        return respond_with_transcript(&state, &slug);
+    }
+    let ts = state.clone();
+    let tslug = slug.clone();
+    let handle = tokio::spawn(async move {
+        jobs::set_note(
+            &ts.jobs,
+            &tslug,
+            "consolidating the idea + extracting memory…",
+        );
+        match run_store_work(&ts, &tslug).await {
+            Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
+            Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
+        }
+    });
+    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+
+    respond_with_transcript(&state, &slug)
+}
+
+/// The background half of Store: the extraction pipeline (which acquires the shared permit
+/// itself, scoped to exactly its two AI calls, ADR-0006 — this task must not hold one around
+/// it) followed by the log-not-fail reindex. Truth is only touched after both calls succeed,
+/// so an abort mid-run persists nothing partial.
+async fn run_store_work(state: &AppState, slug: &str) -> Result<(), String> {
     let outcome = memory::extract::extract_and_store(
         &state.llm,
         &state.ai_semaphore,
-        &vault_dir,
-        &slug,
+        &state.config.vault_dir,
+        slug,
         state.llm.context_budget(),
     )
-    .await?;
-    reindex_logged(&state);
+    .await
+    .map_err(|e| e.to_string())?;
+    reindex_logged(state);
     tracing::info!(slug, new_facts = outcome.new_facts, "idea stored");
-
-    // The store form swaps `#discussion`, which refreshes the panel — but the subhead badge sits
-    // outside it, so the response carries an out-of-band badge flip too.
-    let mut html = Stored {
-        slug,
-        body_html: render_markdown(&outcome.consolidated_body),
-    }
-    .render()
-    .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
-    html.push_str(&state_badge_oob(IdeaState::Stored));
-    Ok(axum::response::Html(html))
+    Ok(())
 }
 
 /// R5 — `POST /idea/{slug}/reopen` — re-enter discussion with memory loaded as context (D13).

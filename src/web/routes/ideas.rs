@@ -293,26 +293,59 @@ pub(crate) fn render_memory_panel(
     .map_err(|e| WebError::Internal(format!("template render: {e}")))
 }
 
+/// The poll/cancel responder: the transcript while the idea is in discussion, or — once a store
+/// job (R4) has landed truth as `Stored` — the stored view (`_stored.html` + the OOB badge flip).
+///
+/// The poll indicator targets `#transcript`, but the stored view replaces the whole discussion
+/// panel (composer and actions included), so that branch widens the swap with `HX-Retarget`/
+/// `HX-Reswap` response headers — exactly the swap the store form performed back when it was a
+/// synchronous request. Only the store job can finish on a `Stored` idea (every other job route
+/// guards on the discussion states), so the branch fires precisely at store completion.
+pub(crate) fn respond_discussion_or_stored(
+    state: &AppState,
+    slug: &str,
+) -> Result<axum::response::Response, WebError> {
+    use axum::response::IntoResponse as _;
+    let idea = store::read_idea(&state.config.vault_dir, slug)?; // 404 if the idea is gone
+    if idea.frontmatter.state == IdeaState::Stored {
+        use askama::Template as _;
+        let mut html = crate::web::templates::Stored {
+            slug: slug.to_string(),
+            body_html: crate::web::templates::render_markdown(&idea.body),
+        }
+        .render()
+        .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
+        html.push_str(&state_badge_oob(IdeaState::Stored));
+        return Ok((
+            [("HX-Retarget", "#discussion"), ("HX-Reswap", "innerHTML")],
+            axum::response::Html(html),
+        )
+            .into_response());
+    }
+    Ok(respond_with_transcript(state, slug)?.into_response())
+}
+
 /// `GET /idea/{slug}/pending` — the poll target: return the current transcript, still carrying the
-/// indicator while the job runs, an error once it fails, or the finished transcript when done.
+/// indicator while the job runs, an error once it fails, the finished transcript when done — or
+/// the stored view once a store job lands (see [`respond_discussion_or_stored`]).
 pub async fn pending(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Result<axum::response::Html<String>, WebError> {
-    store::read_idea(&state.config.vault_dir, &slug)?; // 404 if the idea is gone
-    respond_with_transcript(&state, &slug)
+) -> Result<axum::response::Response, WebError> {
+    respond_discussion_or_stored(&state, &slug)
 }
 
 /// `POST /idea/{slug}/cancel` — stop a running job: abort its detached task (dropping the in-flight
 /// model future, so nothing partial is persisted) and clear the slot. Returns the transcript with
-/// the indicator gone. Idempotent: cancelling when nothing runs just re-renders the current state.
+/// the indicator gone. Idempotent: cancelling when nothing runs just re-renders the current state
+/// (including the stored view, if a store job won the race before the cancel arrived).
 pub async fn cancel_job(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Result<axum::response::Html<String>, WebError> {
+) -> Result<axum::response::Response, WebError> {
     store::read_idea(&state.config.vault_dir, &slug)?; // 404 if the idea is gone
     crate::web::jobs::cancel(&state.jobs, &slug);
-    respond_with_transcript(&state, &slug)
+    respond_discussion_or_stored(&state, &slug)
 }
 
 /// `GET /idea/{slug}/history` — the "btw" view: the whole thread on its own page, read-only, with a

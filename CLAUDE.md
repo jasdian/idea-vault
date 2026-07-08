@@ -33,7 +33,7 @@ wrong, raise it rather than working around it.
 
 - **Backend / UI:** Rust, **axum** HTTP server. Server-rendered HTML via **Askama** templates,
   enhanced with **HTMX**; No JS build step, no SPA — ships as a single binary. AI turns (chat,
-  skills, swarm) run as **detached background jobs** (`web::jobs`), not SSE — the model call
+  skills, swarm, extract, compact, store) run as **detached background jobs** (`web::jobs`), not SSE — the model call
   outlives the request so navigating away can't kill it; the browser polls
   `GET /idea/{slug}/pending` for a server-driven "thinking… Ns" indicator and swaps in the finished
   transcript on completion. See [ADR-0010](docs/adr/0010-ai-turns-as-background-jobs.md), which

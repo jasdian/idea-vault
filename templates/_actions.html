@@ -34,10 +34,13 @@
 
   <div class="commit-bar">
     <span class="commit-bar__label">when you've run it into the ground</span>
-    <form class="commit" hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
+    {# A background job like every other model-calling button: the response is the transcript
+       with the thinking indicator, and the /pending poll retargets #discussion with the stored
+       view once the job lands (respond_discussion_or_stored). #}
+    <form class="commit" hx-post="/idea/{{ slug }}/store" hx-target="#transcript" hx-swap="innerHTML"
           hx-disabled-elt="find button">
       <button type="submit" class="btn btn--commit"
-              title="Consolidate the idea and extract durable memory">Store in the vault →</button>
+              title="Consolidate the idea and extract durable memory — runs in the background with a progress indicator">Store in the vault →</button>
     </form>
   </div>
   {% endif %}

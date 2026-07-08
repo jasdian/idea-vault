@@ -33,8 +33,10 @@ flows not among those six.
    watches via a polling "thinking" indicator, not a token stream ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
    The owner can invoke skills or launch a swarm to attack the idea from many angles. State is
    `InDiscussion`.
-3. **Store (D12).** Owner says "store it". The idea body is consolidated and memory facts are
-   extracted. State → `Stored`.
+3. **Store (D12).** Owner says "store it". Like every other model-calling route, this runs as a
+   background job ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)): the idea body is
+   consolidated and memory facts are extracted in a detached task, and the owner sees the Stored
+   view once the job lands and the next poll picks up the flip. State → `Stored`.
 4. **Reopen (D13).** Later, the owner reopens; memory is reloaded as context and discussion resumes.
    State → `Reopened`, and Store can happen again (merging memory).
 
