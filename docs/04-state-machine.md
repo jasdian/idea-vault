@@ -21,7 +21,6 @@ stateDiagram-v2
     [*] --> Draft: create idea (D10)
 
     Draft --> InDiscussion: first turn submitted
-    Draft --> Draft: edit title/seed body
 
     InDiscussion --> InDiscussion: chat turn (D11) / run skill (D18) / swarm (D14)
     InDiscussion --> Stored: "store it" (D12 extract memory)
@@ -54,6 +53,13 @@ stateDiagram-v2
         - assemble context under budget (D21)
         - frontmatter state=reopened
     end note
+
+    note left of Draft
+        Rename (POST /idea/:slug/rename) is deliberately absent from this
+        diagram: it is legal from every state above, including Stored, and
+        rewrites only idea.md's title + updated stamp. slug, state, and body
+        are untouched, so it is not a D9 trigger and has no "From"/"To" row.
+    end note
 ```
 
 ## Transitions (normative table)
@@ -61,7 +67,6 @@ stateDiagram-v2
 | From | To | Trigger | Guard | Side effects (in order) |
 |------|----|---------|-------|-------------------------|
 | — | `Draft` | Create idea | title non-empty; slug free ([D22](./03-data-model.md)) | create `vault/<slug>/`, write `idea.md` (`state=draft`), index upsert |
-| `Draft` | `Draft` | Edit title/seed | slug unchanged | rewrite `idea.md` body/`title`, bump `updated` |
 | `Draft` | `InDiscussion` | First chat turn | Ollama reachable *or* degraded-notice shown ([D20](./05-ai-integration.md)) | append to `conversation.md`, set `state=in_discussion`, stream reply ([D11](./05-ai-integration.md)) |
 | `InDiscussion` | `InDiscussion` | Chat turn / skill / swarm | — | append transcript; skills [D18], swarm [D14] |
 | `InDiscussion` | `Stored` | "Store it" | at least one turn exists | consolidate `idea.md` body, extract `memory/*.md` ([D12](./06-concepts/memory.md)), rebuild `MEMORY.md`, `state=stored`, index upsert |
@@ -91,6 +96,12 @@ stateDiagram-v2
 - **Forking is a copy, not a link.** The fork's `idea.md`/`conversation.md`/`memory/*.md` are
   independent files from the moment of creation; editing or storing either idea afterward never
   touches the other.
+- **Rename is orthogonal to D9, on purpose.** `POST /idea/:slug/rename` (docs/09-web-ui.md R23)
+  rewrites `idea.md`'s frontmatter `title` + `updated` and nothing else — it is legal from every
+  state (including `Stored`) and never appears as a row in the transitions table above because it
+  never changes `state`. Crucially it never changes the **slug** either: the slug is the folder
+  name, the `[[slug]]` backlink target, and the `/idea/:slug` URL, so retitling an idea can never
+  break an existing link or bookmark ([D22](./03-data-model.md)).
 
 ## Mapping to code
 

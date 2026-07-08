@@ -30,6 +30,7 @@ fn client(binary: &str, mode: Option<&str>) -> ClaudeCodeClient {
         system_prompt: None,
         skip_permissions: true,
         token_timeout: Duration::from_secs(10),
+        mcp_config_json: None,
     })
 }
 

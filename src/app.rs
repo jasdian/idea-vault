@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::web::routes::{admin, artifacts, chat, compact, ideas, memory, settings};
+use crate::web::routes::{admin, artifacts, chat, compact, ideas, mcp, memory, settings};
 
 /// Cloneable shared state injected into handlers (docs/01-architecture.md "Cross-cutting concerns").
 #[derive(Clone)]
@@ -27,6 +27,9 @@ pub struct AppState {
     /// In-flight background AI jobs, one per idea, so a slow model call survives the browser
     /// navigating away (`web::jobs`).
     pub jobs: crate::web::jobs::Jobs,
+    /// Persistent MCP server registry (`mcp` module doc). The same `Arc` is handed to the LLM
+    /// backend via `with_mcp`, so a registry edit here is live on the next model turn.
+    pub mcp: Arc<crate::mcp::McpRegistry>,
 }
 
 /// Build the full axum router (D17 route map) with the tracing middleware layer (D16).
@@ -37,6 +40,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/idea/{slug}", get(ideas::idea_page))
         // Idea create + lifecycle actions.
         .route("/ideas", post(ideas::create_idea))
+        // Rename (title only — not a D9 transition; legal in every state, slug never changes).
+        .route("/idea/{slug}/rename", post(ideas::rename_idea))
         .route("/idea/{slug}/store", post(memory::store_idea))
         .route("/idea/{slug}/reopen", post(memory::reopen_idea))
         .route("/idea/{slug}/skill/{name}", post(memory::run_skill))
@@ -76,6 +81,15 @@ pub fn build_router(state: AppState) -> Router {
         // Live LLM settings (backend toggle + params).
         .route("/settings", get(settings::settings_page))
         .route("/settings", post(settings::update_settings))
+        // MCP server management (owner-configured tool endpoints, `crate::mcp`).
+        .route("/mcp", get(mcp::mcp_page))
+        .route("/mcp/add", post(mcp::add_server))
+        .route("/mcp/{name}/toggle", post(mcp::toggle_server))
+        .route("/mcp/{name}/delete", post(mcp::delete_server))
+        .route("/mcp/{name}/probe", post(mcp::probe_server))
+        .route("/mcp/{name}/edit", get(mcp::edit_server_form))
+        .route("/mcp/{name}/view", get(mcp::view_server_row))
+        .route("/mcp/{name}/update", post(mcp::update_server))
         // Admin.
         .route("/admin/health", get(admin::health))
         .route("/admin/reindex", post(admin::reindex))

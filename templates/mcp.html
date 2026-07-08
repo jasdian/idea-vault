@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="crumb" href="/">← all ideas</a>
+<h1 class="title">MCP servers</h1>
+<p class="settings__intro">Model Context Protocol endpoints the foil can reach for tools, alongside
+  the built-in web search/fetch. Owner-supplied — never assumed to be localhost. Enabled servers
+  join the tool loop on the next message; disabled ones stay configured but invisible to the model.</p>
+{{ list_html|safe }}
+{% endblock %}

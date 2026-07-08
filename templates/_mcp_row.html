@@ -1,0 +1,25 @@
+<li id="mcp-row-{{ server.name }}" class="mcp__row{% if !server.enabled %} mcp__row--disabled{% endif %}">
+  <div class="mcp__row-line1">
+    <code class="mcp__name">{{ server.name }}</code>
+    {{ server.status_html|safe }}
+  </div>
+  <div class="mcp__row-line2">
+    <span class="mcp__url" title="{{ server.url }}">{{ server.url }}</span>
+    <span class="mcp__token">{% if server.has_token %}token set{% else %}no token{% endif %}</span>
+    <span class="mcp__pill{% if server.enabled %} mcp__pill--on{% endif %}">{% if server.enabled %}enabled{% else %}disabled{% endif %}</span>
+  </div>
+  <div class="mcp__row-actions">
+    <button type="button" class="chip" hx-post="/mcp/{{ server.name }}/probe"
+            hx-target="#mcp-status-{{ server.name }}" hx-swap="outerHTML"
+            hx-disabled-elt="this">probe</button>
+    <form hx-post="/mcp/{{ server.name }}/toggle" hx-target="#mcp" hx-swap="outerHTML">
+      <button type="submit" class="chip">{% if server.enabled %}disable{% else %}enable{% endif %}</button>
+    </form>
+    <button type="button" class="chip" hx-get="/mcp/{{ server.name }}/edit"
+            hx-target="#mcp-row-{{ server.name }}" hx-swap="outerHTML">edit</button>
+    <form hx-post="/mcp/{{ server.name }}/delete" hx-target="#mcp" hx-swap="outerHTML"
+          hx-confirm="Delete mcp server '{{ server.name }}' permanently?">
+      <button type="submit" class="chip chip--danger" title="Delete this server" aria-label="Delete this server">delete</button>
+    </form>
+  </div>
+</li>

@@ -102,16 +102,25 @@ fn meter_line(
     effective_bytes: usize,
     compacted_through: Option<usize>,
     budget_bytes: usize,
+    tools_bytes: usize,
 ) -> String {
     let kb = effective_bytes.div_ceil(1024);
     let budget_kb = budget_bytes.div_ceil(1024);
     let plural = if turns == 1 { "" } else { "s" };
+    // Tool definitions (built-in web tools + enabled MCP servers' schemas, ADR-0017) ride the
+    // context too — the meter must not pretend a 20 KB toolbox is free. Shown as its own term
+    // so the owner can attribute growth to tools vs transcript.
+    let tools = if tools_bytes > 0 {
+        format!(" (+{} KB tools)", tools_bytes.div_ceil(1024))
+    } else {
+        String::new()
+    };
     let compacted = match compacted_through {
         Some(k) => format!(" · compacted through turn {k}"),
         None => String::new(),
     };
     format!(
-        r#"<div class="meter">{turns} turn{plural} · ~{kb} KB of ~{budget_kb} KB context · {model}{compacted}</div>"#,
+        r#"<div class="meter">{turns} turn{plural} · ~{kb} KB{tools} of ~{budget_kb} KB context · {model}{compacted}</div>"#,
         model = esc(model)
     )
 }
@@ -163,6 +172,7 @@ pub(crate) fn transcript_inner(
     conversation: &str,
     pending: crate::web::jobs::Pending,
     budget_bytes: usize,
+    tools_bytes: usize,
 ) -> Result<String, WebError> {
     use crate::web::jobs::Pending;
     let turns_html = turns_to_html(slug, conversation)?;
@@ -204,6 +214,7 @@ pub(crate) fn transcript_inner(
         win.effective_bytes,
         win.compacted_through,
         budget_bytes,
+        tools_bytes,
     ));
     Ok(html)
 }
@@ -271,6 +282,7 @@ pub(crate) fn respond_with_transcript(
         &conversation,
         pending,
         state.llm.context_budget().max_bytes,
+        state.llm.tool_context_bytes(),
     )?;
 
     let idea = store::read_idea(&state.config.vault_dir, slug)?;
@@ -326,11 +338,17 @@ pub(crate) fn respond_discussion_or_stored(
         use askama::Template as _;
         let mut html = crate::web::templates::Stored {
             slug: slug.to_string(),
-            body_html: crate::web::templates::render_markdown(&idea.body),
         }
         .render()
         .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
         html.push_str(&state_badge_oob(IdeaState::Stored));
+        // The store job rewrote idea.md's body to the consolidated writeup — refresh the page's
+        // top .statement out-of-band, since the stored panel deliberately no longer carries it
+        // (it would render the same writeup twice on every stored page otherwise).
+        html.push_str(&format!(
+            r#"<div class="statement" id="idea-statement" hx-swap-oob="true">{}</div>"#,
+            crate::web::templates::render_markdown(&idea.body)
+        ));
         return Ok((
             [("HX-Retarget", "#discussion"), ("HX-Reswap", "innerHTML")],
             axum::response::Html(html),
@@ -379,6 +397,7 @@ pub async fn history_page(
         &conversation,
         crate::web::jobs::Pending::Idle,
         state.llm.context_budget().max_bytes,
+        state.llm.tool_context_bytes(),
     )?;
     Ok(crate::web::templates::HistoryPage {
         title: idea.frontmatter.title.clone(),
@@ -503,6 +522,7 @@ pub(crate) fn build_discussion(
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
     budget_bytes: usize,
+    tools_bytes: usize,
 ) -> Result<crate::web::templates::Discussion, WebError> {
     // D20 per-state remedy copy (docs/05-ai-integration.md).
     let (ai_available, unavailable_hint) = availability_hint(backend, health, model);
@@ -510,8 +530,15 @@ pub(crate) fn build_discussion(
     // The #transcript inner is the one shared renderer — so a fresh page load carries the same
     // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
     let busy = matches!(pending, crate::web::jobs::Pending::Running { .. });
-    let transcript_html =
-        transcript_inner(vault_dir, slug, model, conversation, pending, budget_bytes)?;
+    let transcript_html = transcript_inner(
+        vault_dir,
+        slug,
+        model,
+        conversation,
+        pending,
+        budget_bytes,
+        tools_bytes,
+    )?;
     let actions_html = render_actions(slug, skill_names, can_store, busy, false)?;
 
     Ok(crate::web::templates::Discussion {
@@ -538,13 +565,13 @@ fn render_panel(
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
     budget_bytes: usize,
+    tools_bytes: usize,
 ) -> Result<String, WebError> {
     use askama::Template as _;
 
     if idea.frontmatter.state == IdeaState::Stored {
         return crate::web::templates::Stored {
             slug: idea.frontmatter.slug.clone(),
-            body_html: crate::web::templates::render_markdown(&idea.body),
         }
         .render()
         .map_err(|e| WebError::Internal(format!("template render: {e}")));
@@ -563,6 +590,7 @@ fn render_panel(
         skill_names,
         pending,
         budget_bytes,
+        tools_bytes,
     )?
     .render()
     .map_err(|e| WebError::Internal(format!("template render: {e}")))
@@ -598,6 +626,7 @@ pub async fn idea_page(
         skill_names,
         pending,
         state.llm.context_budget().max_bytes,
+        state.llm.tool_context_bytes(),
     )?;
     let artifacts_html =
         crate::web::routes::artifacts::render_artifacts_panel(vault_dir, &slug, false)?;
@@ -610,6 +639,76 @@ pub async fn idea_page(
         panel_html,
         artifacts_html,
     })
+}
+
+/// Form body for `POST /idea/{slug}/rename` — the new title only. The slug is immutable here (see
+/// [`rename_idea`]'s doc); there is no separate field for it.
+#[derive(Debug, Deserialize)]
+pub struct RenameIdeaForm {
+    #[serde(default)]
+    pub title: String,
+}
+
+/// The rename title cap — generous for a heading, but bounded so a pasted paragraph can't land in
+/// `idea.md`'s frontmatter (which the list/search rows and `<title>` all render as one line).
+const RENAME_TITLE_MAX_CHARS: usize = 200;
+
+/// `POST /idea/{slug}/rename` — retitle an idea in place. Deliberately **not** a D9 transition:
+/// the slug (folder name, `[[slug]]` link target, every `/idea/{slug}` URL) never changes, so
+/// backlinks and bookmarks keep working, and the state/body are untouched — this is legal from
+/// *every* state, including `Stored` (a finished idea may still want a better title). Truth first
+/// (`write_idea` rewrites `idea.md`'s frontmatter `title` + `updated`), then reindex (the list and
+/// search rows read titles off the SQLite index, not the file), then re-render just the title
+/// block the rename disclosure swaps.
+pub async fn rename_idea(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Form(form): Form<RenameIdeaForm>,
+) -> Result<crate::web::templates::IdeaTitle, WebError> {
+    let title = form.title.trim();
+    if title.is_empty() {
+        return Err(WebError::BadRequest("title must not be empty".into()));
+    }
+    if title.chars().count() > RENAME_TITLE_MAX_CHARS {
+        return Err(WebError::BadRequest(format!(
+            "title is too long ({RENAME_TITLE_MAX_CHARS} characters max)"
+        )));
+    }
+    // Frontmatter titles are single-line by contract: an embedded newline/control char is data-
+    // hygiene noise at best and a forged frontmatter line on a future hand edit at worst.
+    if title.chars().any(char::is_control) {
+        return Err(WebError::BadRequest(
+            "title must not contain line breaks or control characters".into(),
+        ));
+    }
+
+    // Rename is a read-modify-write of the WHOLE idea.md — uncoordinated, it can interleave with
+    // a background job's own read…write window (a store job reads idea.md before minutes of model
+    // calls and writes the whole struct back after) and silently clobber whichever landed last.
+    // Claim the same per-idea slot every job uses: busy ⇒ refuse with a readable message; free ⇒
+    // hold it for the few ms the write takes so no job can start mid-rename.
+    if !crate::web::jobs::try_claim(&state.jobs, &slug) {
+        return Err(WebError::BadRequest(
+            "a run is in progress for this idea — wait for it to finish (or cancel it) before renaming"
+                .into(),
+        ));
+    }
+    let result = (|| {
+        let vault_dir = &state.config.vault_dir;
+        let mut idea = store::read_idea(vault_dir, &slug)?; // VaultError::IdeaNotFound -> 404
+        idea.frontmatter.title = title.to_string();
+        idea.frontmatter.updated = Utc::now();
+        store::write_idea(vault_dir, &idea)?;
+        Ok::<_, WebError>(idea.frontmatter.title)
+    })();
+    // Always release the slot — including on the 404/write-error paths — or the idea would read
+    // as busy forever.
+    crate::web::jobs::mark_done(&state.jobs, &slug);
+    let title = result?;
+
+    crate::web::routes::reindex_logged(&state);
+
+    Ok(crate::web::templates::IdeaTitle { title, slug })
 }
 
 /// Form body for R3 (the `list.html` new-idea form posts `title`; a seed body is optional).
@@ -722,6 +821,20 @@ mod tests {
     use super::availability_hint;
     use crate::ai::AiHealth;
     use crate::config::LlmBackendKind;
+
+    #[test]
+    fn meter_line_shows_the_tools_term_only_when_tools_ride_the_context() {
+        // Tool definitions consume the window too (ADR-0017): a 13-tool MCP server is ~10 KB of
+        // schemas per turn, and the meter must attribute that instead of reporting "~1 KB".
+        let with = super::meter_line("m", 2, 1024, None, 64 * 1024, 10 * 1024);
+        assert!(
+            with.contains("~1 KB (+10 KB tools) of ~64 KB context"),
+            "{with}"
+        );
+        let without = super::meter_line("m", 2, 1024, None, 64 * 1024, 0);
+        assert!(without.contains("~1 KB of ~64 KB context"), "{without}");
+        assert!(!without.contains("tools"));
+    }
 
     #[test]
     fn available_enables_compose_with_no_hint() {

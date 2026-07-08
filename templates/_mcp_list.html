@@ -1,0 +1,34 @@
+<section class="mcp" id="mcp">
+  {% if servers.is_empty() %}
+  <p class="mcp__empty">No MCP servers configured yet — add one below.</p>
+  {% else %}
+  <ul class="mcp__list">
+    {% for server in servers %}
+    {% include "_mcp_row.html" %}
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <form class="mcp__add" hx-post="/mcp/add" hx-target="#mcp" hx-swap="outerHTML"
+        hx-on::after-request="if(!event.detail.successful) alert(event.detail.xhr.responseText)">
+    <fieldset class="settings__group">
+      <legend>add a server</legend>
+      <label class="field">
+        <span class="field__label">name</span>
+        <input type="text" name="name" placeholder="tracker" pattern="[a-z0-9-]+" required />
+        <span class="field__hint">lowercase letters, digits, '-' only — becomes the tool-name prefix</span>
+      </label>
+      <label class="field">
+        <span class="field__label">url</span>
+        <input type="text" name="url" placeholder="https://mcp.example/rpc" required />
+        <span class="field__hint">Streamable-HTTP endpoint — http:// or https://</span>
+      </label>
+      <label class="field">
+        <span class="field__label">bearer token (optional)</span>
+        <input type="password" name="bearer_token" placeholder="leave blank for none" autocomplete="off" />
+        <span class="field__hint">tokens over http:// travel in cleartext — use https:// beyond localhost</span>
+      </label>
+      <button type="submit" class="btn">Add server</button>
+    </fieldset>
+  </form>
+</section>

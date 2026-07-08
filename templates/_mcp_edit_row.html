@@ -1,0 +1,28 @@
+<li id="mcp-row-{{ name }}" class="mcp__row mcp__row--edit">
+  <form class="mcp__edit-form" hx-post="/mcp/{{ name }}/update" hx-target="#mcp" hx-swap="outerHTML"
+        hx-on::after-request="if(!event.detail.successful) alert(event.detail.xhr.responseText)">
+    <div class="mcp__row-line1">
+      <code class="mcp__name">{{ name }}</code>
+      <span class="field__hint">name is fixed — it is the tool-name prefix</span>
+    </div>
+    <label class="field">
+      <span class="field__label">url</span>
+      <input type="text" name="url" value="{{ url }}" required />
+    </label>
+    <label class="field">
+      <span class="field__label">bearer token</span>
+      <input type="password" name="bearer_token" autocomplete="off"
+             placeholder="{% if has_token %}leave blank to keep current{% else %}leave blank for none{% endif %}" />
+      <span class="field__hint">tokens over http:// travel in cleartext — use https:// beyond localhost</span>
+    </label>
+    <label class="mcp__clear-token">
+      <input type="checkbox" name="clear_token" value="true"{% if !has_token %} disabled{% endif %} />
+      clear stored token
+    </label>
+    <div class="mcp__row-actions">
+      <button type="submit" class="btn btn--ghost">save</button>
+      <button type="button" class="chip" hx-get="/mcp/{{ name }}/view"
+              hx-target="#mcp-row-{{ name }}" hx-swap="outerHTML">cancel</button>
+    </div>
+  </form>
+</li>

@@ -1,8 +1,8 @@
 //! The `ai` boundary: the *only* module allowed to speak to Ollama (docs/05-ai-integration.md).
 //!
-//! `ai` depends solely on `domain` — never on `vault`/`index` (docs/02-module-reference.md D4).
-//! Callers (web routes, `concepts::swarm`) assemble prompts and hand them in; `ai` does not read
-//! the vault itself.
+//! `ai` depends on `domain` plus the dependency-free `mcp` config registry — never on
+//! `vault`/`index` (docs/02-module-reference.md D4). Callers (web routes, `concepts::swarm`)
+//! assemble prompts and hand them in; `ai` does not read the vault itself.
 //!
 //! Submodules:
 //! - [`ollama`] — HTTP client + health probe against `http://localhost:11434` (never hardcoded
@@ -14,10 +14,16 @@
 //! - [`budget`] — assembles a prompt within the model's context limit (D21).
 //! - [`web`] — keyless web-search + page-fetch tool leaves (ADR-0017), executed by the router's
 //!   bounded Ollama tool loop; claude-code uses its own WebSearch/WebFetch instead.
+//! - [`mcp`] — Streamable-HTTP client for the Model Context Protocol: a third, owner-configured
+//!   source of tools (arbitrary MCP servers) alongside `web`'s hardcoded leaves. Wire client only
+//!   — WHICH servers exist/are enabled is the top-level [`crate::mcp`] registry's business, and
+//!   [`backend`] is the bridge that combines the two per turn (see its module doc for why the
+//!   split keeps the graph acyclic).
 
 pub mod backend;
 pub mod budget;
 pub mod claude_code;
+pub mod mcp;
 pub mod ollama;
 pub mod stream;
 pub mod web;

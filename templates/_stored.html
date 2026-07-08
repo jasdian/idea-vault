@@ -1,6 +1,8 @@
+{# The consolidated writeup is NOT repeated here — it IS the idea body, already rendered in the
+   page's top .statement (the store-completion swap refreshes that block out-of-band). This panel
+   is only the dormant marker + the way back in. #}
 <div class="stored" data-slug="{{ slug }}">
   <p class="stored__label">stored · dormant</p>
-  <div class="statement">{{ body_html|safe }}</div>
   <form hx-post="/idea/{{ slug }}/reopen" hx-target="#discussion" hx-swap="innerHTML">
     <button type="submit" class="btn">Reopen &amp; carry memory forward</button>
   </form>

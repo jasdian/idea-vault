@@ -45,11 +45,13 @@ fn test_state() -> AppState {
         ollama_ctx_tokens: 0,
         claude_ctx_tokens: 0,
         web_access: false,
+        mcp_config_path: tmp.path().join(".mcp-servers.json"),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
     let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
         .expect("build ollama client");
+    let mcp = Arc::new(idea_vault::mcp::McpRegistry::load(&config.mcp_config_path));
 
     // Keep the tempdir alive for the process lifetime.
     std::mem::forget(tmp);
@@ -61,6 +63,7 @@ fn test_state() -> AppState {
         ai_semaphore: Arc::new(Semaphore::new(1)),
         skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
         jobs: idea_vault::web::jobs::new_registry(),
+        mcp,
     }
 }
 

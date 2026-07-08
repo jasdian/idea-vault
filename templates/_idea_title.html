@@ -1,0 +1,19 @@
+<div class="title-row" id="idea-title-row">
+  <h1 class="title" id="idea-title">{{ title }}</h1>
+  {# A <details> disclosure needs no JS to open/close (ADR-0001) — clicking "rename" again closes
+     it, which doubles as "cancel" with no extra route. Kept out of the h1's own line so it never
+     visually competes with the title (mono, small, faint like .btw-link). #}
+  <details class="rename-toggle">
+    <summary class="rename-toggle__summary"
+             title="Rename this idea — the short name (&#8220;{{ slug }}&#8221;) stays, so links keep working">rename</summary>
+    {# hx-on: a non-2xx (busy idea, bad title) is otherwise silently dropped by htmx — surface
+       the handler's readable message instead of a dead button. #}
+    <form class="rename-form" hx-post="/idea/{{ slug }}/rename"
+          hx-target="#idea-title-row" hx-swap="outerHTML"
+          hx-on::after-request="if(!event.detail.successful) alert(event.detail.xhr.responseText)">
+      <input type="text" name="title" value="{{ title }}" maxlength="200" required />
+      <button type="submit" class="btn btn--ghost">save</button>
+    </form>
+    <p class="field__hint">the short name/slug (<code>{{ slug }}</code>) stays — links keep working</p>
+  </details>
+</div>

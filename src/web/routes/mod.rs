@@ -3,6 +3,7 @@ pub mod artifacts;
 pub mod chat;
 pub mod compact;
 pub mod ideas;
+pub mod mcp;
 pub mod memory;
 pub mod settings;
 

@@ -8,6 +8,7 @@ pub mod config;
 pub mod domain;
 pub mod import;
 pub mod index;
+pub mod mcp;
 pub mod memory;
 pub mod vault;
 pub mod web;

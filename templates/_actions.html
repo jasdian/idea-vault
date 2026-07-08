@@ -13,8 +13,10 @@
     </form>
     {% for wf in workflows %}
     <form hx-post="/idea/{{ slug }}/workflow/{{ wf.name }}" hx-target="#transcript" hx-swap="innerHTML">
+      {# Text-only like the sibling chips — an emoji glyph inflates the chip's line box and makes
+         it tower over the rest of the row; the dashed border is the workflow marker. #}
       <button type="submit" class="chip chip--workflow"
-              title="Deterministic workflow (D19): {{ wf.description }}. Runs serially on a local model, so it takes a while.">⛓ {{ wf.name }}</button>
+              title="Deterministic workflow (D19): {{ wf.description }}. Runs serially on a local model, so it takes a while.">{{ wf.name }}</button>
     </form>
     {% endfor %}
     <span class="moves__caption">attacks from 4 angles, then converges into one synthesis</span>

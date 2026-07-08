@@ -6,7 +6,9 @@
 > Decisions: [ADR-0008](./adr/0008-containerized-local-deployment.md),
 > [ADR-0013](./adr/0013-containerized-claude-code.md) (claude-code in containers),
 > [ADR-0017](./adr/0017-web-access-tools.md) (`IDEA_VAULT_WEB_ACCESS`, `IDEA_VAULT_SEARCH_URL` —
-> outbound internet needed when web access is on). Patterns adapted
+> outbound internet needed when web access is on),
+> [ADR-0018](./adr/0018-mcp-servers.md) (`IDEA_VAULT_MCP_CONFIG`, the owner's MCP server registry).
+> Patterns adapted
 > from sibling repos: `mcp-server` (single-Rust-service multi-stage build), `cosmic-mmo` (compose
 > topology, loopback publishing, profile-gated one-shot, json-file logging), `zomboid-seasons`
 > (SQLite on a named volume, container-created `/data`).
@@ -56,6 +58,7 @@ Why these choices (see [03-data-model](./03-data-model.md) truth/derived split):
 | Data | Mount | Why |
 |------|-------|-----|
 | `vault/` (markdown, **truth**) | **host bind mount** `./vault:/vault` | user-owned, irreplaceable, git-versioned; must survive `docker volume rm` and app removal |
+| `.mcp-servers.json` (app config, **not** vault truth) | rides the same **host bind mount** as `vault/` by default | `IDEA_VAULT_MCP_CONFIG` defaults to `<vault>/.mcp-servers.json` purely because the vault bind mount is the one host-persistent path available; it is invisible to reindex ([03-data-model](./03-data-model.md), [ADR-0018](./adr/0018-mcp-servers.md)) |
 | `index.db` (**derived**) | named volume `idea-index:/data` | rebuildable via reindex ([ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md)); app-managed, keep out of the user's tree; WAL sidecars live here too |
 | Ollama models | named volume `ollama-models:/root/.ollama` | multi-GB, re-pullable; pull once, persist across restarts |
 | `claude` CLI binary (claude-code override only) | **host bind mount** `${IDEA_VAULT_CLAUDE_HOST_BIN:-~/.local/bin/claude}:/opt/claude/claude:ro` | host-owned, host-managed version; ro so the container never rewrites it; dereferenced at container **start** — restart to pick up a host update ([ADR-0013](./adr/0013-containerized-claude-code.md)) |
@@ -84,6 +87,7 @@ Containerization requires the app to stop assuming `localhost`. `config.rs`
 | `IDEA_VAULT_CLAUDE_CTX_TOKENS` | `0` (auto) | `${IDEA_VAULT_CLAUDE_CTX_TOKENS:-0}` from `.env` (claude override file only) | initial claude-code context-window override in **tokens**; `0` = derive from the model name (`1m` marker → 1,000,000, else 200,000 — no default cap); nonzero clamped `1024..=2_000_000`. Retunable live via `/settings` ([ADR-0014](./adr/0014-dynamic-context-budget.md)). |
 | `IDEA_VAULT_WEB_ACCESS` | `true` | not set — falls back to `true` | initial web-access toggle ([ADR-0017](./adr/0017-web-access-tools.md)): lets either backend crawl the internet — Ollama via the `ai::web` tool-calling loop, claude-code via its own WebSearch/WebFetch tools; off (`false`/`0`) disallows them on both. Retunable live via `/settings`. **The container needs outbound internet reachability when this is on** — a previously-unneeded posture, since the app otherwise only reaches the `ollama` service on the compose network. |
 | `IDEA_VAULT_SEARCH_URL` | `https://html.duckduckgo.com/html/` | not set — falls back to the default | Ollama-path search endpoint used by `ai::web::web_search` ([ADR-0017](./adr/0017-web-access-tools.md)); override to point at a self-hosted SearXNG instance (or any HTML search endpoint accepting `?q=`) instead of DuckDuckGo. Read per call, no restart needed. Not used on the claude-code path (the CLI's own WebSearch is unaffected by it). |
+| `IDEA_VAULT_MCP_CONFIG` | `<vault>/.mcp-servers.json` | `${IDEA_VAULT_MCP_CONFIG}` (unset ⇒ same vault-relative default, so it rides the `vault/` bind mount) | path to the owner's MCP server registry file (`crate::mcp::McpRegistry`, [ADR-0018](./adr/0018-mcp-servers.md)) — **app config, not vault truth**, but defaulted inside the vault dir purely because that's the one host-persistent bind mount; managed live from `/mcp` with no restart. Only override this if you want the registry to live outside the vault bind mount (e.g. on its own volume). |
 | `IDEA_VAULT_CLAUDE_BIN` | `claude` | **fixed to `/opt/claude/claude`** by the claude override — do not set it yourself in a containerized run | path to the `claude` CLI. Native-only otherwise. |
 | `IDEA_VAULT_CLAUDE_HOST_BIN` | *(native: unused)* | `~/.local/bin/claude` (default) — host path the claude override bind-mounts ro into the container | claude-code-in-containers only ([ADR-0013](./adr/0013-containerized-claude-code.md)); compose-interpolation var, not read by `config.rs`. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | *(native: unused — the CLI's own login state applies)* | **required** by the claude override (`:?` guard — `up`/`config` fails fast when unset) | long-lived token from a one-time host `claude setup-token`; inherited by the spawned CLI from the app's env ([ADR-0013](./adr/0013-containerized-claude-code.md)). |
@@ -320,4 +324,5 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
 - [ADR-0003](./adr/0003-ollama-local-only-ai.md) — why Ollama; the URL is now env-driven.
 - [ADR-0013](./adr/0013-containerized-claude-code.md) — claude-code in containers + rejected alternatives.
 - [ADR-0014](./adr/0014-dynamic-context-budget.md) — dynamic context budget (`/api/show`, `num_ctx`, per-backend overrides).
+- [ADR-0018](./adr/0018-mcp-servers.md) — the MCP server registry, its config-only vs. wire-client module split, and why `.mcp-servers.json` rides the vault bind mount without being vault truth.
 - [05-ai-integration](./05-ai-integration.md) — D20 degradation the first-run relies on; the Ollama client contract (`/api/show`, `num_ctx`).

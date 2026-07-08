@@ -39,11 +39,13 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         ollama_ctx_tokens: 0,
         claude_ctx_tokens: 0,
         web_access: false,
+        mcp_config_path: tmp.path().join(".mcp-servers.json"),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
     let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
         .expect("build ollama client");
+    let mcp = Arc::new(idea_vault::mcp::McpRegistry::load(&config.mcp_config_path));
 
     std::mem::forget(tmp);
 
@@ -51,10 +53,11 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         AppState {
             config: Arc::new(config),
             db: Arc::new(Mutex::new(conn)),
-            llm: idea_vault::ai::LlmBackend::ollama_only(ollama),
+            llm: idea_vault::ai::LlmBackend::ollama_only(ollama).with_mcp(mcp.clone()),
             ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
             skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
             jobs: idea_vault::web::jobs::new_registry(),
+            mcp,
         },
         vault_dir,
     )

@@ -2,13 +2,14 @@
 
 {% block content %}
 <a class="crumb" href="/">← all ideas</a>
-<h1 class="title">{{ title }}</h1>
+{% include "_idea_title.html" %}
 <div class="idea-subhead">
   <span id="idea-state" class="state state--{{ state }}">{{ state }}</span>
   <a class="btw-link" href="/idea/{{ slug }}/history" title="See the full thread; fork it into a new idea">btw — history &amp; fork ↗</a>
 </div>
 
-<div class="statement">{{ body_html|safe }}</div>
+{# id: the store-completion poll refreshes this block out-of-band with the consolidated writeup. #}
+<div class="statement" id="idea-statement">{{ body_html|safe }}</div>
 
 {{ memory_html|safe }}
 

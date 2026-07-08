@@ -64,7 +64,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D30) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0017 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0018 | — |
 
 ## Locked decisions (at a glance)
 
@@ -81,6 +81,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Context budget:** derived live per backend/model (`/api/show` for Ollama, model-name mapping for claude-code), overridable per backend, no longer a fixed constant ([ADR-0014](./adr/0014-dynamic-context-budget.md)).
 - **Knowledge extraction:** per-lens findings persisted as `artifacts/*.md` truth files alongside a converged synthesis, a deliberate divergence from the swarm's discard-intermediates rule ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)).
 - **Web access:** one live `web_access` setting (default on) lets either backend crawl the internet — a bounded `ai::web` tool-calling loop on Ollama, allow/deny of the CLI's own WebSearch/WebFetch on claude-code; off restores a fully offline run ([ADR-0017](./adr/0017-web-access-tools.md)).
+- **MCP servers:** an owner-managed registry of MCP Streamable-HTTP endpoints (`crate::mcp`, persisted app config at `<vault>/.mcp-servers.json`, not vault truth) is bridged to either backend by `ai::backend` alone, keeping the `mcp`/`ai::mcp` split one-way and acyclic; managed live from the `/mcp` page, with probes run inline rather than as background jobs ([ADR-0018](./adr/0018-mcp-servers.md)).
 
 ## Beyond these docs
 

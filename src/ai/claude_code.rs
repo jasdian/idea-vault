@@ -35,6 +35,7 @@ pub struct ClaudeCodeClient {
     system_prompt: Option<String>,
     skip_permissions: bool,
     token_timeout: Duration,
+    mcp_config_json: Option<String>,
 }
 
 /// How the client is configured from `config.rs` (keeps the constructor from growing arguments).
@@ -52,6 +53,11 @@ pub struct ClaudeCodeConfig {
     pub system_prompt: Option<String>,
     pub skip_permissions: bool,
     pub token_timeout: Duration,
+    /// Rendered `--mcp-config` JSON (`ai::backend::claude_mcp_config_json` builds it from the
+    /// enabled-server registry per call). `Some` ⇒ spawn with `--mcp-config <tmpfile>` +
+    /// `--strict-mcp-config` (only OUR servers, not whatever `.mcp.json` the cwd happens to
+    /// contain); `None` ⇒ no MCP flags at all.
+    pub mcp_config_json: Option<String>,
 }
 
 impl ClaudeCodeClient {
@@ -66,6 +72,7 @@ impl ClaudeCodeClient {
             system_prompt: cfg.system_prompt,
             skip_permissions: cfg.skip_permissions,
             token_timeout: cfg.token_timeout,
+            mcp_config_json: cfg.mcp_config_json,
         }
     }
 
@@ -189,6 +196,30 @@ impl ClaudeCodeClient {
         if let Some(sys) = &self.system_prompt {
             cmd.arg("--append-system-prompt").arg(sys);
         }
+        let mcp_config_path = if let Some(json) = &self.mcp_config_json {
+            // The CLI reads the config file once at spawn, so a per-call temp file under the OS
+            // temp dir is enough — a unique (pid + counter) name keeps concurrent turns apart.
+            // The rendered JSON embeds MCP bearer tokens, so this is a SECRET at rest: written
+            // owner-only (0600 on unix; the default temp dir is world-shared) and deleted when
+            // the stream state drops (turn done / cancelled / client killed) — never left for
+            // other local users to harvest.
+            static MCP_TMP_COUNTER: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let n = MCP_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("idea-vault-mcp-{}-{n}.json", std::process::id()));
+            write_secret(&path, json).map_err(|e| {
+                AiError::Backend(format!("writing mcp config {}: {e}", path.display()))
+            })?;
+            // --strict-mcp-config: use exactly these servers; ignore any user/project .mcp.json
+            // in the foil's cwd (the vault), which the owner never intended as CLI config.
+            cmd.arg("--mcp-config")
+                .arg(&path)
+                .arg("--strict-mcp-config");
+            Some(path)
+        } else {
+            None
+        };
 
         cmd.current_dir(&self.cwd)
             .stdin(Stdio::piped())
@@ -231,6 +262,7 @@ impl ClaudeCodeClient {
             token_timeout: self.token_timeout,
             emitted_any: false,
             finished: false,
+            mcp_config_path,
         };
 
         Ok(futures::stream::unfold(state, next_token).boxed())
@@ -246,6 +278,40 @@ struct StreamState {
     token_timeout: Duration,
     emitted_any: bool,
     finished: bool,
+    /// The per-call `--mcp-config` temp file (bearer tokens inside) — removed on drop, which
+    /// fires whether the turn finished, errored, or was cancelled mid-stream.
+    mcp_config_path: Option<PathBuf>,
+}
+
+impl Drop for StreamState {
+    fn drop(&mut self) {
+        if let Some(path) = self.mcp_config_path.take() {
+            // Best-effort: the child has been killed/reaped by now (kill_on_drop) and the CLI
+            // read the file at spawn; a failed unlink only means the 0600 file lingers.
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Write `contents` readable by the owner only (0600) — for files carrying credentials. On
+/// non-unix targets this degrades to a plain write (no world-shared /tmp semantics there).
+fn write_secret(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    // An existing file keeps its old mode; enforce 0600 even on overwrite.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(contents.as_bytes())
 }
 
 /// Pull the next text token (or terminal error) from the CLI's `stream-json` stdout. Skips tool

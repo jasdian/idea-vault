@@ -161,6 +161,34 @@ h1.title {
   line-height: 1.12; letter-spacing: -.01em; margin: 0 0 .6rem;
 }
 
+/* ---- rename disclosure (next to the title, must not compete with it) --
+   `<details>` gives open/close with no JS (ADR-0001); reopening after a save re-collapses it
+   since the whole block is re-rendered fresh. Sits right under the h1 — quiet, mono, faint until
+   hovered, exactly like `.btw-link`. */
+.title-row { margin: 0 0 .6rem; }
+.title-row h1.title { margin-bottom: .2rem; }
+.rename-toggle { font-size: .74rem; }
+.rename-toggle__summary {
+  display: inline-block; cursor: pointer; font-family: var(--mono); font-size: .74rem;
+  color: var(--faint); list-style: none;
+}
+.rename-toggle__summary::-webkit-details-marker { display: none; }
+.rename-toggle__summary::before { content: "✎ "; }
+.rename-toggle__summary:hover { color: var(--accent); }
+.rename-toggle[open] .rename-toggle__summary { color: var(--accent); }
+.rename-form {
+  display: flex; gap: .5rem; align-items: center; margin: .5rem 0 .3rem; max-width: 28rem;
+}
+.rename-form input[type="text"] {
+  flex: 1; font: inherit; font-family: var(--serif); font-size: 1.05rem; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule-strong); border-radius: 6px;
+  padding: .35rem .6rem;
+}
+.rename-form input[type="text"]:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.rename-toggle .field__hint { margin: 0 0 .4rem; }
+
 /* ---- state pill ------------------------------------------------------- */
 .state {
   display: inline-block; font-family: var(--mono); font-size: .68rem;
@@ -527,6 +555,89 @@ h1.title {
 .settings__diag {
   font-family: var(--mono); font-size: .74rem; color: var(--faint);
   margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid var(--rule); max-width: 34rem;
+}
+
+/* ---- mcp servers page (owner-configured MCP endpoints) -----------------
+   Each server is a 3-line card so nothing competes for horizontal space at the measure width:
+   name+status on line 1, url+token+enabled-pill on line 2 (url is the one element allowed to
+   truncate — everything else is short and fixed-width), actions always visible on line 3. Actions
+   are never hover-only (that's precisely what made delete read as "missing" before this pass). */
+.mcp { display: flex; flex-direction: column; gap: 1.5rem; max-width: 44rem; }
+.mcp__empty { color: var(--muted); font-style: italic; }
+.mcp__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+.mcp__row {
+  display: flex; flex-direction: column; gap: .35rem;
+  padding: .65rem .85rem; border: 1px solid var(--rule-strong); border-radius: var(--radius);
+}
+/* Dimmed, not hidden — the row (including its always-visible actions) stays fully legible. */
+.mcp__row--disabled { opacity: .78; }
+.mcp__row--edit { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
+
+.mcp__row-line1 { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+.mcp__name { font-family: var(--mono); font-size: .88rem; color: var(--accent); }
+.mcp__row-line2 { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.mcp__url {
+  font-family: var(--mono); font-size: .78rem; color: var(--muted);
+  flex: 1 1 auto; min-width: 6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mcp__token {
+  font-family: var(--mono); font-size: .68rem; color: var(--faint);
+  text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; flex: 0 0 auto;
+}
+.mcp__pill {
+  font-family: var(--mono); font-size: .66rem; text-transform: uppercase; letter-spacing: .06em;
+  padding: .1rem .5rem; border-radius: 999px; border: 1px solid var(--rule-strong);
+  color: var(--faint); white-space: nowrap; flex: 0 0 auto;
+}
+.mcp__pill--on {
+  color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); background: var(--ok-soft);
+}
+
+.mcp__row-actions { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-top: .15rem; }
+.mcp__row-actions form { margin: 0; }
+/* Consistent chip sizing across probe/enable/edit/delete — delete is a danger-tinted chip, not
+   the hover-only `.mem-del` pattern (that pattern is right for a dense list of memory facts; a
+   handful of server rows can afford a permanently visible delete). */
+.chip--danger { border-color: color-mix(in srgb, var(--danger) 45%, transparent); color: var(--danger); }
+.chip--danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); border-color: var(--danger); }
+
+.mcp__status {
+  font-family: var(--mono); font-size: .7rem; color: var(--faint); flex: 0 1 auto;
+  padding: .12rem .5rem; border-radius: 5px; border: 1px solid var(--rule-strong);
+  /* Error text is server-derived and truncated in the handler, but long tokens (URLs) must
+     still wrap inside the chip rather than push the card wide. */
+  overflow-wrap: anywhere; max-width: 100%;
+}
+.mcp__status--ok {
+  color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); background: var(--ok-soft);
+}
+.mcp__status--error {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+/* ---- mcp edit form: change url / token in place (fieldset-free — it's one row, not a group) --- */
+.mcp__edit-form { display: flex; flex-direction: column; gap: .6rem; }
+.mcp__edit-form .field { gap: .25rem; }
+.mcp__clear-token {
+  font-family: var(--mono); font-size: .72rem; color: var(--faint);
+  display: inline-flex; align-items: center; gap: .4rem; cursor: pointer;
+}
+.mcp__clear-token input { accent-color: var(--accent); margin: 0; }
+.mcp__clear-token input:disabled { cursor: not-allowed; opacity: .5; }
+
+.mcp__add { max-width: 34rem; }
+.mcp input[type="text"], .mcp input[type="password"] {
+  font: inherit; font-size: .95rem; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--rule-strong); border-radius: 6px; padding: .45rem .6rem; max-width: 24rem;
+}
+.mcp input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.mcp .btn { align-self: flex-start; }
+
+@media (max-width: 24rem) {
+  /* Below ~360px even the url's flex-basis fights the token/pill for room — stack line 2. */
+  .mcp__row-line2 { flex-direction: column; align-items: flex-start; gap: .3rem; }
+  .mcp__url { max-width: 100%; }
 }
 
 /* ---- btw / fork ------------------------------------------------------- */

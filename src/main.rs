@@ -77,7 +77,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 5. LLM backend + non-blocking health probe (boot must not wait on the model — D20/D25).
-    let llm = build_llm(&config)?;
+    // The MCP registry (app config, not vault truth — see the `mcp` module doc) is loaded first
+    // and shared with the backend so enabled servers' tools join the very next turn.
+    let mcp = Arc::new(idea_vault::mcp::McpRegistry::load(&config.mcp_config_path));
+    let llm = build_llm(&config)?.with_mcp(mcp.clone());
     tracing::info!(backend = %backend_label(&config), model = %llm.model(), "llm backend selected");
     {
         let probe_backend = llm.clone();
@@ -103,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
         skills,
         jobs: idea_vault::web::jobs::new_registry(),
+        mcp,
     };
 
     // 7. Router + serve.
@@ -153,6 +157,8 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         system_prompt,
         skip_permissions,
         token_timeout: timeout,
+        // Set per call by `ai::backend::claude` from the live MCP registry, never at boot.
+        mcp_config_json: None,
     };
 
     let settings = idea_vault::ai::LlmSettings {

@@ -46,6 +46,19 @@ pub struct IdeaPage {
     pub artifacts_html: String,
 }
 
+/// Partial: the idea-page title block (`templates/_idea_title.html`) — the `h1` plus its inline
+/// rename disclosure. `{% include %}`-d by `IdeaPage` (sharing its `title`/`slug` scope, same
+/// trick as `McpRow`'s doc comment) and returned standalone by `POST /idea/{slug}/rename` so the
+/// swap re-renders with the disclosure back in its closed state — no separate "cancel" route
+/// needed (docs/09-web-ui.md route map: rename does not appear as its own template group, it
+/// reuses this one).
+#[derive(Template, WebTemplate)]
+#[template(path = "_idea_title.html")]
+pub struct IdeaTitle {
+    pub title: String,
+    pub slug: String,
+}
+
 /// Partial: the memory panel (`templates/_memory.html`) — the MEMORY.md index with a per-fact
 /// delete control. Re-rendered on its own after a fact deletion (swapped into `#memory`).
 #[derive(Template, WebTemplate)]
@@ -218,12 +231,81 @@ pub struct ArtifactExport {
     pub sections: Vec<ExportSection>,
 }
 
-/// Partial: stored view (consolidated body + memory) (R4, `templates/_stored.html`).
+/// Partial: the dormant-idea panel (R4, `templates/_stored.html`) — label + reopen only. The
+/// consolidated writeup is NOT part of it: that text IS the idea body, rendered once in the
+/// page's top `.statement` (and refreshed out-of-band when a store job lands), so rendering it
+/// here too duplicated the whole writeup on every stored idea page.
 #[derive(Template, WebTemplate)]
 #[template(path = "_stored.html")]
 pub struct Stored {
     pub slug: String,
-    pub body_html: String,
+}
+
+/// The MCP servers page shell (`templates/mcp.html`); the list is pre-rendered so a mutation can
+/// swap just the `#mcp` panel, same split as `SettingsPage`/`SettingsForm`.
+#[derive(Template, WebTemplate)]
+#[template(path = "mcp.html")]
+pub struct McpPage {
+    pub list_html: String,
+}
+
+/// Partial: the swappable MCP panel (`templates/_mcp_list.html`) — the configured-server list plus
+/// the add-server form. Returned by `GET /mcp` (embedded) and by every mutating `/mcp/*` route
+/// (add/toggle/delete) so the panel reflects the registry without a full reload.
+#[derive(Template, WebTemplate)]
+#[template(path = "_mcp_list.html")]
+pub struct McpList {
+    pub servers: Vec<McpServerRow>,
+}
+
+/// One configured server row. `has_token` only ever renders as "token set" / "no token" — the
+/// bearer token itself must never reach the page (task requirement: never echo it back).
+/// `status_html` is the pre-rendered idle placeholder (`McpStatus`) so the row always has a
+/// `#mcp-status-<name>` target for `probe` to swap, even before the owner ever probes it.
+pub struct McpServerRow {
+    pub name: String,
+    pub url: String,
+    pub has_token: bool,
+    pub enabled: bool,
+    pub status_html: String,
+}
+
+/// Partial: a single server's view-mode `<li>` (`templates/_mcp_row.html`). `{% include %}`-d by
+/// `_mcp_list.html` for every row in the loop (Askama includes share the parent's scope, so the
+/// loop's `server` binding is visible to the included template) — the *same* field name (`server`)
+/// doubles as this struct's top-level field, which is what lets `GET /mcp/{name}/edit`'s cancel
+/// action (`GET /mcp/{name}/view`) render exactly one row standalone with no template duplication.
+#[derive(Template, WebTemplate)]
+#[template(path = "_mcp_row.html")]
+pub struct McpRow {
+    pub server: McpServerRow,
+}
+
+/// Partial: one server's edit-mode `<li>` (`templates/_mcp_edit_row.html`), swapped in by
+/// `GET /mcp/{name}/edit` over the same `#mcp-row-<name>` id the view row uses, and posted by
+/// `POST /mcp/{name}/update`. `url` is the current value so the form starts populated; there is
+/// deliberately no `token` field here — the bearer token is write-only (see `McpServerRow` doc),
+/// so the form only ever shows *whether* one is set (`has_token`, used for the placeholder text
+/// and to gray out "clear token" when there is nothing to clear).
+#[derive(Template, WebTemplate)]
+#[template(path = "_mcp_edit_row.html")]
+pub struct McpEditRow {
+    pub name: String,
+    pub url: String,
+    pub has_token: bool,
+}
+
+/// Partial: one row's probe-status slot (`templates/_mcp_status.html`), swapped in by
+/// `POST /mcp/{name}/probe` (`hx-target="#mcp-status-<name>" hx-swap="outerHTML"`) and also used to
+/// pre-render every row's idle placeholder on `GET /mcp`. `ok`/`errored` pick the chip color;
+/// both false is the neutral "not probed yet" state.
+#[derive(Template, WebTemplate)]
+#[template(path = "_mcp_status.html")]
+pub struct McpStatus {
+    pub name: String,
+    pub text: String,
+    pub ok: bool,
+    pub errored: bool,
 }
 
 /// Partial: full-text search results (R8, `templates/_search_results.html`).

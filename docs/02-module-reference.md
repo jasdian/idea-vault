@@ -43,7 +43,10 @@ flowchart TB
             A_STREAM["stream.rs — Ollama NDJSON → token stream"]
             A_BUDGET["budget.rs — context budgeting (D21)"]
             A_WEB["web.rs — keyless web_search/fetch_url + tool defs (ADR-0017)"]
+            A_MCP["mcp.rs — MCP Streamable-HTTP wire client (init/session/tools-list/tools-call, ADR-0018)"]
         end
+
+        MCP["mcp.rs — owner-global MCP server registry: McpServerConfig, McpRegistry\npersisted .mcp-servers.json (ADR-0018)"]
 
         subgraph memory["memory/ (feature)"]
             M_EXTRACT["extract.rs — conv → facts on Store (D12)"]
@@ -60,7 +63,7 @@ flowchart TB
         end
 
         subgraph web["web/ (HTTP surface)"]
-            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts"]
+            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp"]
             W_JOBS["jobs.rs — background job registry + poll (ADR-0010)"]
             W_TMPL["templates.rs — Askama structs"]
         end
@@ -87,6 +90,7 @@ flowchart TD
     ai["ai"]
     vault["vault"]
     domain["domain"]
+    mcp["mcp"]
 
     web --> concepts
     web --> memory
@@ -94,6 +98,7 @@ flowchart TD
     web --> ai
     web --> vault
     web --> domain
+    web --> mcp
 
     concepts --> ai
     concepts --> vault
@@ -108,12 +113,14 @@ flowchart TD
     index --> domain
 
     ai --> domain
+    ai --> mcp
     vault --> domain
 
     classDef top fill:#1f6feb22,stroke:#1f6feb;
     classDef base fill:#2ea04322,stroke:#2ea043;
     class web top;
     class domain base;
+    class mcp base;
 ```
 
 ### Dependency rules (normative)
@@ -121,17 +128,24 @@ flowchart TD
 | Module | May depend on | Must **not** depend on |
 |--------|---------------|------------------------|
 | `domain` | (std/serde only) | anything internal |
-| `vault` | `domain` | `index`, `ai`, `memory`, `concepts`, `web` |
-| `ai` | `domain` | `vault`, `index`, `memory`, `concepts`, `web` |
-| `index` | `vault`, `domain` | `ai`, `memory`, `concepts`, `web` |
-| `memory` | `vault`, `ai`, `index`, `domain` | `concepts`, `web` |
-| `concepts` | `ai`, `vault`, `domain` (read `index` via `memory` where needed) | `web` |
+| `mcp` | (std/serde only) | anything internal, **especially `ai`** |
+| `vault` | `domain` | `index`, `ai`, `memory`, `concepts`, `web`, `mcp` |
+| `ai` | `domain`, `mcp` | `vault`, `index`, `memory`, `concepts`, `web` |
+| `index` | `vault`, `domain` | `ai`, `memory`, `concepts`, `web`, `mcp` |
+| `memory` | `vault`, `ai`, `index`, `domain` | `concepts`, `web`, `mcp` |
+| `concepts` | `ai`, `vault`, `domain` (read `index` via `memory` where needed) | `web`, `mcp` |
 | `web` | everything below | (nothing may depend on `web`) |
 
 > Rationale for a couple of edges that might surprise: `index` depends on `vault` because reindex
 > reads markdown to rebuild ([ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md)). `ai`
 > deliberately does **not** depend on `vault` — it is a pure model boundary; callers assemble prompts
-> and hand them in.
+> and hand them in. **`mcp` is a leaf like `domain`**, not a peer of `ai::mcp`: `mcp` holds only the
+> owner's server registry (config/persistence, no protocol knowledge) and must never import `ai`;
+> `ai::mcp` (the wire client) must never import `mcp`; `ai::backend` is the *only* module that imports
+> both, one-way, so combining "which servers are enabled" with "how to call one" never creates a
+> cycle ([ADR-0018](./adr/0018-mcp-servers.md)). `web` also depends on `mcp` directly (not only
+> through `ai`) because `web::routes::mcp` reads/writes the registry itself for the `/mcp`
+> management page.
 
 ## Module responsibilities
 
@@ -148,7 +162,15 @@ flowchart TD
   context budgeting. Provider-swap is localized here (out of scope beyond these two,
   [ADR-0003](./adr/0003-ollama-local-only-ai.md)). `ai::web` supplies the keyless `web_search`/
   `fetch_url` tool leaves the router's bounded tool-calling loop executes on the Ollama path when
-  the live `web_access` setting is on ([ADR-0017](./adr/0017-web-access-tools.md)).
+  the live `web_access` setting is on ([ADR-0017](./adr/0017-web-access-tools.md)). `ai::mcp` is the
+  MCP Streamable-HTTP wire client (initialize/session/tools-list/tools-call); `ai::backend` is the
+  sole bridge that combines it with the `mcp` registry to offer enabled servers' tools on either
+  backend ([ADR-0018](./adr/0018-mcp-servers.md)).
+- **`mcp`** — the owner-global MCP server registry (`McpServerConfig`, `McpRegistry`): pure
+  config/persistence, `std`+`serde` only, backing `<vault>/.mcp-servers.json` (app config, not vault
+  truth — [03-data-model](./03-data-model.md)). Deliberately a leaf module like `domain`: it must
+  never import `ai`, so it cannot know how to *call* a server, only which servers the owner has
+  configured and enabled ([ADR-0018](./adr/0018-mcp-servers.md)).
 - **`memory`** — the memory feature: extract facts at Store ([D12](./06-concepts/memory.md)), load
   them at Reopen ([D13](./06-concepts/memory.md)), resolve backlinks ([D23](./06-concepts/memory.md)).
 - **`concepts`** — skills, agents, workflows, the swarm orchestrator, and knowledge extraction

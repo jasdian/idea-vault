@@ -54,6 +54,12 @@ pub struct Config {
     /// Web access at boot (ADR-0017): the foil may search the web / fetch pages on either
     /// backend. Defaults on; live-toggleable on the Settings page.
     pub web_access: bool,
+    /// Where the MCP server registry JSON lives (`mcp::McpRegistry`). Defaults to
+    /// `<vault_dir>/.mcp-servers.json`: the vault bind mount is the one host-persistent path in a
+    /// containerized run, and the dotfile is invisible to the index by construction —
+    /// `vault::walk::walk_ideas` only admits directories containing an `idea.md`, so this file
+    /// can never leak into a reindex. App config, NOT vault truth (see `mcp`'s module doc).
+    pub mcp_config_path: PathBuf,
 }
 
 /// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
@@ -95,6 +101,9 @@ const DEFAULT_COMPACT_THRESHOLD: f32 = 0.80;
 /// Web access default (ADR-0017): on — the owner asked for a foil that can crawl the internet;
 /// `IDEA_VAULT_WEB_ACCESS=false` (or the Settings toggle) restores a fully offline run.
 const DEFAULT_WEB_ACCESS: bool = true;
+/// Default MCP registry filename, joined onto the vault dir (a dotfile so idea listings and any
+/// `.md`-oriented scan skip it; the walker's is-a-directory check makes that structural too).
+const MCP_CONFIG_FILENAME: &str = ".mcp-servers.json";
 /// Clamp band for a nonzero context-window override (tokens): below 1k is useless, above 2M is
 /// beyond any supported model (the claude 1M window fits comfortably).
 pub const CTX_TOKENS_MIN: usize = 1_024;
@@ -193,6 +202,12 @@ impl Config {
             .map(|v| v != "false" && v != "0")
             .unwrap_or(DEFAULT_WEB_ACCESS);
 
+        // MCP registry file: defaults into the vault dir (host-persistent in containers) as a
+        // dotfile the idea walker can never mistake for an idea.
+        let mcp_config_path = lookup("IDEA_VAULT_MCP_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| vault_dir.join(MCP_CONFIG_FILENAME));
+
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
                 .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
@@ -228,6 +243,7 @@ impl Config {
             ollama_ctx_tokens,
             claude_ctx_tokens,
             web_access,
+            mcp_config_path,
         }
     }
 }
@@ -339,6 +355,31 @@ mod tests {
         map.insert("IDEA_VAULT_OLLAMA_CTX_TOKENS", "lots");
         let cfg = Config::from_lookup(lookup_from(map));
         assert_eq!(cfg.ollama_ctx_tokens, 0);
+    }
+
+    #[test]
+    fn mcp_config_defaults_into_the_vault_and_overrides() {
+        // Default: a dotfile inside the (possibly overridden) vault dir.
+        let cfg = Config::from_lookup(lookup_from(HashMap::new()));
+        assert_eq!(
+            cfg.mcp_config_path,
+            PathBuf::from("./vault/.mcp-servers.json")
+        );
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_VAULT_DIR",
+            "/vault",
+        )])));
+        assert_eq!(
+            cfg.mcp_config_path,
+            PathBuf::from("/vault/.mcp-servers.json")
+        );
+
+        // Explicit override wins over the vault-relative default.
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_MCP_CONFIG",
+            "/data/mcp.json",
+        )])));
+        assert_eq!(cfg.mcp_config_path, PathBuf::from("/data/mcp.json"));
     }
 
     #[test]

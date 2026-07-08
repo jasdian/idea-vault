@@ -141,6 +141,7 @@ pub async fn reopen_idea(
         skill_names,
         pending,
         state.llm.context_budget().max_bytes,
+        state.llm.tool_context_bytes(),
     )?
     .render()
     .map_err(|e| WebError::Internal(format!("template render: {e}")))?;

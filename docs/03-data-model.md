@@ -32,7 +32,19 @@ vault/
       <run-stamp>-synthesis.md    # the converged synthesis of a run (frontmatter + body)
       <run-stamp>-report.html     # optional derived export of a run (opt-in, unindexed; ADR-0015)
 index.db             # derived index (may be deleted + rebuilt)
+.mcp-servers.json    # owner-global MCP server registry — APP CONFIG, not vault truth (ADR-0018)
 ```
+
+> **`.mcp-servers.json` is not part of the vault contract above.** It lives beside `index.db` at the
+> vault root only because the vault directory is the one host-persistent path in a containerized run
+> ([12-deployment](./12-deployment.md)); it holds the owner's MCP server list
+> (`crate::mcp::McpRegistry`, [ADR-0018](./adr/0018-mcp-servers.md)), not idea content. It is
+> **structurally invisible to reindex** — `vault::walk` only enumerates directories that contain an
+> `idea.md`, so a top-level dotfile is never walked, parsed, or indexed, the same way `.mcp-servers.json`
+> is exempt from the canonical-vs-indexed table below by never entering it. Losing the file costs the
+> owner a re-add of server URLs; it is never an idea-content loss. Its path is overridable via
+> `IDEA_VAULT_MCP_CONFIG` and defaults into the vault dir purely for host-mount convenience — the same
+> argument [02-module-reference](./02-module-reference.md) makes for the `crate::mcp` module split.
 
 ### D7 — Vault entity map (what relates to what on disk)
 
