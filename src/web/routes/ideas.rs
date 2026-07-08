@@ -212,6 +212,7 @@ pub(crate) fn render_actions(
     slug: &str,
     skill_names: Vec<String>,
     can_store: bool,
+    busy: bool,
     oob: bool,
 ) -> Result<String, WebError> {
     use askama::Template as _;
@@ -219,6 +220,7 @@ pub(crate) fn render_actions(
         slug: slug.to_string(),
         can_store,
         skill_names,
+        busy,
         oob,
     }
     .render()
@@ -249,6 +251,7 @@ pub(crate) fn respond_with_transcript(
 ) -> Result<axum::response::Html<String>, WebError> {
     let conversation = store::read_conversation(&state.config.vault_dir, slug)?;
     let pending = crate::web::jobs::peek(&state.jobs, slug);
+    let busy = matches!(pending, crate::web::jobs::Pending::Running { .. });
     let mut html = transcript_inner(
         &state.config.vault_dir,
         slug,
@@ -267,7 +270,7 @@ pub(crate) fn respond_with_transcript(
     );
     let skill_names = state.skills.move_names();
     html.push_str(&state_badge_oob(idea.frontmatter.state));
-    html.push_str(&render_actions(slug, skill_names, can_store, true)?);
+    html.push_str(&render_actions(slug, skill_names, can_store, busy, true)?);
     // Third OOB fragment: the artifacts panel, so a finished extraction (or any transcript
     // refresh) surfaces the new files without a reload — the panel sits outside `#transcript`.
     html.push_str(&crate::web::routes::artifacts::render_artifacts_panel(
@@ -494,9 +497,10 @@ pub(crate) fn build_discussion(
 
     // The #transcript inner is the one shared renderer — so a fresh page load carries the same
     // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
+    let busy = matches!(pending, crate::web::jobs::Pending::Running { .. });
     let transcript_html =
         transcript_inner(vault_dir, slug, model, conversation, pending, budget_bytes)?;
-    let actions_html = render_actions(slug, skill_names, can_store, false)?;
+    let actions_html = render_actions(slug, skill_names, can_store, busy, false)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),

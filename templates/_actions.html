@@ -36,11 +36,13 @@
     <span class="commit-bar__label">when you've run it into the ground</span>
     {# A background job like every other model-calling button: the response is the transcript
        with the thinking indicator, and the /pending poll retargets #discussion with the stored
-       view once the job lands (respond_discussion_or_stored). #}
+       view once the job lands (respond_discussion_or_stored). While ANY job runs for this idea
+       the button renders disabled — every response that re-renders this block OOB (job start,
+       each poll, cancel) recomputes `busy`, so it re-enables the moment the slot frees. #}
     <form class="commit" hx-post="/idea/{{ slug }}/store" hx-target="#transcript" hx-swap="innerHTML"
           hx-disabled-elt="find button">
-      <button type="submit" class="btn btn--commit"
-              title="Consolidate the idea and extract durable memory — runs in the background with a progress indicator">Store in the vault →</button>
+      <button type="submit" class="btn btn--commit"{% if busy %} disabled{% endif %}
+              title="{% if busy %}Waiting for the running job to finish — cancel it to store now{% else %}Consolidate the idea and extract durable memory — runs in the background with a progress indicator{% endif %}">Store in the vault →</button>
     </form>
   </div>
   {% endif %}

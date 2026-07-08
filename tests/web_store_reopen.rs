@@ -84,6 +84,59 @@ async fn store_consolidates_extracts_and_lands_stored() {
 }
 
 #[tokio::test]
+async fn store_double_submit_runs_one_pipeline_and_disables_the_button() {
+    // Hold the consolidation call open so the job is deterministically in flight when the
+    // second submit and the busy-render assertions happen.
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::TokensAfterDelay {
+                tokens: vec!["Consolidated once.".into()],
+                delay_ms: 300,
+            },
+            tokens("FACT: Only point\nBody.\n"),
+        ],
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, true);
+
+    let (s1, body1) = post_form(state.clone(), "/idea/vaulted/store", "").await;
+    assert_eq!(s1, StatusCode::OK);
+    // While the job runs, the OOB-refreshed actions block renders the vault button disabled.
+    assert!(
+        body1.contains(r#"btn btn--commit" disabled"#),
+        "store button disabled while busy; body:\n{body1}"
+    );
+
+    // Idempotence: a second submit bounces off the claimed slot — the same in-flight view comes
+    // back and no second extraction pipeline starts.
+    let (s2, body2) = post_form(state.clone(), "/idea/vaulted/store", "").await;
+    assert_eq!(s2, StatusCode::OK);
+    assert!(
+        body2.contains("foil-pending"),
+        "re-shows the in-flight state"
+    );
+
+    poll_until(state, "/idea/vaulted/pending", "Consolidated once.").await;
+    // Exactly one consolidate + one extract hit the model, and truth landed once.
+    assert_eq!(mock.chat_bodies().len(), 2, "no second pipeline ran");
+    assert_eq!(
+        store::read_idea(&vault_dir, "vaulted")
+            .unwrap()
+            .frontmatter
+            .state,
+        IdeaState::Stored
+    );
+    assert_eq!(
+        store::read_memory_facts(&vault_dir, "vaulted")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn store_guards_draft_no_turns_and_already_stored() {
     // Draft → 400.
     let mock = spawn_sequence(&["llama3.2"], vec![]).await;
