@@ -26,8 +26,13 @@
   --radius: 8px;
 }
 
+/* Dark palette. Applied in two places (kept in sync by hand — CSS can't reference a rule):
+   (a) when the OS prefers dark AND the owner hasn't explicitly forced light, and
+   (b) when the toggle explicitly forces dark. The light values live on :root above;
+   restating them under [data-theme="light"] lets an explicit light choice beat the media query.
+   Only color-scheme was toggled before — the custom properties weren't, so the toggle was inert. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --paper: #16161a;
     --surface: #1e1e24;
     --ink: #e9e8e3;
@@ -44,8 +49,40 @@
     --danger: #e07a7a;
   }
 }
-:root[data-theme="dark"] { color-scheme: dark; }
-:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #16161a;
+  --surface: #1e1e24;
+  --ink: #e9e8e3;
+  --muted: #9a988f;
+  --faint: #77746c;
+  --rule: #2b2b33;
+  --rule-strong: #3a3a44;
+  --accent: #8b7cff;
+  --accent-soft: #24223a;
+  --ok: #6bbf95;
+  --ok-soft: #1c2a24;
+  --warn: #d6a75a;
+  --warn-soft: #2a2418;
+  --danger: #e07a7a;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --paper: #f6f5f1;
+  --surface: #fffffe;
+  --ink: #1b1a17;
+  --muted: #6b6862;
+  --faint: #8f8c84;
+  --rule: #e5e3db;
+  --rule-strong: #d7d4ca;
+  --accent: #4b3fd6;
+  --accent-soft: #efeefc;
+  --ok: #2f7d5b;
+  --ok-soft: #e6f2ec;
+  --warn: #9a6b12;
+  --warn-soft: #f6eede;
+  --danger: #b23b3b;
+}
 
 * { box-sizing: border-box; }
 
@@ -59,23 +96,58 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-.wrap { max-width: var(--measure); margin: 0 auto; padding: 1.75rem 1.25rem 5rem; }
-
 a { color: var(--accent); text-underline-offset: 2px; text-decoration-thickness: 1px; }
 
-/* ---- masthead --------------------------------------------------------- */
-.topbar {
-  display: flex; justify-content: space-between; align-items: baseline;
-  padding-bottom: .75rem; margin-bottom: 1.75rem;
-  border-bottom: 1px solid var(--rule);
+/* A visible keyboard ring everywhere (mouse users keep the quieter :focus styles below). */
+a:focus-visible, button:focus-visible, .chip:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px;
 }
-.brand {
+
+/* ---- app shell: a notebook spine (rail) + the leaf that holds the prose --- */
+.app { display: grid; grid-template-columns: minmax(11rem, 14rem) 1fr; min-height: 100vh; }
+
+.rail {
+  position: sticky; top: 0; align-self: start; height: 100vh;
+  display: flex; flex-direction: column; gap: 1.25rem;
+  padding: 1.75rem 1.15rem; border-right: 1px solid var(--rule);
+  font-family: var(--mono);
+}
+.rail__brand {
   font-family: var(--mono); font-weight: 600; letter-spacing: .02em;
   font-size: .95rem; color: var(--ink); text-decoration: none;
 }
-.brand b { color: var(--accent); font-weight: 600; }
-.topbar a.meta { font-family: var(--mono); font-size: .8rem; color: var(--muted); text-decoration: none; }
-.topbar a.meta:hover { color: var(--accent); }
+.rail__brand b { color: var(--accent); font-weight: 600; }
+
+.rail__actions { display: flex; flex-direction: column; gap: .45rem; }
+.rail__action {
+  font-family: var(--mono); font-size: .8rem; color: var(--muted);
+  text-decoration: none; text-align: left; cursor: pointer;
+  background: none; border: none; padding: .1rem 0;
+  display: inline-flex; align-items: center; gap: .4rem; white-space: nowrap;
+}
+.rail__action:hover { color: var(--accent); }
+.rail__kbd {
+  font-family: var(--mono); font-size: .62rem; color: var(--faint); line-height: 1;
+  border: 1px solid var(--rule-strong); border-radius: 4px; padding: .12rem .28rem;
+}
+
+.rail__nav { display: flex; flex-direction: column; gap: .12rem; }
+.rail__link {
+  font-family: var(--mono); font-size: .82rem; color: var(--muted);
+  text-decoration: none; padding: .12rem 0 .12rem .9rem; position: relative;
+  transition: color .12s ease;
+}
+.rail__link::before {
+  content: ""; position: absolute; left: 0; color: var(--accent); font-size: .7rem; line-height: 1.5;
+}
+.rail__link:hover { color: var(--ink); }
+.rail__link.is-active { color: var(--accent); }
+.rail__link.is-active::before { content: "▸"; }
+
+.rail__spacer { flex: 1 1 auto; }
+
+.leaf { padding: 1.75rem 2.5rem 5rem; min-width: 0; }
+.leaf > * { max-width: var(--measure); }
 
 /* ---- crumbs + headings ------------------------------------------------ */
 .crumb {
@@ -159,10 +231,15 @@ h1.title {
 .turn__body p code { background: color-mix(in srgb, var(--ink) 6%, var(--paper)); padding: .05em .3em; border-radius: 3px; }
 
 /* ---- composer --------------------------------------------------------- */
+/* Pinned to the viewport bottom so the input stays reachable through a long transcript.
+   Sticky (not fixed) keeps it inside the leaf's measure column and never over the rail. */
 .composer {
+  position: sticky; bottom: .75rem; z-index: 5;
   margin: 1.5rem 0 .75rem; background: var(--surface);
   border: 1px solid var(--rule-strong); border-radius: var(--radius);
-  padding: .75rem; transition: border-color .15s ease, box-shadow .15s ease;
+  padding: .75rem;
+  box-shadow: 0 6px 22px -14px color-mix(in srgb, var(--ink) 60%, transparent);
+  transition: border-color .15s ease, box-shadow .15s ease;
 }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .composer textarea {
@@ -209,7 +286,8 @@ h1.title {
 /* dim + lock the controls while the foil works */
 .discussion.htmx-request .composer,
 .discussion.htmx-request .moves,
-.discussion.htmx-request .commit { opacity: .5; pointer-events: none; }
+.discussion.htmx-request .capstones,
+.discussion.htmx-request .commit-bar { opacity: .5; pointer-events: none; }
 
 /* ---- moves rail (a command palette of ideation moves) ----------------- */
 .moves { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin: .5rem 0 1rem; }
@@ -233,9 +311,15 @@ h1.title {
 .chip:disabled { opacity: .5; cursor: progress; }
 .chip--swarm { border-color: var(--accent); color: var(--accent); }
 
-.commit { margin-top: .25rem; }
-.commit .btn { background: transparent; color: var(--ink); border-color: var(--rule-strong); }
-.commit .btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); filter: none; }
+/* The terminal lifecycle action — pulled out of the chip rail and given its own bar so it
+   reads as the commit, not just another move. Filled indigo (default .btn), not a ghost chip. */
+.commit-bar {
+  display: flex; align-items: center; gap: .9rem; flex-wrap: wrap;
+  margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--rule);
+}
+.commit-bar__label { font-family: var(--serif); font-style: italic; font-size: .82rem; color: var(--faint); }
+.commit { margin: 0 0 0 auto; }
+.btn--commit { font-size: .84rem; padding: .48rem 1rem; }
 
 /* ---- degraded AI note ------------------------------------------------- */
 .note {
@@ -260,13 +344,11 @@ h1.title {
   border-radius: 6px; padding: .5rem .7rem;
 }
 .newidea input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.search {
-  width: 100%; font-family: var(--mono); font-size: .85rem; color: var(--ink);
-  background: none; border: none; border-bottom: 1px solid var(--rule);
-  padding: .5rem .1rem; margin: .5rem 0 1.25rem;
+.newidea__hint {
+  font-family: var(--mono); font-size: .74rem; color: var(--faint);
+  margin: .1rem 0 1.5rem;
 }
-.search:focus { outline: none; border-bottom-color: var(--accent); }
-.search::placeholder { color: var(--faint); }
+.newidea__hint .rail__kbd { color: var(--muted); }
 
 .idea-row { padding: .7rem 0; border-bottom: 1px solid var(--rule); display: flex; align-items: baseline; gap: .6rem; }
 .idea-row a { font-family: var(--serif); font-size: 1.1rem; color: var(--ink); text-decoration: none; }
@@ -406,6 +488,10 @@ h1.title {
 }
 .settings input:focus, .settings select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .settings .btn { align-self: flex-start; }
+.settings__diag {
+  font-family: var(--mono); font-size: .74rem; color: var(--faint);
+  margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid var(--rule); max-width: 34rem;
+}
 
 /* ---- btw / fork ------------------------------------------------------- */
 .idea-subhead { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap; }
@@ -428,11 +514,65 @@ h1.title {
   background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 
-/* ---- topbar right group + theme toggle -------------------------------- */
-.topbar__right { display: inline-flex; align-items: baseline; gap: 1rem; }
+/* ---- theme toggle (pinned at the foot of the rail) -------------------- */
 .theme-toggle {
-  font-family: var(--mono); font-size: 1rem; line-height: 1; padding: 0;
-  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-family: var(--mono); font-size: .8rem; line-height: 1; padding: .1rem 0;
+  text-align: left; background: none; border: none; color: var(--muted); cursor: pointer;
   transition: color .12s ease;
 }
 .theme-toggle:hover { color: var(--accent); }
+
+/* ---- command palette: global search + new-idea (the signature) -------- */
+.palette[hidden] { display: none; }
+.palette {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 12vh 1rem 1rem;
+}
+.palette__backdrop {
+  position: absolute; inset: 0; cursor: pointer;
+  background: color-mix(in srgb, var(--ink) 34%, transparent);
+}
+@supports (backdrop-filter: blur(2px)) { .palette__backdrop { backdrop-filter: blur(2px); } }
+.palette__card {
+  position: relative; width: 100%; max-width: 34rem;
+  background: var(--surface); border: 1px solid var(--rule-strong); border-radius: var(--radius);
+  box-shadow: 0 18px 50px -12px color-mix(in srgb, var(--ink) 45%, transparent);
+  padding: .75rem; display: flex; flex-direction: column; gap: .5rem;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .palette__card { animation: palette-in .14s ease-out; }
+  @keyframes palette-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+}
+.palette__input {
+  width: 100%; font-family: var(--mono); font-size: .95rem; color: var(--ink);
+  background: none; border: none; border-bottom: 1px solid var(--rule); padding: .5rem .3rem;
+}
+.palette__input:focus { outline: none; border-bottom-color: var(--accent); }
+.palette__results { max-height: 50vh; overflow-y: auto; }
+.palette__results:empty::before {
+  content: "Type to search your ideas."; display: block;
+  font-family: var(--serif); font-style: italic; color: var(--faint);
+  font-size: .85rem; padding: .5rem .3rem;
+}
+.palette__results .search-results { margin: 0; }
+.palette__foot {
+  display: flex; align-items: center; justify-content: space-between;
+  border-top: 1px solid var(--rule); padding-top: .5rem;
+}
+.palette__hint { font-family: var(--mono); font-size: .7rem; color: var(--faint); }
+body.palette-open { overflow: hidden; }
+
+/* ---- responsive: rail collapses to a horizontal top strip ------------- */
+@media (max-width: 48rem) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .rail {
+    position: static; height: auto; flex-direction: row; align-items: center;
+    flex-wrap: wrap; gap: .8rem 1.15rem;
+    border-right: none; border-bottom: 1px solid var(--rule); padding: 1rem 1.1rem;
+  }
+  .rail__actions, .rail__nav { flex-direction: row; gap: 1rem; }
+  .rail__link { padding: 0 0 0 .9rem; }
+  .leaf { padding: 1.25rem 1.1rem 4rem; }
+  .leaf > * { max-width: none; }
+}

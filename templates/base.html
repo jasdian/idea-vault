@@ -29,7 +29,10 @@
         }
         function updateIcon() {
           var b = document.getElementById("theme-toggle");
-          if (b) b.textContent = effective() === "dark" ? "☀" : "☾";
+          if (!b) return;
+          var dark = effective() === "dark";
+          b.textContent = dark ? "☀ light" : "☾ dark";
+          b.setAttribute("aria-pressed", String(dark));
         }
         window.__toggleTheme = function () {
           var next = effective() === "dark" ? "light" : "dark";
@@ -38,6 +41,54 @@
           updateIcon();
         };
         document.addEventListener("DOMContentLoaded", updateIcon);
+      })();
+
+      // Rail wayfinding: mark the active nav item, and let "＋ New idea" focus the create field.
+      (function () {
+        function markActive() {
+          var path = location.pathname;
+          document.querySelectorAll(".rail__link").forEach(function (a) {
+            var m = a.getAttribute("data-match");
+            var active = m === "/" ? (path === "/" || path.indexOf("/idea") === 0) : path.indexOf(m) === 0;
+            a.classList.toggle("is-active", active);
+          });
+        }
+        function focusNew() {
+          if (location.hash !== "#new") return;
+          var el = document.getElementById("new");
+          if (el) { el.focus(); el.scrollIntoView({ block: "center" }); }
+        }
+        document.addEventListener("DOMContentLoaded", function () { markActive(); focusNew(); });
+        window.addEventListener("hashchange", focusNew);
+      })();
+
+      // Command palette: global search + new-idea from any page. Opens on the rail Search button
+      // or ⌘K/Ctrl+K; closes on Esc or a backdrop click. The input reuses the live /search endpoint.
+      (function () {
+        var pal = document.getElementById("palette");
+        var input = document.getElementById("palette-input");
+        function open() {
+          if (!pal) return;
+          pal.hidden = false;
+          document.body.classList.add("palette-open");
+          if (input) { input.focus(); input.select(); }
+        }
+        function close() {
+          if (!pal || pal.hidden) return;
+          pal.hidden = true;
+          document.body.classList.remove("palette-open");
+        }
+        document.addEventListener("DOMContentLoaded", function () {
+          var openBtn = document.getElementById("palette-open");
+          if (openBtn) openBtn.addEventListener("click", open);
+          if (pal) pal.querySelectorAll("[data-palette-close]").forEach(function (el) {
+            el.addEventListener("click", close);
+          });
+        });
+        document.addEventListener("keydown", function (e) {
+          if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); open(); }
+          else if (e.key === "Escape") { close(); }
+        });
       })();
 
       // Progressive enhancement: give every code block (e.g. a generated build prompt) a Copy
@@ -63,18 +114,47 @@
     </script>
   </head>
   <body>
-    <div class="wrap">
-      <nav class="topbar">
-        <a class="brand" href="/">idea·<b>vault</b></a>
-        <span class="topbar__right">
-          <a class="meta" href="/settings">settings</a>
-          <a class="meta" href="/admin/health">health</a>
-          <button id="theme-toggle" class="theme-toggle" type="button"
-                  onclick="__toggleTheme()" aria-label="Toggle light or dark theme"
-                  title="Toggle light / dark">☾</button>
-        </span>
+    <div class="app">
+      <nav class="rail" aria-label="Primary">
+        <a class="rail__brand" href="/">idea·<b>vault</b></a>
+
+        <div class="rail__actions">
+          <a class="rail__action" href="/#new">＋&nbsp;New idea</a>
+          <button type="button" class="rail__action" id="palette-open" aria-haspopup="dialog">
+            ⌕&nbsp;Search <kbd class="rail__kbd">⌘K</kbd>
+          </button>
+        </div>
+
+        <div class="rail__nav">
+          <a class="rail__link" href="/" data-match="/">Ideas</a>
+          <a class="rail__link" href="/settings" data-match="/settings">Settings</a>
+        </div>
+
+        <div class="rail__spacer"></div>
+
+        <button id="theme-toggle" class="theme-toggle" type="button"
+                onclick="__toggleTheme()" aria-pressed="false"
+                aria-label="Toggle light or dark theme" title="Toggle light / dark">☾&nbsp;dark</button>
       </nav>
-      {% block content %}{% endblock %}
+
+      <main class="leaf">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+
+    <div id="palette" class="palette" hidden>
+      <div class="palette__backdrop" data-palette-close></div>
+      <div class="palette__card" role="dialog" aria-modal="true" aria-label="Search ideas">
+        <input id="palette-input" class="palette__input" type="search" name="q"
+               placeholder="Search ideas…" autocomplete="off"
+               hx-get="/search" hx-trigger="keyup changed delay:300ms, search"
+               hx-target="#palette-results" />
+        <div id="palette-results" class="palette__results"></div>
+        <div class="palette__foot">
+          <a class="rail__action" href="/#new" data-palette-close>＋&nbsp;New idea</a>
+          <span class="palette__hint"><kbd class="rail__kbd">Esc</kbd> to close</span>
+        </div>
+      </div>
     </div>
   </body>
 </html>

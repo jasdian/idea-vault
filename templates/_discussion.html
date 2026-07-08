@@ -35,10 +35,14 @@
       <button type="submit" class="chip chip--build"
               title="Fold the whole discussion into a ready-to-run build prompt for a coding agent">⌁ generate build prompt</button>
     </form>
+  </div>
+
+  <div class="commit-bar">
+    <span class="commit-bar__label">when you've run it into the ground</span>
     <form class="commit" hx-post="/idea/{{ slug }}/store" hx-target="#discussion" hx-swap="innerHTML"
           hx-disabled-elt="find button">
-      <button type="submit" class="btn"
-              title="Consolidate the idea and extract durable memory">Store in the vault</button>
+      <button type="submit" class="btn btn--commit"
+              title="Consolidate the idea and extract durable memory">Store in the vault →</button>
     </form>
   </div>
   {% endif %}
