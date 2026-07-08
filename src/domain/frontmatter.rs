@@ -3,6 +3,7 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::domain::artifact::ArtifactKind;
 use crate::domain::idea::IdeaState;
 use crate::domain::DomainError;
 
@@ -33,6 +34,21 @@ pub struct CompactedFrontmatter {
     /// The model that produced the summary — provenance.
     pub model: String,
     pub updated: DateTime<Utc>,
+}
+
+/// The structured header of an `artifacts/<file-slug>.md` file — one persisted
+/// knowledge-extraction output (docs/adr/0015). `lens` is the extraction skill that produced a
+/// finding (`None` for the synthesis); `model` is provenance, like `CompactedFrontmatter`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactFrontmatter {
+    /// File stem (canonical slug charset) — mirrors `MemoryFactFrontmatter::slug`.
+    pub slug: String,
+    pub title: String,
+    pub kind: ArtifactKind,
+    #[serde(default)]
+    pub lens: Option<String>,
+    pub created: DateTime<Utc>,
+    pub model: String,
 }
 
 /// The (lighter) structured header of a `memory/<fact-slug>.md` file.
@@ -137,6 +153,22 @@ pub fn parse_compacted(input: &str) -> Result<(CompactedFrontmatter, String), Do
 /// Serialization of these plain-data fields cannot fail in practice; the error is propagated
 /// anyway (defense in depth — no panic paths in library code).
 pub fn emit_compacted(fm: &CompactedFrontmatter, body: &str) -> Result<String, DomainError> {
+    let yaml = serde_norway::to_string(fm)?;
+    Ok(emit_fence(&yaml, body))
+}
+
+/// Parse an `artifacts/<file-slug>.md` document into its frontmatter and body.
+pub fn parse_artifact(input: &str) -> Result<(ArtifactFrontmatter, String), DomainError> {
+    let (yaml, body) = split_fence(input)?;
+    let fm: ArtifactFrontmatter = serde_norway::from_str(yaml)?;
+    Ok((fm, body.to_string()))
+}
+
+/// Render an `artifacts/<file-slug>.md` document from frontmatter and body.
+///
+/// Serialization of these plain-data fields cannot fail in practice; the error is propagated
+/// anyway (defense in depth — no panic paths in library code).
+pub fn emit_artifact(fm: &ArtifactFrontmatter, body: &str) -> Result<String, DomainError> {
     let yaml = serde_norway::to_string(fm)?;
     Ok(emit_fence(&yaml, body))
 }
@@ -276,6 +308,60 @@ body\n";
         let (fm2, body2) = parse_compacted(&emitted).unwrap();
         assert_eq!(fm, fm2);
         assert_eq!(body, body2);
+    }
+
+    #[test]
+    fn artifact_roundtrip_finding_with_lens() {
+        let fm = ArtifactFrontmatter {
+            slug: "20260708-193045-key-decisions".into(),
+            title: "Key decisions".into(),
+            kind: ArtifactKind::Finding,
+            lens: Some("extract-key-decisions".into()),
+            created: dt("2026-07-08T19:30:45Z"),
+            model: "qwen3-8b-local".into(),
+        };
+        let body = "- decided the sidecar stays\n";
+        let emitted = emit_artifact(&fm, body).unwrap();
+        let (fm2, body2) = parse_artifact(&emitted).unwrap();
+        assert_eq!(fm, fm2);
+        assert_eq!(body, body2);
+    }
+
+    #[test]
+    fn artifact_roundtrip_synthesis_without_lens() {
+        let fm = ArtifactFrontmatter {
+            slug: "20260708-193045-synthesis".into(),
+            title: "Knowledge synthesis".into(),
+            kind: ArtifactKind::Synthesis,
+            lens: None,
+            created: dt("2026-07-08T19:30:45Z"),
+            model: "claude-code".into(),
+        };
+        let emitted = emit_artifact(&fm, "Converged summary.\n").unwrap();
+        let (fm2, body2) = parse_artifact(&emitted).unwrap();
+        assert_eq!(fm, fm2);
+        assert_eq!(fm2.lens, None);
+        assert_eq!(body2, "Converged summary.\n");
+    }
+
+    #[test]
+    fn parse_artifact_missing_fence_errors() {
+        let err = parse_artifact("no fence").unwrap_err();
+        assert!(matches!(err, DomainError::MissingFrontmatter));
+    }
+
+    #[test]
+    fn parse_artifact_bad_kind_errors() {
+        let input = "---\n\
+slug: x\n\
+title: X\n\
+kind: not_a_kind\n\
+created: 2026-01-01T00:00:00Z\n\
+model: m\n\
+---\n\
+body\n";
+        let err = parse_artifact(input).unwrap_err();
+        assert!(matches!(err, DomainError::Yaml(_)));
     }
 
     #[test]

@@ -109,7 +109,7 @@ pub async fn reopen_idea(
 
     let conversation = store::read_conversation(&vault_dir, &slug)?;
     let health = state.llm.probe().await;
-    let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
+    let skill_names = state.skills.move_names();
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     // The reopen form swaps `#discussion` (buttons come back with it); the subhead badge sits
     // outside, so carry an out-of-band badge flip alongside.
@@ -134,7 +134,7 @@ pub async fn reopen_idea(
 /// Concept actions run only in the two active discussion states (D9 has no skill/swarm edge
 /// for `Draft` or `Stored`). Exhaustive match: a future state must make an explicit decision
 /// here rather than falling through to "allowed".
-fn guard_discussion_state(state: IdeaState) -> Result<(), WebError> {
+pub(crate) fn guard_discussion_state(state: IdeaState) -> Result<(), WebError> {
     match state {
         IdeaState::InDiscussion | IdeaState::Reopened => Ok(()),
         IdeaState::Draft => Err(WebError::BadRequest(
@@ -151,7 +151,7 @@ fn guard_discussion_state(state: IdeaState) -> Result<(), WebError> {
 /// the job's note (surfaced in the "thinking" indicator). Routed through `jobs::set_note` so every
 /// slot mutation stays behind the `web::jobs` API (D4: `concepts` stays free of `web` — it only
 /// sees a plain `Fn(&str)`), and it is a no-op once the slot is gone (cancelled/finished).
-fn progress_sink(state: &AppState, slug: &str) -> impl Fn(&str) + Send + Sync {
+pub(crate) fn progress_sink(state: &AppState, slug: &str) -> impl Fn(&str) + Send + Sync {
     let jobs = state.jobs.clone();
     let slug = slug.to_string();
     move |note: &str| jobs::set_note(&jobs, &slug, note)

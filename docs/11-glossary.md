@@ -35,6 +35,11 @@
   structured, indexable fields. Parsed by `domain::frontmatter`.
 - **`[[slug]]` link / backlink** — a cross-reference from one idea or memory fact to another idea by
   slug. Resolved on reindex into the `backlinks` index table. See [D23](./06-concepts/memory.md).
+- **Artifact** — a persisted knowledge-extraction output stored under `vault/<slug>/artifacts/`.
+  Modeled as `domain::artifact::Artifact` (frontmatter + body). `.md` is **truth**, indexed into
+  `search_fts` as kind `'artifact'`; `.html` is a **derived, unindexed export** — a standalone,
+  self-contained report the owner can open or share, not a knowledge source. See
+  [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md).
 
 ## Index
 
@@ -100,6 +105,6 @@
 
 ## Diagram vocabulary
 
-- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D29`, catalogued in
+- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D30`, catalogued in
   [08-diagrams](./08-diagrams.md). References elsewhere use the ID.
 - **Home doc** — the single document a diagram is authored in; the registry only links to it.

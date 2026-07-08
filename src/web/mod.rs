@@ -96,7 +96,8 @@ impl IntoResponse for WebError {
             )
                 .into_response(),
             WebError::NotFound(what)
-            | WebError::Vault(crate::vault::VaultError::IdeaNotFound(what)) => {
+            | WebError::Vault(crate::vault::VaultError::IdeaNotFound(what))
+            | WebError::Vault(crate::vault::VaultError::ArtifactNotFound(what)) => {
                 (StatusCode::NOT_FOUND, format!("not found: {what}")).into_response()
             }
             // A malformed slug in a URL is answered like a missing idea — 404, without

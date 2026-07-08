@@ -254,9 +254,16 @@ pub(crate) fn respond_with_transcript(
         idea.frontmatter.state,
         IdeaState::InDiscussion | IdeaState::Reopened
     );
-    let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
+    let skill_names = state.skills.move_names();
     html.push_str(&state_badge_oob(idea.frontmatter.state));
     html.push_str(&render_actions(slug, skill_names, can_store, true)?);
+    // Third OOB fragment: the artifacts panel, so a finished extraction (or any transcript
+    // refresh) surfaces the new files without a reload — the panel sits outside `#transcript`.
+    html.push_str(&crate::web::routes::artifacts::render_artifacts_panel(
+        &state.config.vault_dir,
+        slug,
+        true,
+    )?);
     Ok(axum::response::Html(html))
 }
 
@@ -518,7 +525,7 @@ pub async fn idea_page(
     // most that per page view.
     let health = state.llm.probe().await;
 
-    let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
+    let skill_names = state.skills.move_names();
     // If a background job is running for this idea, this resumes its indicator on the fresh page.
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     let panel_html = render_panel(
@@ -532,6 +539,8 @@ pub async fn idea_page(
         pending,
         state.llm.context_budget().max_bytes,
     )?;
+    let artifacts_html =
+        crate::web::routes::artifacts::render_artifacts_panel(vault_dir, &slug, false)?;
     Ok(IdeaPage {
         title: idea.frontmatter.title.clone(),
         slug: idea.frontmatter.slug.clone(),
@@ -539,6 +548,7 @@ pub async fn idea_page(
         body_html: crate::web::templates::render_markdown(&idea.body),
         memory_html,
         panel_html,
+        artifacts_html,
     })
 }
 

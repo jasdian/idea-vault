@@ -2,6 +2,7 @@
 //! workflows, and subagent swarming. See docs/06-concepts/*.md.
 
 pub mod agents;
+pub mod knowledge;
 pub mod skills;
 pub mod swarm;
 pub mod workflows;

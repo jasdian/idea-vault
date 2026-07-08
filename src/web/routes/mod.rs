@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod artifacts;
 pub mod chat;
 pub mod compact;
 pub mod ideas;

@@ -73,6 +73,35 @@ impl SkillRegistry {
                     // agent (e.g. Claude Code) can execute. Output is one copy-pasteable prompt.
                     prompt: "Synthesize the ENTIRE discussion below into a single, self-contained BUILD PROMPT that a coding agent (such as Claude Code) can execute to actually build this idea.\n\nReturn ONLY the prompt itself, wrapped in one fenced ```markdown code block, ready to copy and paste. The prompt must:\n- Open with the goal and the concrete deliverable in the first sentence.\n- Fold in what the discussion SETTLED — the decisions, constraints, and disproofs — rather than restating the chat; extract, don't transcribe.\n- Lay out an ordered plan: understand → design → implement → verify.\n- Say explicitly where the agent should fan out parallel subagents or a workflow (independent modules, multi-angle review) versus work sequentially, and why.\n- State the acceptance criteria and how to verify them.\nWrite it as direct instructions to the agent, specific and imperative — not prose about the idea.\n{context}".to_string(),
                 },
+                // The `extract-*` lenses below are the knowledge-extraction angles
+                // (docs/adr/0015): orchestrator-only, hidden from the moves chip row via
+                // `move_names`. Each harvests exactly one category of durable knowledge from
+                // the discussion; outputting nothing when the category is empty is correct.
+                Skill {
+                    name: "extract-key-decisions".to_string(),
+                    description: "Harvest the decisions the discussion actually settled.".to_string(),
+                    prompt: "From the discussion below, harvest ONLY the key decisions that were actually settled — choices made, directions committed to, options explicitly rejected. As markdown bullets, one decision per bullet, each with the deciding rationale in one clause. Do not critique, do not add new ideas. If the discussion settled no decisions, output nothing.\n{context}".to_string(),
+                },
+                Skill {
+                    name: "extract-durable-facts".to_string(),
+                    description: "Harvest durable facts and evidence established in the discussion.".to_string(),
+                    prompt: "From the discussion below, harvest ONLY the durable facts and evidence that were established — numbers, constraints found true, precedents cited, conclusions grounded in reasoning. As markdown bullets, one fact per bullet. Exclude speculation and opinions. If the discussion established no durable facts, output nothing.\n{context}".to_string(),
+                },
+                Skill {
+                    name: "extract-open-questions".to_string(),
+                    description: "Harvest the questions the discussion raised but did not resolve.".to_string(),
+                    prompt: "From the discussion below, harvest ONLY the open questions — raised but unresolved threads, known unknowns, disagreements left standing. As markdown bullets, one question per bullet, phrased as a question. If nothing was left open, output nothing.\n{context}".to_string(),
+                },
+                Skill {
+                    name: "extract-risks-assumptions".to_string(),
+                    description: "Harvest the risks and load-bearing assumptions the discussion surfaced.".to_string(),
+                    prompt: "From the discussion below, harvest ONLY the risks and load-bearing assumptions that were surfaced — what the idea silently depends on, what could sink it. As markdown bullets, one item per bullet, marked either `risk:` or `assumption:`. If none were surfaced, output nothing.\n{context}".to_string(),
+                },
+                Skill {
+                    name: "extract-next-actions".to_string(),
+                    description: "Harvest the concrete next actions the discussion pointed to.".to_string(),
+                    prompt: "From the discussion below, harvest ONLY the concrete next actions the discussion pointed to — experiments to run, people to ask, things to build or measure. As markdown bullets, one action per bullet, imperative form. If the discussion pointed to no actions, output nothing.\n{context}".to_string(),
+                },
             ],
         }
     }
@@ -85,6 +114,18 @@ impl SkillRegistry {
     /// All registered skills, in registration order.
     pub fn list(&self) -> &[Skill] {
         &self.skills
+    }
+
+    /// Skills surfaced as interactive move chips in the discussion UI. The `extract-*` lenses
+    /// are knowledge-extraction angles driven by `concepts::knowledge` (docs/adr/0015), not
+    /// standalone moves — they are registered (so `run_agent` can resolve them) but excluded
+    /// here.
+    pub fn move_names(&self) -> Vec<String> {
+        self.skills
+            .iter()
+            .filter(|s| !s.name.starts_with("extract-"))
+            .map(|s| s.name.clone())
+            .collect()
     }
 }
 
@@ -200,5 +241,20 @@ mod tests {
             .get("premortem")
             .expect("premortem should be registered");
         assert_eq!(found.name, "premortem");
+    }
+
+    #[test]
+    fn move_names_excludes_extraction_lenses_but_they_stay_resolvable() {
+        let registry = SkillRegistry::builtin();
+        let moves = registry.move_names();
+        assert!(moves.iter().any(|n| n == "premortem"));
+        assert!(
+            !moves.iter().any(|n| n.starts_with("extract-")),
+            "extraction lenses must not appear as move chips: {moves:?}"
+        );
+        // Still registered — the knowledge orchestrator resolves them like any skill.
+        for lens in crate::concepts::knowledge::LENSES {
+            assert!(registry.get(lens).is_some(), "unregistered lens: {lens}");
+        }
     }
 }

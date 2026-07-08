@@ -22,9 +22,15 @@ vault/
   <slug>/
     idea.md          # frontmatter + body (current best statement)
     conversation.md  # append-only transcript
+    compacted.md     # derived, non-canonical sidecar: fingerprinted rollup of the conversation
+                     #   head (ADR-0012); deletable + regenerable, never indexed
     memory/
       <fact-slug>.md # one memory fact per file (frontmatter + body)
     MEMORY.md        # one-line index of memory/*.md
+    artifacts/
+      <run-stamp>-<lens-short>.md  # one persisted knowledge-extraction finding (frontmatter + body)
+      <run-stamp>-synthesis.md    # the converged synthesis of a run (frontmatter + body)
+      <run-stamp>-report.html     # optional derived export of a run (opt-in, unindexed; ADR-0015)
 index.db             # derived index (may be deleted + rebuilt)
 ```
 
@@ -34,10 +40,14 @@ index.db             # derived index (may be deleted + rebuilt)
 erDiagram
     IDEA_DIR ||--|| IDEA_MD : contains
     IDEA_DIR ||--|| CONVERSATION_MD : contains
+    IDEA_DIR ||--o| COMPACTED_MD : "contains (derived, deletable)"
     IDEA_DIR ||--o| MEMORY_DIR : "contains (after Store)"
     IDEA_DIR ||--o| MEMORY_INDEX_MD : "contains (after Store)"
     MEMORY_DIR ||--o{ MEMORY_FACT_MD : contains
     MEMORY_FACT_MD }o--o{ IDEA_DIR : "references via [[slug]]"
+    IDEA_DIR ||--o| ARTIFACTS_DIR : "contains (after an extraction run)"
+    ARTIFACTS_DIR ||--o{ ARTIFACT_MD : contains
+    ARTIFACTS_DIR ||--o{ ARTIFACT_HTML : "contains (opt-in export)"
 
     IDEA_DIR {
         string slug "folder name, unique"
@@ -49,6 +59,10 @@ erDiagram
     CONVERSATION_MD {
         markdown turns "append-only user/assistant"
     }
+    COMPACTED_MD {
+        yaml frontmatter "compacted_through, covered_bytes, turn_count_at_compaction, model, updated"
+        markdown body "rolling summary of the conversation head"
+    }
     MEMORY_FACT_MD {
         yaml frontmatter "fact-slug, created, tags"
         markdown body "one durable conclusion"
@@ -56,14 +70,22 @@ erDiagram
     MEMORY_INDEX_MD {
         markdown lines "one pointer per fact"
     }
+    ARTIFACT_MD {
+        yaml frontmatter "slug, title, kind (finding|synthesis), lens, created, model"
+        markdown body "one lens's finding, or the converged synthesis"
+    }
+    ARTIFACT_HTML {
+        html body "derived, self-contained report export; not domain-typed"
+    }
 ```
 
 ### Conversation turn grammar
 
 `conversation.md` is plain markdown: a turn is a `## <role>` heading line followed by its content
 lines up to the next such heading. The app writes `## user`, `## assistant`, and labelled assistant
-variants — `## assistant (skill: <name>)`, `## assistant (swarm)`, `## assistant (workflow: <name>)`
-— for turns produced by a skill, swarm synthesis, or workflow step. Only `## user`/`## assistant`
+variants — `## assistant (skill: <name>)`, `## assistant (swarm)`, `## assistant (workflow: <name>)`,
+`## assistant (knowledge)` — for turns produced by a skill, swarm synthesis, workflow step, or a
+knowledge-extraction synthesis ([D30](./06-concepts/swarm.md)). Only `## user`/`## assistant`
 heading lines are recognized as boundaries, so an ordinary `## Section` heading written inside a
 turn's own content does not split it — it stays part of that turn, verbatim, because markdown is
 truth. Any content line that would otherwise read as a `## user`/`## assistant` heading is escaped
@@ -90,14 +112,18 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Tags | `idea.md` frontmatter `tags:` | `tags` + `idea_tags` |
 | Idea body text | `idea.md` body | `search_fts` |
 | Conversation text | `conversation.md` | `search_fts` |
+| Compacted rolling summary | `compacted.md` | *(none — derived sidecar, never indexed; ADR-0012)* |
 | Memory fact | `memory/<fact>.md` | `memory_facts` |
-| `[[slug]]` links | inside bodies | `backlinks` |
+| Knowledge-extraction artifact (finding or synthesis) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`) |
+| Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
+| `[[slug]]` links | inside bodies (idea/conversation/memory only — **not** mined from artifact bodies) | `backlinks` |
 | Timestamps | frontmatter `created:`/`updated:` | `ideas.created_at`/`updated_at` |
 
 ## D8 — Frontmatter schema
 
-The structured header of `idea.md` (and a lighter one for memory facts). Field names and the
-serialized `state` values are part of the data contract and must match the `domain` types verbatim.
+The structured header of `idea.md` (and a lighter one for memory facts and artifacts). Field names
+and the serialized `state` values are part of the data contract and must match the `domain` types
+verbatim.
 
 ```mermaid
 classDiagram
@@ -123,7 +149,21 @@ classDiagram
         +datetime created
         +string[] links
     }
+    class ArtifactFrontmatter {
+        +string slug
+        +string title
+        +ArtifactKind kind
+        +string? lens
+        +datetime created
+        +string model
+    }
+    class ArtifactKind {
+        <<enumeration>>
+        Finding
+        Synthesis
+    }
     IdeaFrontmatter --> IdeaState
+    ArtifactFrontmatter --> ArtifactKind
 ```
 
 **Serialized `state` mapping** (frontmatter uses lower-kebab; see
@@ -219,12 +259,12 @@ sequenceDiagram
     Reidx->>DB: BEGIN; drop/clear derived tables
     Reidx->>Walk: enumerate vault/*/
     loop each idea dir
-        Walk-->>Reidx: idea.md, conversation.md, memory/*.md
+        Walk-->>Reidx: idea.md, conversation.md, memory/*.md, artifacts/*.md
         Reidx->>Parse: parse frontmatter + bodies
         Reidx->>DB: upsert ideas, tags, idea_tags
         Reidx->>DB: upsert memory_facts
-        Reidx->>DB: insert search_fts (body + conversation)
-        Reidx->>DB: insert backlinks ([[slug]] found)
+        Reidx->>DB: insert search_fts (body + conversation + artifacts, kind-tagged)
+        Reidx->>DB: insert backlinks ([[slug]] found in idea/conversation/memory only)
     end
     Reidx->>DB: resolve backlinks.target_idea_id by slug
     Reidx->>DB: COMMIT
@@ -252,6 +292,12 @@ flowchart TD
 Rules: slug is generated once at creation and **never changes** (it is the `[[slug]]` link target and
 the folder name); renaming the idea's title updates `title:` but not `slug`.
 
+The same `domain::slug::disambiguate` disambiguation step (append `-2`, `-3`, …) is reused for
+artifact file stems (`artifacts/<run-stamp>-<lens-short|synthesis>.md`), with a predicate that
+probes for **either** a `.md` or a `.html` file at the candidate stem — so a `.md` truth file and a
+`.html` export can never silently shadow one another, and two extraction runs in the same second
+still disambiguate instead of colliding ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)).
+
 ## Consistency & failure model
 
 - **Write order:** markdown first (truth), then index upsert. Index failure ⇒ log + rely on next
@@ -260,9 +306,17 @@ the folder name); renaming the idea's title updates `title:` but not `slug`.
   re-derives on reindex ([ADR-0007](./adr/0007-state-in-frontmatter-not-db.md)).
 - **Deletion:** removing `vault/<slug>/` removes the idea; the next reindex drops its index rows and
   nulls any inbound `backlinks.target_idea_id`.
+- **Extraction artifacts are all-or-nothing per run:** every finding `.md` plus the synthesis `.md`
+  and its conversation turn are written in one await-free block, so a cancelled
+  `POST /idea/:slug/extract` job can only persist the whole set or none of it
+  ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)). The opt-in `.html` report is written
+  afterward and is not covered by that guarantee — losing it costs only the derived export.
 
 ## Related
 
 - [04-state-machine](./04-state-machine.md) — how `state` transitions (D9).
 - [06-concepts/memory](./06-concepts/memory.md) — how `memory/*.md` and backlinks are produced.
+- [06-concepts/swarm](./06-concepts/swarm.md) — D30, how `artifacts/*.md` are produced.
 - [10-testing-strategy](./10-testing-strategy.md) — property-testing the reindex invariant.
+- [ADR-0012](./adr/0012-auto-compact.md) — `compacted.md`, the derived conversation-head sidecar.
+- [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md) — the `artifacts/` truth directory.

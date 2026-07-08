@@ -32,6 +32,7 @@ flowchart LR
         R2["GET /idea/:slug — idea view (body, convo, memory)"]
         R12["GET /idea/:slug/history — read-only full thread + Fork control"]
         R13["GET /settings — live LLM backend + params form"]
+        R19["GET /idea/:slug/artifact/:name — view one artifact (.md full page | .html served raw)"]
     end
     subgraph partials["HTMX partials"]
         R3["POST /ideas — create (D10) → idea row / redirect"]
@@ -46,6 +47,8 @@ flowchart LR
         R15["POST /idea/:slug/turn/:index/delete — remove one turn → transcript"]
         R16["POST /idea/:slug/memory/:fact/delete — remove one memory fact → memory panel"]
         R13b["POST /settings — apply live settings → settings form"]
+        R18["POST /idea/:slug/extract — run knowledge extraction (D30, job) → transcript + indicator"]
+        R20["POST /idea/:slug/artifact/:name/delete — remove one artifact file → artifacts panel"]
     end
     subgraph admin["Admin"]
         R10["POST /admin/reindex — rebuild index (D15)"]
@@ -68,11 +71,15 @@ flowchart LR
     R13b --> T_SETF["templates/_settings.html"]
     R15 --> T_TURN
     R16 --> T_MEM["templates/_memory.html"]
+    R18 --> T_TURN
+    R19 --> T_ART["templates/artifact.html (.md) | raw .html export"]
+    R20 --> T_ARTS["templates/_artifacts.html"]
 ```
 
 Route groups map to `web::routes` submodules: `ideas` (R1, R2, R3, R8, R9b, R12, R14), `chat` (R9),
 `memory`/idea-actions (R4–R7, R15, R16 — the module name predates the delete routes but still owns
-them), `settings` (R13, R13b), `admin` (R10, R11, R17).
+them), `settings` (R13, R13b), `admin` (R10, R11, R17), `artifacts` (R18, R19, R20 — knowledge
+extraction and its per-idea artifact files, [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)).
 
 ## D16 — HTTP request / middleware pipeline
 
@@ -87,7 +94,7 @@ flowchart TD
     ROUTE --> HANDLER["handler"]
     HANDLER --> BRANCH{"AI-driven route?"}
     BRANCH -- "no (page / partial)" --> RENDER["Askama render → HTML"]
-    BRANCH -- "yes (chat/skill/swarm)" --> JOBBR["try_claim + persist up front + tokio::spawn detached task (D11, ADR-0010)"]
+    BRANCH -- "yes (chat/skill/swarm/extract)" --> JOBBR["try_claim + persist up front + tokio::spawn detached task (D11, ADR-0010)"]
     JOBBR --> RENDER2["render transcript + thinking indicator → HTML"]
     RENDER --> ERRMAP
     RENDER2 --> ERRMAP
@@ -114,6 +121,10 @@ templates/
   _search_results.html   # partial — FTS results
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
   _settings.html          # partial — the settings form (re-rendered after a save)
+  artifact.html           # extends base — one .md artifact rendered as a full page (R19)
+  _artifacts.html         # partial — the artifacts panel (re-rendered after an artifact delete)
+  artifact_export.html    # standalone (no base) — the opt-in .html knowledge report, written to
+                          #   disk by R18, not served directly by any route
 ```
 
 Convention: files prefixed `_` are HTMX partials (never a full page); everything else `extends
@@ -122,7 +133,7 @@ base.html`.
 ## HTMX / polling patterns
 
 - **Create / actions:** `hx-post` on forms/buttons; server returns a partial that `hx-swap` inserts.
-- **Chat / skill / swarm (background job + poll):** the compose form (or a skill/swarm button)
+- **Chat / skill / swarm / extract (background job + poll):** the compose form (or a skill/swarm button)
   posts to its route; the handler claims the per-idea job slot, persists what it can up front,
   spawns a detached task, and immediately returns a transcript partial ending in a "thinking…"
   indicator block. That block is itself an HTMX fragment
@@ -132,8 +143,8 @@ base.html`.
   failed — consumed on read), or the finished transcript with no further trigger (job done). This
   survives navigation because the underlying model call runs in a task detached from any one
   request ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
-- **Out-of-band state refresh:** transcript responses (chat, poll, cancel, skill, swarm, compact,
-  delete-turn) append two top-level `hx-swap-oob="true"` fragments after the `#transcript` inner
+- **Out-of-band state refresh:** transcript responses (chat, poll, cancel, skill, swarm, extract,
+  compact, delete-turn) append two top-level `hx-swap-oob="true"` fragments after the `#transcript` inner
   HTML: the `#idea-state` subhead badge and the `#idea-actions` block (`_actions.html`, an
   always-present container so a Draft page still has the OOB target). This is how the first chat
   turn's Draft → InDiscussion flip becomes visible — badge and moves/store controls update without
@@ -151,13 +162,15 @@ base.html`.
 | Piece | Location |
 |-------|----------|
 | Router + AppState + middleware | `app.rs` |
-| Route handlers | `web::routes::{ideas,chat,memory,settings,admin}` |
-| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, and the R9b poll endpoint) |
+| Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts}` |
+| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, extract R18, and the R9b poll endpoint) |
 | Template structs | `web::templates` |
 | Template sources | `templates/*.html` |
 
 ## Related
 
 - [05-ai-integration](./05-ai-integration.md) — D11 background-job flow, D20 degradation, D24 errors.
+- [06-concepts/swarm](./06-concepts/swarm.md) — D30, the extraction flow R18/R19/R20 drive.
 - [07-flows](./07-flows.md) — the flows that enter through these routes.
-- [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md), [ADR-0011](./adr/0011-live-switchable-llm-backend.md).
+- [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md), [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
+  [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md).

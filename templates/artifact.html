@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="crumb" href="/idea/{{ idea_slug }}">← back to {{ idea_title }}</a>
+<h1 class="title">{{ title }}</h1>
+<div class="idea-subhead">
+  <span class="artifacts__meta">{{ meta }} · <code>artifacts/{{ file_name }}</code></span>
+</div>
+
+<div class="statement">{{ content_html|safe }}</div>
+{% endblock %}

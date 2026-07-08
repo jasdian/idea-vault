@@ -20,9 +20,11 @@
 | 9 | Reindex (rebuild from markdown) | D15 | [03-data-model](./03-data-model.md) |
 | 10 | HTTP request / middleware lifecycle | D16 | [09-web-ui](./09-web-ui.md) |
 | 11 | Fork an idea (carries body + conversation + memory into a new `InDiscussion` idea) | *(no dedicated diagram — see the D9 transitions table)* | [04-state-machine](./04-state-machine.md) |
+| 12 | Knowledge extraction (fan-out lenses → persist artifacts → converge) | **D30** | [06-concepts/swarm](./06-concepts/swarm.md) |
 
-These ten cover every flow named in [CLAUDE.md](../CLAUDE.md); the six *core* flows it calls out
-explicitly are #2, #3, #4, #5, #6, #9. Fork (#11) is a newer, additive flow not among those six.
+These flows cover every flow named in [CLAUDE.md](../CLAUDE.md); the six *core* flows it calls out
+explicitly are #2, #3, #4, #5, #6, #9. Fork (#11) and knowledge extraction (#12) are newer, additive
+flows not among those six.
 
 ## The idea lifecycle, end to end (prose)
 

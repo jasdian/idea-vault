@@ -2,10 +2,14 @@
 
 > **Swarming** runs many [agents](./agents.md) concurrently against one idea — each attacking from an
 > independent angle — then **converges** their outputs into one view. On a single local machine this
-> must be *bounded*. Home of **D14** (fan-out → converge) and **D21** (concurrency & context budget).
-> Module: `concepts::swarm`. Decisions: [ADR-0006](../adr/0006-bounded-concurrency-swarm.md),
+> must be *bounded*. Home of **D14** (fan-out → converge), **D21** (concurrency & context budget), and
+> **D30** (knowledge extraction — per-lens artifacts + synthesis).
+> Module: `concepts::swarm` (and `concepts::knowledge` for D30). Decisions:
+> [ADR-0006](../adr/0006-bounded-concurrency-swarm.md),
 > [ADR-0014](../adr/0014-dynamic-context-budget.md) (the budget `Bud` derives from is now
-> live-derived per backend/model, not a fixed constant).
+> live-derived per backend/model, not a fixed constant),
+> [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md) (extraction persists per-agent findings —
+> a deliberate, scoped divergence from the rule below).
 
 ## Why swarm
 
@@ -68,6 +72,75 @@ sequenceDiagram
     Note over W,Jg: a failed agent → null result, skipped by judge (degrade, don't abort)
 ```
 
+## Knowledge extraction — persisting per-agent findings
+
+`concepts::knowledge::extract_knowledge` (`POST /idea/:slug/extract`, R18) is a second
+orchestration that reuses this same machinery — one `AgentRole::Researcher` per lens, the shared
+bounded `fan_out`, `judge`, `synthesize` — but makes one deliberate, scoped departure from the D14
+rule above: **it persists every non-empty per-lens finding**, not just the converged synthesis. The
+lenses are five built-in skills reserved with an `extract-` prefix in `SkillRegistry::builtin()`
+(`extract-key-decisions`, `extract-durable-facts`, `extract-open-questions`,
+`extract-risks-assumptions`, `extract-next-actions`); `SkillRegistry::move_names()` hides them from
+the interactive moves chip row (they are orchestrator-only lenses) while leaving them registered and
+resolvable — usable as ordinary swarm angles too. See [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md).
+
+### D30 — Knowledge extraction: fan-out → converge → persist artifacts
+
+Each finding is written as a truth file, `vault/<slug>/artifacts/<run-stamp>-<lens-short>.md`; the
+synthesis is written as `<run-stamp>-synthesis.md` and appended as one `## assistant (knowledge)`
+conversation turn. All of that (the `.md` set + the turn) happens in one await-free block after the
+last model call, so a cancelled job can only persist the whole set or nothing. The whole run is an
+ADR-0010 background job, same claim → spawn → poll shape as chat/skill/swarm.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Owner ("extract knowledge")
+    participant J as web::jobs (background job)
+    participant K as concepts::knowledge
+    participant S as semaphore (K slots)
+    participant W as Researcher workers (one per lens)
+    participant Jg as judge
+    participant Y as synthesizer
+    participant L as ai::backend::LlmBackend
+    participant V as vault::store
+
+    U->>J: POST /idea/:slug/extract — claim job, return indicator immediately
+    J->>K: extract_knowledge(idea, lenses=[key-decisions, durable-facts, open-questions, risks-assumptions, next-actions])
+    K->>K: fail fast if any lens is unknown (before any model call)
+    K->>K: build N AgentTasks (Researcher role + lens skill + budgeted context)
+    par bounded fan-out (only K run at once)
+        K->>S: acquire
+        S-->>W: slot
+        W->>L: run Researcher prompt for one lens
+        L-->>W: AgentResult
+        W->>S: release
+    and queued lenses wait for a slot
+        Note over S,W: N-K tasks queue (backpressure, D21)
+    end
+    W-->>Jg: all AgentResults
+    Jg->>Jg: rank / dedupe findings
+    alt every lens failed or empty
+        Jg-->>K: empty shortlist
+        K-->>J: NothingToSynthesize — zero writes
+    else at least one finding
+        Jg-->>Y: shortlisted findings
+        Y->>L: synthesize into one position
+        L-->>Y: converged result (may be empty)
+        Note over K,V: await-free persist block — all writes below are all-or-nothing
+        K->>V: write_artifact per non-empty finding (artifacts/<stamp>-<lens>.md)
+        alt synthesis non-empty
+            K->>V: write_artifact synthesis (artifacts/<stamp>-synthesis.md)
+            K->>V: append_turn "assistant (knowledge)"
+        else synthesis Ok-but-empty
+            Note over K: warn + skip synthesis artifact/turn — findings still persisted, run still succeeds
+        end
+        K-->>J: KnowledgeOutcome (findings, optional synthesis_slug, run_stamp)
+    end
+    J-->>U: mark_done; next poll returns the finished transcript
+    Note over U,J: optional html=true — after this returns, the job renders and writes a<br/>standalone artifacts/<stamp>-report.html export (derived, unindexed)
+```
+
 ## D21 — Concurrency & context-budget model
 
 How the semaphore and per-agent budget interact — the resource view behind every swarm and workflow
@@ -126,6 +199,7 @@ cap; the owner then owns the VRAM tradeoff).
 | Semaphore (shared, process-wide) | `AppState` / `config.rs` |
 | Per-agent budgeting | `ai::budget` |
 | Agent roles applied | `concepts::agents` + `concepts::skills` |
+| Knowledge extraction (D30) — reuses `fan_out`/`judge`/`synthesize`, persists artifacts | `concepts::knowledge` |
 
 ## Related
 
@@ -134,3 +208,8 @@ cap; the owner then owns the VRAM tradeoff).
 - [ADR-0006](../adr/0006-bounded-concurrency-swarm.md) — the bounding decision.
 - [ADR-0010](../adr/0010-ai-turns-as-background-jobs.md) — swarm runs as a background job, polled.
 - [ADR-0011](../adr/0011-live-switchable-llm-backend.md) — the `LlmBackend` router every call goes through.
+- [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md) — knowledge extraction's persisted
+  per-agent artifacts (D30), a scoped divergence from this doc's D14 rule.
+- [03-data-model](../03-data-model.md) — the `artifacts/` vault directory and the
+  `search_fts` kind `'artifact'` entry D30's writes produce.
+- [09-web-ui](../09-web-ui.md) — R18–R20, the routes that drive D30.

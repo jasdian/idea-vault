@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::web::routes::{admin, chat, compact, ideas, memory, settings};
+use crate::web::routes::{admin, artifacts, chat, compact, ideas, memory, settings};
 
 /// Cloneable shared state injected into handlers (docs/01-architecture.md "Cross-cutting concerns").
 #[derive(Clone)]
@@ -48,6 +48,16 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/idea/{slug}/memory/{fact}/delete",
             post(memory::delete_memory_fact),
+        )
+        // Knowledge extraction + the per-idea artifact files it produces (docs/adr/0015).
+        .route("/idea/{slug}/extract", post(artifacts::run_extract))
+        .route(
+            "/idea/{slug}/artifact/{name}",
+            get(artifacts::view_artifact),
+        )
+        .route(
+            "/idea/{slug}/artifact/{name}/delete",
+            post(artifacts::delete_artifact),
         )
         // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))

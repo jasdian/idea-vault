@@ -42,6 +42,8 @@ pub struct IdeaPage {
     /// The state-dependent lower panel, pre-rendered (`_discussion.html` or `_stored.html`) so
     /// the partials stay the single source for both full-page and HTMX-swap rendering.
     pub panel_html: String,
+    /// The artifacts panel, pre-rendered (`_artifacts.html`) so a file deletion can swap it.
+    pub artifacts_html: String,
 }
 
 /// Partial: the memory panel (`templates/_memory.html`) — the MEMORY.md index with a per-fact
@@ -144,6 +146,62 @@ pub struct Actions {
     /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
     pub skill_names: Vec<String>,
     pub oob: bool,
+}
+
+/// One row of the artifacts panel: a file under `vault/<slug>/artifacts/` (docs/adr/0015).
+pub struct ArtifactEntry {
+    /// Full file name including extension (`<stem>.md` / `<stem>.html`) — the view/delete key.
+    pub file_name: String,
+    /// The artifact title for `.md` truth files; the file stem for `.html` exports.
+    pub title: String,
+    /// One-line provenance ("finding · key decisions" / "synthesis" / "html report").
+    pub meta: String,
+    pub is_html: bool,
+}
+
+/// Partial: the artifacts panel (`templates/_artifacts.html`) — every extraction artifact with
+/// view + per-file delete controls. Re-rendered on its own after a deletion (swaps `#artifacts`).
+#[derive(Template, WebTemplate)]
+#[template(path = "_artifacts.html")]
+pub struct ArtifactsPanel {
+    pub idea_slug: String,
+    pub entries: Vec<ArtifactEntry>,
+    /// With `oob = true` the root carries `hx-swap-oob="true"` — transcript responses append
+    /// this fragment so a finished extraction surfaces its files without a reload (the panel
+    /// sits outside `#transcript`, like the state badge and actions block).
+    pub oob: bool,
+}
+
+/// Full page: one rendered `.md` artifact (R19, `templates/artifact.html`).
+#[derive(Template, WebTemplate)]
+#[template(path = "artifact.html")]
+pub struct ArtifactPage {
+    pub title: String,
+    pub idea_slug: String,
+    pub idea_title: String,
+    pub file_name: String,
+    pub meta: String,
+    pub content_html: String,
+}
+
+/// One findings section of the standalone HTML report export.
+pub struct ExportSection {
+    pub title: String,
+    pub body_html: String,
+}
+
+/// The standalone `.html` report export (`templates/artifact_export.html`) — written to disk as
+/// a derived artifact, NOT served as a response, so `Template` only (no `WebTemplate`). Fully
+/// self-contained: own doctype, inline styles, no `/static` references.
+#[derive(Template)]
+#[template(path = "artifact_export.html")]
+pub struct ArtifactExport {
+    pub idea_title: String,
+    pub generated: String,
+    pub model: String,
+    /// Rendered synthesis, empty when the synthesizer produced nothing (findings still ship).
+    pub summary_html: String,
+    pub sections: Vec<ExportSection>,
 }
 
 /// Partial: stored view (consolidated body + memory) (R4, `templates/_stored.html`).

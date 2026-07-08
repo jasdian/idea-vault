@@ -166,6 +166,27 @@ pub fn reindex(conn: &mut Connection, vault_dir: &Path) -> Result<ReindexCounts,
             )?;
         }
 
+        // 8b. Knowledge-extraction artifacts (`artifacts/*.md`, docs/adr/0015): searchable, but
+        // never mined for backlinks (AI-generated text, same rationale as the conversation) and
+        // no derived table — the `.html` report exports are excluded by `read_artifacts` itself.
+        let artifacts = match store::read_artifacts(vault_dir, &entry.slug) {
+            Ok(artifacts) => artifacts,
+            Err(e) => {
+                tracing::warn!(slug = %entry.slug, error = %e,
+                    "skipping unparsable artifacts during reindex");
+                Vec::new()
+            }
+        };
+        for artifact in &artifacts {
+            tx.execute(
+                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'artifact', ?2)",
+                params![
+                    idea_id,
+                    format!("{}\n\n{}", artifact.frontmatter.title, artifact.body)
+                ],
+            )?;
+        }
+
         // 7 + 9. Memory facts and `[[slug]]` link targets.
         let mut targets: Vec<String> = links::extract_links(&idea.body);
         let facts = match store::read_memory_facts(vault_dir, &entry.slug) {
@@ -267,8 +288,23 @@ mod tests {
         }
     }
 
+    fn artifact(slug: &str, title: &str, body: &str) -> crate::domain::Artifact {
+        crate::domain::Artifact {
+            frontmatter: crate::domain::ArtifactFrontmatter {
+                slug: slug.into(),
+                title: title.into(),
+                kind: crate::domain::ArtifactKind::Finding,
+                lens: Some("extract-key-decisions".into()),
+                created: dt(13),
+                model: "test".into(),
+            },
+            body: body.into(),
+        }
+    }
+
     /// Fixture per docs/10-testing-strategy.md: mixed states, tags, facts, `[[slug]]` links
-    /// including dangling and forward references, plus a conversation transcript.
+    /// including dangling and forward references, plus a conversation transcript and a
+    /// knowledge-extraction artifact (docs/adr/0015).
     fn build_fixture_vault(vault: &Path) {
         store::write_idea(
             vault,
@@ -303,6 +339,26 @@ mod tests {
                 &["alpha", "Not A Slug"],
                 "Conclusion referencing [[alpha]] again and [[gamma]].\n",
             ),
+        )
+        .unwrap();
+
+        // One knowledge-extraction artifact (searchable truth) and its derived .html export
+        // (never indexed). The artifact body mentions [[beta]] — deliberately NOT a backlink.
+        store::write_artifact(
+            vault,
+            "alpha",
+            &artifact(
+                "20260708-193045-key-decisions",
+                "Key decisions",
+                "- keep the flywheel; see [[beta]]\n",
+            ),
+        )
+        .unwrap();
+        store::write_artifact_html(
+            vault,
+            "alpha",
+            "20260708-193045-report",
+            "<!DOCTYPE html><p>UNINDEXED-REPORT</p>",
         )
         .unwrap();
     }
@@ -497,6 +553,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kind, "idea_body");
+    }
+
+    #[test]
+    fn fts_covers_artifacts_but_never_mines_them_for_backlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        // "flywheel" appears only in the artifact body.
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM search_fts WHERE search_fts MATCH 'flywheel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "artifact");
+
+        // The artifact's [[beta]] link is NOT a backlink (alpha's only targets come from its
+        // own body: beta + ghost-idea).
+        let alpha_links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM backlinks b JOIN ideas s ON s.id = b.source_idea_id
+                 WHERE s.slug = 'alpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alpha_links, 2);
+    }
+
+    #[test]
+    fn html_artifact_export_is_excluded_from_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+        let snap = snapshot(&conn);
+
+        // The fixture writes a .html export; like compacted.md, a derived file must never
+        // change the index or become searchable (docs/adr/0015).
+        assert!(
+            !snap.iter().any(|r| r.contains("UNINDEXED-REPORT")),
+            "the .html report export is never searchable"
+        );
+        // And a second export appearing later does not perturb a rebuild.
+        store::write_artifact_html(tmp.path(), "beta", "late-report", "<p>UNINDEXED-REPORT</p>")
+            .unwrap();
+        let mut fresh = mem_conn();
+        reindex(&mut fresh, tmp.path()).unwrap();
+        assert_eq!(snap, snapshot(&fresh));
+        assert!(!check_drift(&fresh, tmp.path()).unwrap());
     }
 
     #[test]

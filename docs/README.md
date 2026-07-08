@@ -13,7 +13,7 @@ applied to interrogating one idea.
 ## How to read the diagrams
 
 Every diagram is authored in a `mermaid` fenced code block and **renders inline on GitHub** — no build
-step. Each has a stable ID (**D1**–**D28**) catalogued in [08-diagrams](./08-diagrams.md). To render
+step. Each has a stable ID (**D1**–**D30**) catalogued in [08-diagrams](./08-diagrams.md). To render
 locally, use any Mermaid-aware markdown previewer.
 
 ## Reading order
@@ -32,7 +32,7 @@ New here? Read top to bottom:
    [skills](./06-concepts/skills.md) (D18),
    [agents](./06-concepts/agents.md),
    [workflows](./06-concepts/workflows.md) (D19),
-   [swarm](./06-concepts/swarm.md) (D14, D21).
+   [swarm](./06-concepts/swarm.md) (D14, D21, D30).
 9. [07-flows](./07-flows.md) — index of runtime flows (authors D10).
 10. [09-web-ui](./09-web-ui.md) — routes, middleware, templates (D16, D17).
 11. [12-deployment](./12-deployment.md) — containerized local hosting, with/without GPU (D26–D28).
@@ -57,14 +57,14 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [06-concepts/skills](./06-concepts/skills.md) | Reusable ideation moves | D18 |
 | [06-concepts/agents](./06-concepts/agents.md) | Subagent roles + I/O contract | — |
 | [06-concepts/workflows](./06-concepts/workflows.md) | Deterministic orchestration | D19 |
-| [06-concepts/swarm](./06-concepts/swarm.md) | Bounded fan-out/converge, budgets | D14, D21 |
+| [06-concepts/swarm](./06-concepts/swarm.md) | Bounded fan-out/converge, budgets, knowledge extraction | D14, D21, D30 |
 | [07-flows](./07-flows.md) | Runtime flow index | D10 |
 | [09-web-ui](./09-web-ui.md) | Routes, middleware, templates, HTMX (background-job polling) | D16, D17 |
 | [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers | D26, D27, D28, D29 |
-| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D29) | (catalog) |
+| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D30) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0014 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0015 | — |
 
 ## Locked decisions (at a glance)
 
@@ -79,6 +79,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Deployment:** app + Ollama in containers, GPU optional (override), env-driven config ([ADR-0008](./adr/0008-containerized-local-deployment.md)).
 - **claude-code in containers:** host CLI bind-mounted read-only, auth via `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`, CLI state on a `claude-state` volume via `HOME=/claude` ([ADR-0013](./adr/0013-containerized-claude-code.md)).
 - **Context budget:** derived live per backend/model (`/api/show` for Ollama, model-name mapping for claude-code), overridable per backend, no longer a fixed constant ([ADR-0014](./adr/0014-dynamic-context-budget.md)).
+- **Knowledge extraction:** per-lens findings persisted as `artifacts/*.md` truth files alongside a converged synthesis, a deliberate divergence from the swarm's discard-intermediates rule ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)).
 
 ## Beyond these docs
 

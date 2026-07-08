@@ -1,0 +1,20 @@
+<aside class="artifacts" id="artifacts"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if !entries.is_empty() %}
+  <h2>artifacts <span class="artifacts__hint">— harvested by extract knowledge; delete what you don't keep</span></h2>
+  <ul>
+    {% for entry in entries %}
+    <li>
+      <a class="artifacts__file{% if entry.is_html %} artifacts__file--html{% endif %}"
+         href="/idea/{{ idea_slug }}/artifact/{{ entry.file_name }}"
+         title="View {{ entry.file_name }}">{{ entry.title }}</a>
+      <span class="artifacts__meta">{{ entry.meta }}</span>
+      <form hx-post="/idea/{{ idea_slug }}/artifact/{{ entry.file_name }}/delete"
+            hx-target="#artifacts" hx-swap="outerHTML"
+            hx-confirm="Delete {{ entry.file_name }} permanently?">
+        <button type="submit" class="mem-del" title="Delete this artifact" aria-label="Delete this artifact">✕</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</aside>

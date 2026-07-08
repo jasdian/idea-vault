@@ -188,6 +188,24 @@ h1.title {
 .memory li { font-size: .95rem; margin: .25rem 0; }
 .memory code { font-family: var(--mono); font-size: .82em; color: var(--accent); }
 
+/* The artifacts panel mirrors the memory panel (docs/adr/0015). */
+.artifacts {
+  margin: 1.75rem 0; padding: 0 0 0 1rem; border-left: 2px solid var(--rule-strong);
+}
+.artifacts h2 {
+  font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--faint); font-weight: 600; margin: 0 0 .5rem;
+}
+.artifacts ul { list-style: none; margin: 0; padding: 0; }
+.artifacts li { display: flex; align-items: baseline; gap: .5rem; font-size: .95rem; margin: .25rem 0; }
+.artifacts li form { margin: 0; }
+.artifacts__hint { font-family: var(--serif); font-size: .78rem; font-style: italic;
+  text-transform: none; letter-spacing: 0; color: var(--faint); }
+.artifacts__file { flex: 0 1 auto; }
+.artifacts__file--html { font-family: var(--mono); font-size: .85em; }
+.artifacts__meta { flex: 1; font-family: var(--mono); font-size: .72rem; color: var(--faint); }
+.artifacts li:hover .mem-del, .artifacts .mem-del:focus { opacity: 1; }
+
 /* ---- discussion + transcript (the signature) -------------------------- */
 .discussion { margin-top: 2rem; }
 #transcript:empty::before {
@@ -430,6 +448,14 @@ h1.title {
 /* ---- capstone actions: generate build prompt + store ------------------- */
 .capstones { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .75rem; }
 .capstones form { margin: 0; }
+.extract { display: flex; align-items: center; gap: .45rem; }
+.chip--extract { border-color: var(--rule-strong); color: var(--muted); }
+.chip--extract:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.extract__opt {
+  font-family: var(--mono); font-size: .72rem; color: var(--faint);
+  display: inline-flex; align-items: center; gap: .3rem; cursor: pointer;
+}
+.extract__opt input { accent-color: var(--accent); margin: 0; }
 .chip--build {
   border-color: var(--accent); color: var(--accent);
   background: var(--accent-soft); font-weight: 600;

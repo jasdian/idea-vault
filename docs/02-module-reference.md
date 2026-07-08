@@ -20,12 +20,13 @@ flowchart TB
         subgraph domain["domain/ (pure, no IO)"]
             D_IDEA["idea.rs — Idea, IdeaState"]
             D_MEM["memory.rs — MemoryFact, MemoryIndex"]
+            D_ART["artifact.rs — Artifact, ArtifactKind (docs/adr/0015)"]
             D_FM["frontmatter.rs — parse/emit YAML"]
             D_SLUG["slug.rs — slug + collisions (D22)"]
         end
 
         subgraph vault["vault/ (disk = truth)"]
-            V_STORE["store.rs — read/write idea.md, conversation.md, memory/*.md, MEMORY.md"]
+            V_STORE["store.rs — read/write idea.md, conversation.md, memory/*.md, MEMORY.md, artifacts/*.{md,html}"]
             V_WALK["walk.rs — scan vault/** for reindex"]
         end
 
@@ -54,10 +55,11 @@ flowchart TB
             C_AGENT["agents.rs — role prompts + I/O"]
             C_WF["workflows.rs — deterministic DAG (D19)"]
             C_SWARM["swarm.rs — bounded fan-out/converge (D14, D21)"]
+            C_KNOW["knowledge.rs — extraction: fan-out lenses + persist artifacts (D30, ADR-0015)"]
         end
 
         subgraph web["web/ (HTTP surface)"]
-            W_ROUTES["routes/ — ideas, chat, memory, settings, admin"]
+            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts"]
             W_JOBS["jobs.rs — background job registry + poll (ADR-0010)"]
             W_TMPL["templates.rs — Askama structs"]
         end
@@ -146,9 +148,11 @@ flowchart TD
   [ADR-0003](./adr/0003-ollama-local-only-ai.md)).
 - **`memory`** — the memory feature: extract facts at Store ([D12](./06-concepts/memory.md)), load
   them at Reopen ([D13](./06-concepts/memory.md)), resolve backlinks ([D23](./06-concepts/memory.md)).
-- **`concepts`** — skills, agents, workflows, and the swarm orchestrator ([06-concepts](./06-concepts/)).
+- **`concepts`** — skills, agents, workflows, the swarm orchestrator, and knowledge extraction
+  (`knowledge.rs`, [D30](./06-concepts/swarm.md)) ([06-concepts](./06-concepts/)).
 - **`web`** — axum router, handlers, Askama rendering, and the background job registry (`web::jobs`,
-  [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) that every AI-driven route spawns into and
+  [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) that every AI-driven route (including
+  `routes::artifacts`, [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)) spawns into and
   polls. The top of the graph.
 - **`import`** — a bin-level driver (used only by `main`, like `web`): converts a directory of flat
   Obsidian `.md` notes into ideas, then reindexes ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)).

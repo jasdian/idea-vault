@@ -6,7 +6,7 @@
 
 ## Conventions
 
-- **ID** — stable `D1`…`D29` (see Coverage below for why the range runs past D25). References
+- **ID** — stable `D1`…`D30` (see Coverage below for why the range runs past D25). References
   across docs use the ID.
 - **Tool** — all diagrams are **Mermaid** in `mermaid` fenced code blocks, rendering inline on GitHub with no
   build step (see [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md) ethos; escape hatches below).
@@ -47,6 +47,7 @@
 | **D12** | Sequence | Store → memory extraction | [06-concepts/memory](./06-concepts/memory.md) |
 | **D13** | Sequence | Reopen → load memory as context | [06-concepts/memory](./06-concepts/memory.md) |
 | **D14** | Sequence | Subagent swarm fan-out → converge/synthesize, run as a background job (ADR-0010) | [06-concepts/swarm](./06-concepts/swarm.md) |
+| **D30** | Sequence | Knowledge extraction — per-lens artifacts + synthesis, run as a background job (ADR-0015) | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D15** | Sequence | Reindex — rebuild SQLite from markdown | [03-data-model](./03-data-model.md) |
 | **D16** | Activity | HTTP request / middleware pipeline — AI-driven routes branch into a background job, not an SSE stream | [09-web-ui](./09-web-ui.md) |
 | **D18** | Sequence | Skill invocation, run as a background job when interactive (ADR-0010) | [06-concepts/skills](./06-concepts/skills.md) |
@@ -75,11 +76,12 @@
 
 ## Coverage
 
-- **29 IDs, D1–D29** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
-  were added for containerized deployment without renumbering — the range is D1–D29 in practice,
-  not D1–D25), each authored exactly once. **D1–D15** are the mandatory core (they cover every
-  flow named in [CLAUDE.md](../CLAUDE.md)); **D16–D25** complete the SOTA set; **D26–D29** cover
-  containerized deployment.
+- **30 IDs, D1–D30** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
+  were added for containerized deployment and D30 for knowledge extraction, all without
+  renumbering — the range is D1–D30 in practice, not D1–D25), each authored exactly once.
+  **D1–D15** are the mandatory core (they cover every flow named in [CLAUDE.md](../CLAUDE.md));
+  **D16–D25** complete the SOTA set; **D26–D29** cover containerized deployment; **D30** covers
+  knowledge extraction ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)).
 - The six core flows from CLAUDE.md map to: new idea **D10**, chat (background job + poll, not SSE
   — ADR-0010) **D11**, store+memory **D12**, reopen+memory **D13**, swarm **D14**, reindex **D15**.
 

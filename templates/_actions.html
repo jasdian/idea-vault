@@ -19,6 +19,13 @@
       <button type="submit" class="chip chip--compact"
               title="Fold the older turns into a rolling summary so the discussion keeps fitting the context budget">⤵ compact now</button>
     </form>
+    <form class="extract" hx-post="/idea/{{ slug }}/extract" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip chip--extract"
+              title="Fans out explore subagents that each harvest one category of durable knowledge (decisions, facts, open questions, risks, next actions), keeps every finding as a markdown file under artifacts/, and converges a synthesis. Runs serially on a local model, so it takes a while.">⛏ extract knowledge</button>
+      <label class="extract__opt" title="Additionally write a self-contained HTML report of the run into artifacts/">
+        <input type="checkbox" name="html" value="true"> + HTML report
+      </label>
+    </form>
     <form hx-post="/idea/{{ slug }}/skill/build-prompt" hx-target="#transcript" hx-swap="innerHTML">
       <button type="submit" class="chip chip--build"
               title="Fold the whole discussion into a ready-to-run build prompt for a coding agent">⌁ generate build prompt</button>

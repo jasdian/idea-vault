@@ -12,6 +12,8 @@
 
 {{ memory_html|safe }}
 
+{{ artifacts_html|safe }}
+
 <div id="discussion" data-slug="{{ slug }}">{{ panel_html|safe }}</div>
 
 <form class="danger-zone" hx-post="/idea/{{ slug }}/delete"

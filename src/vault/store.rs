@@ -428,12 +428,216 @@ pub fn rebuild_memory_index(vault_dir: &Path, idea_slug: &str) -> Result<MemoryI
     Ok(MemoryIndex { entries })
 }
 
+/// Extension of a file under `vault/<slug>/artifacts/`: `.md` artifacts are truth
+/// (frontmatter + body, indexed for search), `.html` files are derived report exports
+/// (docs/adr/0015) — listed and deletable, never parsed or indexed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ArtifactExt {
+    Md,
+    Html,
+}
+
+impl ArtifactExt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtifactExt::Md => "md",
+            ArtifactExt::Html => "html",
+        }
+    }
+}
+
+/// One entry of an idea's `artifacts/` directory listing: file stem + extension.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArtifactFile {
+    pub slug: String,
+    pub ext: ArtifactExt,
+}
+
+/// Resolve `vault/<idea_slug>/artifacts/` after validating both slugs and the orphan rule
+/// (artifacts belong to an existing idea — D7: an idea dir always contains `idea.md`).
+fn checked_artifacts_dir(
+    vault_dir: &Path,
+    idea_slug: &str,
+    file_slug: &str,
+) -> Result<PathBuf, VaultError> {
+    if !crate::domain::slug::is_valid(file_slug) {
+        return Err(VaultError::InvalidSlug(file_slug.to_string()));
+    }
+    let idea_dir = checked_idea_dir(vault_dir, idea_slug)?;
+    if !idea_dir.join("idea.md").is_file() {
+        return Err(VaultError::IdeaNotFound(idea_slug.to_string()));
+    }
+    Ok(idea_dir.join("artifacts"))
+}
+
+/// Write one `vault/<idea_slug>/artifacts/<file-slug>.md` truth file, creating `artifacts/` on
+/// first write. Callers pick collision-free stems via `domain::slug::disambiguate` over
+/// [`artifact_exists`] — this function overwrites silently, like [`write_memory_fact`].
+pub fn write_artifact(
+    vault_dir: &Path,
+    idea_slug: &str,
+    artifact: &crate::domain::Artifact,
+) -> Result<(), VaultError> {
+    let dir = checked_artifacts_dir(vault_dir, idea_slug, &artifact.frontmatter.slug)?;
+    fs::create_dir_all(&dir)?;
+    let rendered = frontmatter::emit_artifact(&artifact.frontmatter, &artifact.body)?;
+    write_atomic(
+        &dir.join(format!("{}.md", artifact.frontmatter.slug)),
+        &rendered,
+    )
+}
+
+/// Write one derived `vault/<idea_slug>/artifacts/<file-slug>.html` report export. Same slug and
+/// orphan guards as [`write_artifact`]; the content is an opaque pre-rendered document.
+pub fn write_artifact_html(
+    vault_dir: &Path,
+    idea_slug: &str,
+    file_slug: &str,
+    html: &str,
+) -> Result<(), VaultError> {
+    let dir = checked_artifacts_dir(vault_dir, idea_slug, file_slug)?;
+    fs::create_dir_all(&dir)?;
+    write_atomic(&dir.join(format!("{file_slug}.html")), html)
+}
+
+/// Read and parse every `vault/<idea_slug>/artifacts/*.md` truth file, sorted by file slug
+/// (deterministic order for the panel and reindex). `.html` exports are excluded — reindex and
+/// the domain layer never see them. A missing `artifacts/` dir is an empty set.
+pub fn read_artifacts(
+    vault_dir: &Path,
+    idea_slug: &str,
+) -> Result<Vec<crate::domain::Artifact>, VaultError> {
+    let dir = checked_idea_dir(vault_dir, idea_slug)?.join("artifacts");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut artifacts = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)?;
+        let (fm, body) = frontmatter::parse_artifact(&raw)?;
+        artifacts.push(crate::domain::Artifact {
+            frontmatter: fm,
+            body,
+        });
+    }
+    artifacts.sort_by(|a, b| a.frontmatter.slug.cmp(&b.frontmatter.slug));
+    Ok(artifacts)
+}
+
+/// Read and parse one `artifacts/<file-slug>.md` truth file.
+pub fn read_artifact(
+    vault_dir: &Path,
+    idea_slug: &str,
+    file_slug: &str,
+) -> Result<crate::domain::Artifact, VaultError> {
+    let dir = checked_artifacts_dir(vault_dir, idea_slug, file_slug)?;
+    let raw = match fs::read_to_string(dir.join(format!("{file_slug}.md"))) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(VaultError::ArtifactNotFound(file_slug.to_string()))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let (fm, body) = frontmatter::parse_artifact(&raw)?;
+    Ok(crate::domain::Artifact {
+        frontmatter: fm,
+        body,
+    })
+}
+
+/// Read one derived `artifacts/<file-slug>.html` report export as raw text.
+pub fn read_artifact_html(
+    vault_dir: &Path,
+    idea_slug: &str,
+    file_slug: &str,
+) -> Result<String, VaultError> {
+    let dir = checked_artifacts_dir(vault_dir, idea_slug, file_slug)?;
+    match fs::read_to_string(dir.join(format!("{file_slug}.html"))) {
+        Ok(raw) => Ok(raw),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(VaultError::ArtifactNotFound(file_slug.to_string()))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// List every artifact file (`.md` truth and `.html` exports), sorted by (slug, ext) for a
+/// deterministic panel. Files with other extensions (and `write_atomic` temp files) are skipped.
+pub fn list_artifact_files(
+    vault_dir: &Path,
+    idea_slug: &str,
+) -> Result<Vec<ArtifactFile>, VaultError> {
+    let dir = checked_idea_dir(vault_dir, idea_slug)?.join("artifacts");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some("md") => ArtifactExt::Md,
+            Some("html") => ArtifactExt::Html,
+            _ => continue,
+        };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        files.push(ArtifactFile {
+            slug: stem.to_string(),
+            ext,
+        });
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// True if `<file-slug>.md` OR `<file-slug>.html` exists — the `domain::slug::disambiguate`
+/// predicate for picking run stems: probing both extensions keeps an `.html` export from ever
+/// shadowing an `.md` stem (or vice versa).
+pub fn artifact_exists(
+    vault_dir: &Path,
+    idea_slug: &str,
+    file_slug: &str,
+) -> Result<bool, VaultError> {
+    let dir = checked_artifacts_dir(vault_dir, idea_slug, file_slug)?;
+    Ok(dir.join(format!("{file_slug}.md")).is_file()
+        || dir.join(format!("{file_slug}.html")).is_file())
+}
+
+/// Delete one artifact file of the given extension. Returns whether a file was removed. A
+/// deliberate human cleanup via the artifacts panel — the sibling of [`delete_memory_fact`];
+/// the caller reindexes afterwards (`.md` artifacts have FTS rows).
+pub fn delete_artifact(
+    vault_dir: &Path,
+    idea_slug: &str,
+    file_slug: &str,
+    ext: ArtifactExt,
+) -> Result<bool, VaultError> {
+    let dir = checked_artifacts_dir(vault_dir, idea_slug, file_slug)?;
+    let path = dir.join(format!("{}.{}", file_slug, ext.as_str()));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::domain::{IdeaFrontmatter, IdeaState, MemoryFactFrontmatter};
+    use crate::domain::{ArtifactKind, IdeaFrontmatter, IdeaState, MemoryFactFrontmatter};
 
     fn sample_idea(slug: &str) -> Idea {
         Idea {
@@ -753,5 +957,207 @@ mod tests {
 
         ensure_vault_dir(&target).expect("second call should be idempotent");
         assert!(target.is_dir());
+    }
+
+    fn sample_artifact(slug: &str, kind: crate::domain::ArtifactKind) -> crate::domain::Artifact {
+        crate::domain::Artifact {
+            frontmatter: crate::domain::ArtifactFrontmatter {
+                slug: slug.into(),
+                title: "Key decisions".into(),
+                kind,
+                lens: match kind {
+                    crate::domain::ArtifactKind::Finding => {
+                        Some("extract-key-decisions".to_string())
+                    }
+                    crate::domain::ArtifactKind::Synthesis => None,
+                },
+                created: Utc.with_ymd_and_hms(2026, 7, 8, 19, 30, 45).unwrap(),
+                model: "qwen3-8b-local".into(),
+            },
+            body: "- the sidecar stays\n".into(),
+        }
+    }
+
+    #[test]
+    fn write_then_read_artifact_round_trips_and_creates_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        let artifact = sample_artifact("20260708-193045-key-decisions", ArtifactKind::Finding);
+
+        write_artifact(tmp.path(), "i", &artifact).unwrap();
+        let dir = tmp.path().join("i/artifacts");
+        assert!(dir.join("20260708-193045-key-decisions.md").is_file());
+        // No stray temp file left behind by the atomic write.
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.ends_with(".md"))
+            .collect();
+        assert!(leftovers.is_empty(), "stray files: {leftovers:?}");
+
+        let read = read_artifact(tmp.path(), "i", "20260708-193045-key-decisions").unwrap();
+        assert_eq!(read, artifact);
+    }
+
+    #[test]
+    fn read_artifacts_sorted_md_only_and_missing_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        assert!(read_artifacts(tmp.path(), "i").unwrap().is_empty());
+
+        write_artifact(
+            tmp.path(),
+            "i",
+            &sample_artifact("b-second", ArtifactKind::Synthesis),
+        )
+        .unwrap();
+        write_artifact(
+            tmp.path(),
+            "i",
+            &sample_artifact("a-first", ArtifactKind::Finding),
+        )
+        .unwrap();
+        write_artifact_html(tmp.path(), "i", "c-report", "<!DOCTYPE html><p>hi</p>").unwrap();
+
+        let artifacts = read_artifacts(tmp.path(), "i").unwrap();
+        let slugs: Vec<_> = artifacts
+            .iter()
+            .map(|a| a.frontmatter.slug.as_str())
+            .collect();
+        // Sorted, and the .html export is invisible to the truth reader.
+        assert_eq!(slugs, ["a-first", "b-second"]);
+    }
+
+    #[test]
+    fn list_artifact_files_returns_md_and_html_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        assert!(list_artifact_files(tmp.path(), "i").unwrap().is_empty());
+
+        write_artifact_html(tmp.path(), "i", "b-report", "<!DOCTYPE html>").unwrap();
+        write_artifact(
+            tmp.path(),
+            "i",
+            &sample_artifact("a", ArtifactKind::Finding),
+        )
+        .unwrap();
+
+        let files = list_artifact_files(tmp.path(), "i").unwrap();
+        assert_eq!(
+            files,
+            vec![
+                ArtifactFile {
+                    slug: "a".into(),
+                    ext: ArtifactExt::Md,
+                },
+                ArtifactFile {
+                    slug: "b-report".into(),
+                    ext: ArtifactExt::Html,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_artifact_returns_flag_and_extensions_delete_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        write_artifact(
+            tmp.path(),
+            "i",
+            &sample_artifact("same", ArtifactKind::Finding),
+        )
+        .unwrap();
+        write_artifact_html(tmp.path(), "i", "same", "<!DOCTYPE html>").unwrap();
+
+        assert!(delete_artifact(tmp.path(), "i", "same", ArtifactExt::Md).unwrap());
+        // The .md is gone; the .html sibling survives.
+        assert!(!tmp.path().join("i/artifacts/same.md").exists());
+        assert!(tmp.path().join("i/artifacts/same.html").is_file());
+        // Deleting the already-gone .md reports false, not an error.
+        assert!(!delete_artifact(tmp.path(), "i", "same", ArtifactExt::Md).unwrap());
+        assert!(delete_artifact(tmp.path(), "i", "same", ArtifactExt::Html).unwrap());
+    }
+
+    #[test]
+    fn artifact_writes_to_missing_idea_error_and_create_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = write_artifact(
+            tmp.path(),
+            "ghost",
+            &sample_artifact("a", ArtifactKind::Finding),
+        )
+        .unwrap_err();
+        assert!(matches!(err, VaultError::IdeaNotFound(s) if s == "ghost"));
+        let err = write_artifact_html(tmp.path(), "ghost", "a", "<p></p>").unwrap_err();
+        assert!(matches!(err, VaultError::IdeaNotFound(_)));
+        assert!(!tmp.path().join("ghost").exists());
+    }
+
+    #[test]
+    fn hostile_artifact_slugs_rejected_before_path_join() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        for hostile in ["../escape", "a/b", "UPPER", "dot.dot"] {
+            let mut artifact = sample_artifact("ok", ArtifactKind::Finding);
+            artifact.frontmatter.slug = hostile.into();
+            assert!(matches!(
+                write_artifact(tmp.path(), "i", &artifact),
+                Err(VaultError::InvalidSlug(_))
+            ));
+            assert!(matches!(
+                write_artifact_html(tmp.path(), "i", hostile, ""),
+                Err(VaultError::InvalidSlug(_))
+            ));
+            assert!(matches!(
+                read_artifact(tmp.path(), "i", hostile),
+                Err(VaultError::InvalidSlug(_))
+            ));
+            assert!(matches!(
+                read_artifact_html(tmp.path(), "i", hostile),
+                Err(VaultError::InvalidSlug(_))
+            ));
+            assert!(matches!(
+                delete_artifact(tmp.path(), "i", hostile, ArtifactExt::Md),
+                Err(VaultError::InvalidSlug(_))
+            ));
+            assert!(matches!(
+                artifact_exists(tmp.path(), "i", hostile),
+                Err(VaultError::InvalidSlug(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn artifact_exists_sees_both_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        assert!(!artifact_exists(tmp.path(), "i", "stem").unwrap());
+
+        write_artifact_html(tmp.path(), "i", "stem", "<!DOCTYPE html>").unwrap();
+        // An .html-only stem still counts as taken — disambiguate must skip it.
+        assert!(artifact_exists(tmp.path(), "i", "stem").unwrap());
+
+        write_artifact(
+            tmp.path(),
+            "i",
+            &sample_artifact("md-only", ArtifactKind::Finding),
+        )
+        .unwrap();
+        assert!(artifact_exists(tmp.path(), "i", "md-only").unwrap());
+    }
+
+    #[test]
+    fn read_missing_artifact_is_artifact_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        assert!(matches!(
+            read_artifact(tmp.path(), "i", "nope"),
+            Err(VaultError::ArtifactNotFound(s)) if s == "nope"
+        ));
+        assert!(matches!(
+            read_artifact_html(tmp.path(), "i", "nope"),
+            Err(VaultError::ArtifactNotFound(_))
+        ));
     }
 }

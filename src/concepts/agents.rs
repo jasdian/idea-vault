@@ -3,9 +3,10 @@
 //!
 //! An agent is not a process: it is a configured way of calling `ai` for one bounded task. This
 //! module only knows how to *run one role well* — building `AgentTask`s (with budgeted context,
-//! D21) and consuming `AgentResult`s is the orchestrator's job (`swarm`/`workflows`), and
-//! intermediate agent outputs are never persisted to the vault (only a final synthesis becomes a
-//! conversation turn, docs/06-concepts/workflows.md).
+//! D21) and consuming `AgentResult`s is the orchestrator's job (`swarm`/`workflows`/`knowledge`).
+//! Whether intermediate agent outputs persist is the orchestrator's decision: `swarm` and
+//! `workflows` discard them (only a final synthesis becomes a conversation turn), while
+//! `knowledge` persists each lens's findings as an artifact file (docs/adr/0015).
 
 use tokio::sync::Semaphore;
 

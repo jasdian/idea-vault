@@ -1,6 +1,6 @@
 //! `vault` — the only module that reads/writes the markdown files that are the source of truth
 //! for idea-vault (docs/02-module-reference.md, docs/03-data-model.md). Owns the on-disk file
-//! contract: `vault/<slug>/{idea.md, conversation.md, memory/*.md, MEMORY.md}`.
+//! contract: `vault/<slug>/{idea.md, conversation.md, memory/*.md, MEMORY.md, artifacts/*}`.
 //!
 //! Dependency rule (docs/02-module-reference.md D4): `vault` may depend only on `domain` — never
 //! on `index`, `ai`, `memory`, `concepts`, or `web`.
@@ -19,6 +19,10 @@ pub enum VaultError {
     /// answer 404 rather than 500).
     #[error("idea not found: {0}")]
     IdeaNotFound(String),
+    /// No such file under `vault/<slug>/artifacts/` — the artifact sibling of `IdeaNotFound`,
+    /// mapped to 404 by `web`.
+    #[error("artifact not found: {0}")]
+    ArtifactNotFound(String),
     /// A slug that fails `domain::slug::is_valid` — rejected before any path join so a malformed
     /// or hostile slug (`../`, separators) can never escape the vault directory.
     #[error("invalid slug: {0:?}")]

@@ -84,6 +84,17 @@ sequenceDiagram
 `premortem`, `cheapest-disproof`, `constraints`, and `second-order-effects` are also the default
 angle set a swarm run uses when the owner doesn't specify angles ([D14](./swarm.md)).
 
+### Orchestrator-only lenses (`extract-*`)
+
+Five more built-ins ship with a reserved `extract-` prefix — `extract-key-decisions`,
+`extract-durable-facts`, `extract-open-questions`, `extract-risks-assumptions`,
+`extract-next-actions` — the lenses `concepts::knowledge::extract_knowledge` fans out one
+`AgentRole::Researcher` per, on `POST /idea/:slug/extract` ([D30](./swarm.md),
+[ADR-0015](../adr/0015-knowledge-extraction-artifacts.md)). `SkillRegistry::move_names()` filters
+them out of the interactive moves chip row — they're orchestrator angles, not something the owner
+picks one-at-a-time — but they stay registered and resolvable, so nothing stops them from also being
+used as ordinary swarm angles.
+
 ## Distinction from adjacent concepts
 
 | Concept | What it is | Relation to skills |
@@ -105,3 +116,5 @@ angle set a swarm run uses when the owner doesn't specify angles ([D14](./swarm.
 - [swarm](./swarm.md) — D14, how skills are parallelized across agents.
 - [ADR-0010](../adr/0010-ai-turns-as-background-jobs.md) — interactive skill runs are background jobs.
 - [ADR-0011](../adr/0011-live-switchable-llm-backend.md) — the `LlmBackend` router skills call through.
+- [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md) — the `extract-*` lenses and why they're
+  hidden from the moves row.
