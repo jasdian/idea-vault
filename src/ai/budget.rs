@@ -29,6 +29,13 @@ impl ContextBudget {
             max_bytes: tokens.saturating_mul(4) / 2,
         }
     }
+
+    /// Inverse of [`Self::for_model_tokens`]: the smallest window (tokens) whose derived byte
+    /// budget admits a prompt of `prompt_bytes` — i.e. the window an already-assembled prompt
+    /// implies it was budgeted against, with the same output/scaffolding headroom ratio.
+    pub fn min_window_tokens(prompt_bytes: usize) -> usize {
+        prompt_bytes.div_ceil(2)
+    }
 }
 
 /// Pre-loaded inputs, ready-ranked by the caller: `memory` most-relevant-first,

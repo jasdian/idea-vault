@@ -8,7 +8,8 @@
 > [ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md),
 > [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md) (supersedes the earlier SSE decision,
 > [ADR-0004](./adr/0004-sse-token-streaming.md)),
-> [ADR-0011](./adr/0011-live-switchable-llm-backend.md).
+> [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
+> [ADR-0014](./adr/0014-dynamic-context-budget.md) (dynamic per-backend/model context budget).
 
 ## The `ai` boundary
 
@@ -32,7 +33,9 @@ Submodules:
   tuned parameters (Ollama temperature; claude-code model + effort), so the Settings page
   (`GET`/`POST /settings`) can retoggle/retune with no restart
   ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)).
-- `ai::budget` — assembles a prompt within the model's context limit ([D21](./06-concepts/swarm.md)).
+- `ai::budget` — assembles a prompt within the model's context limit ([D21](./06-concepts/swarm.md));
+  the limit itself is now derived live per backend/model rather than a fixed constant
+  ([ADR-0014](./adr/0014-dynamic-context-budget.md)).
 
 `AppState` holds one `LlmBackend` (`state.llm`); handlers never talk to `OllamaClient` or
 `ClaudeCodeClient` directly.
@@ -42,18 +45,31 @@ Submodules:
 | Purpose | Ollama endpoint | Notes |
 |---------|-----------------|-------|
 | Health / model list | `GET /api/tags` | used by the boot probe (D25) and degradation (D20) |
-| Chat completion (stream) | `POST /api/chat` (`stream: true`) | NDJSON, one token-chunk per line, final line `done: true` |
+| Chat completion (stream) | `POST /api/chat` (`stream: true`) | NDJSON, one token-chunk per line, final line `done: true`. `options.num_ctx` is **always** sent (see below, [ADR-0014](./adr/0014-dynamic-context-budget.md)). |
+| Model metadata | `POST /api/show` | queries the configured model's native `context_length` (dynamic context budget); best-effort, 5s timeout, `None` on any failure — never a hard error. |
 
 The client is configured from `config.rs` (base URL, default model, per-request timeout, initial
-sampling temperature). The base URL comes from `IDEA_VAULT_OLLAMA_URL` — default
-`http://localhost:11434` for a bare `cargo run`, `http://ollama:11434` (compose service DNS) when
-containerized. **No code path hardcodes `localhost:11434`**
-([12-deployment](./12-deployment.md), [ADR-0008](./adr/0008-containerized-local-deployment.md)).
+sampling temperature, initial context-window override). The base URL comes from
+`IDEA_VAULT_OLLAMA_URL` — default `http://localhost:11434` for a bare `cargo run`,
+`http://ollama:11434` (compose service DNS) when containerized. **No code path hardcodes
+`localhost:11434`** ([12-deployment](./12-deployment.md), [ADR-0008](./adr/0008-containerized-local-deployment.md)).
 Sampling temperature (`IDEA_VAULT_OLLAMA_TEMPERATURE`, default `0.7`) is only the *initial* value —
 the Settings page can retune it live ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)). All
 calls acquire the process-wide **concurrency semaphore**
 ([ADR-0006](./adr/0006-bounded-concurrency-swarm.md)) so chat, skills, and swarm share one budget
 regardless of which backend answers.
+
+**Context-window derivation ([ADR-0014](./adr/0014-dynamic-context-budget.md)).** The context
+budget is no longer a fixed constant — `LlmBackend::context_window_tokens()` resolves it live per
+call: a nonzero per-backend override (`IDEA_VAULT_OLLAMA_CTX_TOKENS` / `IDEA_VAULT_CLAUDE_CTX_TOKENS`,
+both initial-only, retunable on `/settings`) wins; otherwise Ollama uses the model's native window
+learned from `POST /api/show` (cached by model name; a failed probe is cached too, with a 60s
+retry-after, so a persistently failing `/api/show` never taxes every turn with the probe timeout,
+and the budget still self-heals on the first dispatch after the backoff) capped at 32,768 tokens (a VRAM guard on `num_ctx` — an explicit override
+bypasses it), falling back to 8,192 tokens until the cache has an answer; claude-code derives
+200,000 tokens, or 1,000,000 if the model name contains the `1m` marker (case-insensitive), with
+**no default cap**. `ContextBudget::for_model_tokens` converts tokens to the byte budget every
+consumer (prompt assembly, the usage meter, `memory::compact`'s fold targets) shares.
 
 ## D11 — Chat message → LlmBackend → background job → poll
 
@@ -231,3 +247,4 @@ Principles: **truth-preserving** (index errors never lose vault data — reindex
 - [09-web-ui](./09-web-ui.md) — D16 middleware, D17 routes (the chat/skill/swarm + pending endpoints).
 - [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md) — background-job model (supersedes SSE).
 - [ADR-0011](./adr/0011-live-switchable-llm-backend.md) — live backend router + Settings page.
+- [ADR-0014](./adr/0014-dynamic-context-budget.md) — dynamic per-backend/model context budget (`/api/show`, `num_ctx`, overrides).

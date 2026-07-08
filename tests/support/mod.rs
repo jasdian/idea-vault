@@ -61,8 +61,10 @@ pub async fn refused_url() -> String {
 }
 
 /// Spawn the mock server. `models` populates `/api/tags`; `script` drives every `/api/chat`.
+/// `POST /api/show` answers 404 (like unknown paths), so context-window discovery falls back —
+/// existing tests keep the pre-dynamic-budget 16 KiB behavior.
 pub async fn spawn(models: &[&str], script: ChatScript) -> MockOllama {
-    spawn_inner(models, Scripts::Repeat(script)).await
+    spawn_inner(models, Scripts::Repeat(script), None).await
 }
 
 /// Spawn a mock whose `/api/chat` answers consume `scripts` in order — call 1 gets scripts[0],
@@ -72,8 +74,19 @@ pub async fn spawn_sequence(models: &[&str], scripts: Vec<ChatScript>) -> MockOl
     spawn_inner(
         models,
         Scripts::Sequence(Arc::new(Mutex::new(scripts.into()))),
+        None,
     )
     .await
+}
+
+/// Like [`spawn`], but `POST /api/show` advertises `context_length` (arch-prefixed, the real
+/// Ollama shape) — for dynamic-budget tests.
+pub async fn spawn_with_context_length(
+    models: &[&str],
+    script: ChatScript,
+    context_length: u64,
+) -> MockOllama {
+    spawn_inner(models, Scripts::Repeat(script), Some(context_length)).await
 }
 
 #[derive(Clone)]
@@ -95,7 +108,11 @@ impl Scripts {
     }
 }
 
-async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
+async fn spawn_inner(
+    models: &[&str],
+    scripts: Scripts,
+    show_context_length: Option<u64>,
+) -> MockOllama {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let tags_body = serde_json::json!({
@@ -118,7 +135,15 @@ async fn spawn_inner(models: &[&str], scripts: Scripts) -> MockOllama {
             let chat_requests = chat_requests_srv.clone();
             let gauge = gauge_srv.clone();
             tokio::spawn(async move {
-                let _ = handle(sock, tags_body, scripts, chat_requests, gauge).await;
+                let _ = handle(
+                    sock,
+                    tags_body,
+                    scripts,
+                    chat_requests,
+                    gauge,
+                    show_context_length,
+                )
+                .await;
             });
         }
     });
@@ -146,6 +171,7 @@ async fn handle(
     scripts: Scripts,
     chat_requests: Arc<Mutex<Vec<String>>>,
     gauge: (Arc<AtomicUsize>, Arc<AtomicUsize>),
+    show_context_length: Option<u64>,
 ) -> std::io::Result<()> {
     // Read until the end of headers.
     let mut req = Vec::new();
@@ -194,6 +220,23 @@ async fn handle(
         );
         sock.write_all(resp.as_bytes()).await?;
         return Ok(());
+    }
+
+    if request_line.starts_with("POST /api/show") {
+        // Scriptable model metadata; unscripted mocks fall through to 404 (fail-safe fallback).
+        if let Some(ctx) = show_context_length {
+            let body = serde_json::json!({
+                "model_info": { "llama.context_length": ctx }
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
     }
 
     if request_line.starts_with("POST /api/chat") {

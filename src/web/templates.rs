@@ -83,6 +83,11 @@ pub struct SettingsForm {
     /// Auto-compact toggle + trigger fraction (docs/adr/0012).
     pub auto_compact: bool,
     pub compact_threshold: String,
+    /// Per-backend context-window overrides in tokens ("0" = auto, derived from the model).
+    pub ollama_ctx_tokens: String,
+    pub claude_ctx_tokens: String,
+    /// The window the active backend resolves to right now (tokens) — the "effective" hint.
+    pub effective_ctx: String,
     pub saved: bool,
 }
 

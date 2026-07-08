@@ -37,6 +37,21 @@
   </div>
 
   <fieldset class="settings__group">
+    <legend>context window</legend>
+    <label class="field">
+      <span class="field__label">local ctx (tokens)</span>
+      <input type="number" name="ollama_ctx_tokens" min="0" value="{{ ollama_ctx_tokens }}" />
+      <span class="field__hint">0 = auto (derived from the model)</span>
+    </label>
+    <label class="field">
+      <span class="field__label">claude ctx (tokens)</span>
+      <input type="number" name="claude_ctx_tokens" min="0" value="{{ claude_ctx_tokens }}" />
+      <span class="field__hint">0 = auto (derived from the model)</span>
+    </label>
+    <p class="field__hint">effective now: {{ effective_ctx }} tokens</p>
+  </fieldset>
+
+  <fieldset class="settings__group">
     <legend>auto-compact</legend>
     <label class="opt">
       <input type="checkbox" name="auto_compact" value="true" {% if auto_compact %}checked{% endif %} />

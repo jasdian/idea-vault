@@ -1,6 +1,6 @@
-//! HTTP client for the local Ollama server (`GET /api/tags`, `POST /api/chat`) — the only place
-//! in the crate that is allowed to speak Ollama's wire protocol
-//! (docs/05-ai-integration.md "Ollama client contract").
+//! HTTP client for the local Ollama server (`GET /api/tags`, `POST /api/chat`,
+//! `POST /api/show`) — the only place in the crate that is allowed to speak Ollama's wire
+//! protocol (docs/05-ai-integration.md "Ollama client contract").
 //!
 //! The base URL is always injected by the caller (ultimately `config::Config::ollama_url`,
 //! itself env-driven) — this module never hardcodes `localhost:11434` (docs/12-deployment.md).
@@ -22,6 +22,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Default hard timeout between token chunks (D20). Local models can be slow per token but a
 /// gap this long means the call is wedged — abort rather than hang the SSE stream forever.
 const DEFAULT_TOKEN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wall-clock budget for the `/api/show` model-metadata query (dynamic context budget). A slow
+/// or absent server yields `None` — callers fall back rather than block on metadata.
+const SHOW_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A live token stream from `/api/chat`: each item is one content chunk, in order. The stream
 /// ends after Ollama's `done: true`; an `Err` item (timeout/protocol/transport) is terminal.
@@ -56,6 +60,18 @@ struct TagsResponse {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+/// Per-call knobs forwarded as Ollama's `options` object. Fields that are `None` are omitted
+/// from the wire body entirely (the server default applies). `num_ctx` matters: without it
+/// Ollama silently truncates the prompt at its own default window (~4k tokens) no matter what
+/// the caller assembled — the router always sends the live budget window.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChatOptions {
+    /// Sampling temperature (`options.temperature`).
+    pub temperature: Option<f32>,
+    /// Context window in tokens (`options.num_ctx`).
+    pub num_ctx: Option<usize>,
 }
 
 /// Client for the local Ollama server. Cheap to clone (wraps a pooled `reqwest::Client`).
@@ -134,21 +150,43 @@ impl OllamaClient {
     /// tokens; the same hard-timeout and persist-boundary guarantees apply — any stream error
     /// aborts the whole call, a partial response is never returned as if complete.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
-        self.chat_with(None, messages).await
+        self.chat_with(ChatOptions::default(), messages).await
     }
 
-    /// Non-streaming completion with an optional sampling temperature (runtime setting).
+    /// Non-streaming completion with per-call [`ChatOptions`] (runtime settings).
     pub async fn chat_with(
         &self,
-        temperature: Option<f32>,
+        options: ChatOptions,
         messages: Vec<ChatMessage>,
     ) -> Result<String, AiError> {
-        let mut stream = self.chat_stream_with(temperature, messages).await?;
+        let mut stream = self.chat_stream_with(options, messages).await?;
         let mut out = String::new();
         while let Some(item) = stream.next().await {
             out.push_str(&item?);
         }
         Ok(out)
+    }
+
+    /// Query the configured model's native context window in tokens (`POST /api/show`).
+    ///
+    /// Best-effort metadata: any transport error, non-2xx status, timeout, or a body without a
+    /// recognizable `context_length` key yields `None` — the caller falls back to its default
+    /// window and may retry later (failures are deliberately not an error type).
+    pub async fn show_context_length(&self) -> Option<usize> {
+        let url = format!("{}/api/show", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "model": self.model }))
+            .timeout(SHOW_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = response.json::<serde_json::Value>().await.ok()?;
+        context_length_from_show(&body)
     }
 
     /// Stream a chat completion from Ollama (`POST /api/chat`, `stream: true`, D11).
@@ -161,25 +199,19 @@ impl OllamaClient {
     /// Concurrency note: acquiring the process-wide semaphore (ADR-0006) is the caller's job —
     /// this module has no access to `AppState`. Dropping the returned stream aborts the request.
     pub async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<TokenStream, AiError> {
-        self.chat_stream_with(None, messages).await
+        self.chat_stream_with(ChatOptions::default(), messages)
+            .await
     }
 
-    /// Stream a chat completion with an optional sampling temperature (runtime setting): when set,
-    /// it goes in Ollama's `options.temperature`. `None` sends no options (the model default).
+    /// Stream a chat completion with per-call [`ChatOptions`] (runtime settings): set fields go
+    /// in Ollama's `options` object; an all-`None` options sends no `options` (server defaults).
     pub async fn chat_stream_with(
         &self,
-        temperature: Option<f32>,
+        options: ChatOptions,
         messages: Vec<ChatMessage>,
     ) -> Result<TokenStream, AiError> {
         let url = format!("{}/api/chat", self.base_url);
-        let mut body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": true,
-        });
-        if let Some(t) = temperature {
-            body["options"] = serde_json::json!({ "temperature": t });
-        }
+        let body = build_chat_body(&self.model, options, &messages);
 
         let response =
             tokio::time::timeout(self.token_timeout, self.http.post(&url).json(&body).send())
@@ -192,6 +224,47 @@ impl OllamaClient {
             self.token_timeout,
         ))
     }
+}
+
+/// Build the `POST /api/chat` request body. Pure and socket-free so the wire shape (including
+/// `options.num_ctx` presence/absence) is unit-testable directly.
+pub(crate) fn build_chat_body(
+    model: &str,
+    options: ChatOptions,
+    messages: &[ChatMessage],
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    let mut opts = serde_json::Map::new();
+    if let Some(t) = options.temperature {
+        opts.insert("temperature".to_string(), serde_json::json!(t));
+    }
+    if let Some(n) = options.num_ctx {
+        opts.insert("num_ctx".to_string(), serde_json::json!(n));
+    }
+    if !opts.is_empty() {
+        body["options"] = serde_json::Value::Object(opts);
+    }
+    body
+}
+
+/// Extract the native context window from an `/api/show` response body: scan `model_info` for
+/// the architecture-prefixed `<arch>.context_length` key (e.g. `qwen3.context_length`, or a bare
+/// `context_length`). Pure and socket-free so it can be unit-tested against fixtures.
+pub(crate) fn context_length_from_show(body: &serde_json::Value) -> Option<usize> {
+    body.get("model_info")?
+        .as_object()?
+        .iter()
+        .find_map(|(key, value)| {
+            if key == "context_length" || key.ends_with(".context_length") {
+                value.as_u64().map(|v| v as usize)
+            } else {
+                None
+            }
+        })
 }
 
 /// True if `available` (a model name as returned by `/api/tags`, e.g. `llama3.2:latest`) matches
@@ -236,5 +309,81 @@ mod tests {
     #[test]
     fn empty_available_does_not_match() {
         assert!(!model_matches("", "llama3.2"));
+    }
+
+    #[test]
+    fn context_length_from_arch_prefixed_key() {
+        let body = serde_json::json!({
+            "model_info": {
+                "general.architecture": "qwen3",
+                "qwen3.context_length": 40960,
+                "qwen3.embedding_length": 2560,
+            }
+        });
+        assert_eq!(context_length_from_show(&body), Some(40_960));
+    }
+
+    #[test]
+    fn context_length_from_bare_key() {
+        let body = serde_json::json!({ "model_info": { "context_length": 8192 } });
+        assert_eq!(context_length_from_show(&body), Some(8_192));
+    }
+
+    #[test]
+    fn context_length_missing_or_malformed_is_none() {
+        assert_eq!(context_length_from_show(&serde_json::json!({})), None);
+        assert_eq!(
+            context_length_from_show(&serde_json::json!({ "model_info": {} })),
+            None
+        );
+        // A non-numeric value must not be misread; a suffix-only lookalike must not match.
+        assert_eq!(
+            context_length_from_show(
+                &serde_json::json!({ "model_info": { "qwen3.context_length": "big" } })
+            ),
+            None
+        );
+        assert_eq!(
+            context_length_from_show(
+                &serde_json::json!({ "model_info": { "noncontext_length": 4096 } })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn chat_body_carries_options_only_when_set() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+
+        // Both set → both land in `options`.
+        let body = build_chat_body(
+            "llama3.2",
+            ChatOptions {
+                temperature: Some(0.7),
+                num_ctx: Some(8192),
+            },
+            &messages,
+        );
+        assert_eq!(body["options"]["num_ctx"], serde_json::json!(8192));
+        assert!((body["options"]["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+
+        // num_ctx only → temperature absent.
+        let body = build_chat_body(
+            "llama3.2",
+            ChatOptions {
+                temperature: None,
+                num_ctx: Some(4096),
+            },
+            &messages,
+        );
+        assert_eq!(body["options"]["num_ctx"], serde_json::json!(4096));
+        assert!(body["options"].get("temperature").is_none());
+
+        // Nothing set → no `options` object at all (server defaults).
+        let body = build_chat_body("llama3.2", ChatOptions::default(), &messages);
+        assert!(body.get("options").is_none());
     }
 }

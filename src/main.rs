@@ -82,6 +82,11 @@ async fn main() -> anyhow::Result<()> {
     {
         let probe_backend = llm.clone();
         tokio::spawn(async move {
+            // Warm the Ollama context-window cache (dynamic budget) unconditionally — even when
+            // claude-code is the active backend, a live Settings flip to Ollama should find the
+            // window already learned. A failed probe is cached with a short backoff and retried
+            // by a later dispatch, so this self-heals.
+            probe_backend.refresh_ollama_ctx().await;
             let health = probe_backend.probe().await;
             tracing::info!(?health, "llm boot probe");
         });
@@ -155,6 +160,8 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         claude_effort: effort,
         auto_compact: config.auto_compact,
         compact_threshold: config.compact_threshold,
+        ollama_ctx_tokens: config.ollama_ctx_tokens,
+        claude_ctx_tokens: config.claude_ctx_tokens,
     };
     Ok(LlmBackend::new(ollama, claude_base, settings))
 }

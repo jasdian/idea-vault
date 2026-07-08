@@ -3,7 +3,9 @@
 > **Swarming** runs many [agents](./agents.md) concurrently against one idea — each attacking from an
 > independent angle — then **converges** their outputs into one view. On a single local machine this
 > must be *bounded*. Home of **D14** (fan-out → converge) and **D21** (concurrency & context budget).
-> Module: `concepts::swarm`. Decision: [ADR-0006](../adr/0006-bounded-concurrency-swarm.md).
+> Module: `concepts::swarm`. Decisions: [ADR-0006](../adr/0006-bounded-concurrency-swarm.md),
+> [ADR-0014](../adr/0014-dynamic-context-budget.md) (the budget `Bud` derives from is now
+> live-derived per backend/model, not a fixed constant).
 
 ## Why swarm
 
@@ -97,6 +99,15 @@ Budget composition per agent (priority order when trimming to fit):
 1. the idea's current best statement (`idea.md` body) — always included;
 2. top memory facts (`MEMORY.md` + selected `memory/*.md`);
 3. the most recent conversation turns (trimmed from the oldest).
+
+Both the semaphore limit `K` and each agent's context budget are live values, not fixed constants:
+`K` is `IDEA_VAULT_AI_CONCURRENCY` ([ADR-0006](../adr/0006-bounded-concurrency-swarm.md)), and the
+per-agent budget comes from `LlmBackend::context_budget()`, derived per backend/model
+([ADR-0014](../adr/0014-dynamic-context-budget.md)). The two interact on the Ollama backend: each
+concurrent call's `num_ctx` allocates its own KV cache, so `K` concurrent calls at a large
+auto-derived window multiply VRAM use by `K` — the reason the auto-derived Ollama window is capped
+at 32,768 tokens regardless of a model's larger native window (an explicit override bypasses the
+cap; the owner then owns the VRAM tradeoff).
 
 ## Guarantees
 

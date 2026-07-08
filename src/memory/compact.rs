@@ -27,22 +27,33 @@ use crate::memory::MemoryError;
 use crate::vault::store;
 use crate::vault::store::split_turns;
 
-/// The shared AI prompt budget (mirrors `web::routes::AI_BUDGET_BYTES`, D21). Compaction's
-/// internal targets are fractions of it. Defined here — not read from `web` — to honour the
-/// one-way module dependency rule (D4: `memory` never depends on `web`); a drift guard in
-/// `web::routes` asserts the two stay equal.
-pub(crate) const AI_BUDGET_BYTES: usize = 16 * 1024;
+/// Compaction's internal byte targets — fixed fractions of ONE budget snapshot (the live
+/// [`LlmBackend::context_budget`] at the moment a compaction starts). `memory` sits below `web`
+/// in the D4 layering, so it derives the budget from the `LlmBackend` it already holds rather
+/// than reading anything from `web`. Snapshotted once per compaction and threaded through every
+/// fold round, so a Settings flip mid-fold can never mix targets from two different budgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactTargets {
+    /// Target size of the verbatim tail `turns[k..n]` after a fold (0.40 of the budget).
+    /// Folding advances `k` until the tail is at or under this.
+    pub tail_target_bytes: usize,
+    /// Hard cap on the summary body (0.30 of the budget) — a derived file may be trimmed.
+    pub summary_max_bytes: usize,
+    /// Bound on the summarizer *input* (prior summary + the fold slice), 1.00 of the budget —
+    /// so the fold call itself stays within one model context.
+    pub summarizer_input_bytes: usize,
+}
 
-/// Target size of the verbatim tail `turns[k..n]` after a fold (0.40 of the budget). Folding
-/// advances `k` until the tail is at or under this.
-pub const COMPACT_TAIL_TARGET_BYTES: usize = AI_BUDGET_BYTES * 2 / 5;
-
-/// Hard cap on the summary body (0.30 of the budget) — a derived file may be trimmed.
-pub const COMPACT_SUMMARY_MAX_BYTES: usize = AI_BUDGET_BYTES * 3 / 10;
-
-/// Bound on the summarizer *input* (prior summary + the fold slice), 1.00 of the budget — so the
-/// fold call itself stays within one model context.
-pub const COMPACT_SUMMARIZER_INPUT_BYTES: usize = AI_BUDGET_BYTES;
+impl CompactTargets {
+    /// Derive the targets from a prompt byte budget (the 2/5, 3/10, 1/1 fractions above).
+    pub fn for_budget(budget_bytes: usize) -> Self {
+        Self {
+            tail_target_bytes: budget_bytes * 2 / 5,
+            summary_max_bytes: budget_bytes * 3 / 10,
+            summarizer_input_bytes: budget_bytes,
+        }
+    }
+}
 
 /// Max fold rounds per compaction (a cold reopened idea converges in one compaction instead of
 /// one-fold-per-turn); each round is its own Ollama call + permit, so this bounds worst-case work.
@@ -122,13 +133,18 @@ pub fn effective_window(turns: &[String], compacted: Option<&Compacted>) -> Effe
 }
 
 /// Choose the new high-water mark `k_new` (which turns to fold) for one round, starting from
-/// `k_old`. Advances forward while (a) the tail is still over [`COMPACT_TAIL_TARGET_BYTES`],
+/// `k_old`. Advances forward while (a) the tail is still over `targets.tail_target_bytes`,
 /// (b) folding the next turn keeps the summarizer input (`prev_summary + fold slice`) within
-/// [`COMPACT_SUMMARIZER_INPUT_BYTES`], and (c) at least one verbatim tail turn remains. Monotonic
+/// `targets.summarizer_input_bytes`, and (c) at least one verbatim tail turn remains. Monotonic
 /// (`k_new >= k_old`) and never folds a turn the assembler couldn't take — so no fold-slice turn is
 /// ever silently dropped. A single turn larger than the input bound (or a single-turn tail) is a
 /// no-op (`k_new == k_old`): the tail honestly stays over budget and re-triggers next turn.
-pub fn choose_high_water(turns: &[String], k_old: usize, prev_summary: Option<&str>) -> usize {
+pub fn choose_high_water(
+    turns: &[String],
+    k_old: usize,
+    prev_summary: Option<&str>,
+    targets: CompactTargets,
+) -> usize {
     let n = turns.len();
     if k_old >= n {
         return k_old;
@@ -142,12 +158,12 @@ pub fn choose_high_water(turns: &[String], k_old: usize, prev_summary: Option<&s
             break;
         }
         // (a) Stop once the tail already fits the verbatim target — nothing more to fold.
-        if tail_bytes(turns, k) <= COMPACT_TAIL_TARGET_BYTES {
+        if tail_bytes(turns, k) <= targets.tail_target_bytes {
             break;
         }
         let turn_len = turns[k].trim_end().len() + 1;
         // (b) Stop before the summarizer input would overflow.
-        if prev_len + fold_bytes + turn_len > COMPACT_SUMMARIZER_INPUT_BYTES {
+        if prev_len + fold_bytes + turn_len > targets.summarizer_input_bytes {
             break;
         }
         fold_bytes += turn_len;
@@ -172,12 +188,14 @@ fn trim_to_bytes(s: &str, max: usize) -> String {
 /// summarize exactly `turns[k_old..k_new]` (merged with the prior summary) via one Ollama call
 /// under a single `ai_semaphore` permit, and write the new `compacted.md`. Returns `Ok(None)` when
 /// there is nothing to fold (no model call, no write). Empty model output aborts the round with
-/// the previous `compacted.md` left intact.
+/// the previous `compacted.md` left intact. `targets` is the caller's one-per-compaction budget
+/// snapshot ([`CompactTargets`]).
 pub async fn run_compaction_inner(
     llm: &LlmBackend,
     sem: &Semaphore,
     vault_dir: &Path,
     slug: &str,
+    targets: CompactTargets,
 ) -> Result<Option<Compacted>, MemoryError> {
     let idea = store::read_idea(vault_dir, slug)?;
     let conversation = store::read_conversation(vault_dir, slug)?;
@@ -193,7 +211,7 @@ pub async fn run_compaction_inner(
         None => (0, None),
     };
 
-    let k_new = choose_high_water(&turns, k_old, prev_summary);
+    let k_new = choose_high_water(&turns, k_old, prev_summary, targets);
     if k_new == k_old {
         return Ok(None); // nothing summarizable this round — honest no-op
     }
@@ -202,7 +220,8 @@ pub async fn run_compaction_inner(
     // slice `turns[k_old..k_new]`. `turns[0..k_old]` are represented solely by `prev_summary`, so
     // each turn is folded exactly once (no double-count). The budget carries the idea body on top
     // of the input bound so the chosen slice can never be trimmed by the assembler.
-    let fold_budget = COMPACT_SUMMARIZER_INPUT_BYTES
+    let fold_budget = targets
+        .summarizer_input_bytes
         .saturating_add(idea.body.len())
         .saturating_add(1024);
     let context = assemble_context(
@@ -229,7 +248,7 @@ pub async fn run_compaction_inner(
         .await?
     };
 
-    let summary = trim_to_bytes(raw.trim(), COMPACT_SUMMARY_MAX_BYTES);
+    let summary = trim_to_bytes(raw.trim(), targets.summary_max_bytes);
     if summary.is_empty() {
         // Abort with truth intact — the previous compacted.md (if any) is untouched.
         return Err(MemoryError::EmptyCompaction);
@@ -262,11 +281,17 @@ pub async fn run_compaction(
     slug: &str,
     force: bool,
 ) -> Result<(), String> {
-    if !force && !over_threshold(llm, vault_dir, slug).map_err(|e| e.to_string())? {
+    // Snapshot the live budget ONCE per compaction and derive every target from it — the gate
+    // and all fold rounds see the same numbers even if the Settings page flips mid-fold. (A
+    // budget change between compactions just means one convergence burst at the new targets;
+    // the covered_bytes fingerprint is budget-independent, so nothing goes stale.)
+    let budget_bytes = llm.context_budget().max_bytes;
+    if !force && !over_threshold(llm, vault_dir, slug, budget_bytes).map_err(|e| e.to_string())? {
         return Ok(());
     }
+    let targets = CompactTargets::for_budget(budget_bytes);
     for _ in 0..MAX_FOLD_ROUNDS {
-        match run_compaction_inner(llm, sem, vault_dir, slug).await {
+        match run_compaction_inner(llm, sem, vault_dir, slug, targets).await {
             Ok(Some(_)) => continue,   // folded a round; check whether more is needed
             Ok(None) => return Ok(()), // converged / nothing to fold
             Err(e) => return Err(e.to_string()),
@@ -276,9 +301,14 @@ pub async fn run_compaction(
 }
 
 /// The auto path's threshold gate: auto-compact enabled AND the *effective* size (summary + tail,
-/// not raw `conversation.len()`) is at or over `compact_threshold * AI_BUDGET_BYTES`. Cheap: one
-/// small file read + an O(k) sum.
-fn over_threshold(llm: &LlmBackend, vault_dir: &Path, slug: &str) -> Result<bool, MemoryError> {
+/// not raw `conversation.len()`) is at or over `compact_threshold * budget_bytes` (the caller's
+/// one budget snapshot). Cheap: one small file read + an O(k) sum.
+fn over_threshold(
+    llm: &LlmBackend,
+    vault_dir: &Path,
+    slug: &str,
+    budget_bytes: usize,
+) -> Result<bool, MemoryError> {
     let settings = llm.settings();
     if !settings.auto_compact {
         return Ok(false);
@@ -287,7 +317,7 @@ fn over_threshold(llm: &LlmBackend, vault_dir: &Path, slug: &str) -> Result<bool
     let turns = split_turns(&conversation);
     let compacted = store::read_compacted(vault_dir, slug)?;
     let win = effective_window(&turns, compacted.as_ref());
-    let trigger = (settings.compact_threshold * AI_BUDGET_BYTES as f32) as usize;
+    let trigger = (settings.compact_threshold * budget_bytes as f32) as usize;
     Ok(win.effective_bytes >= trigger)
 }
 
@@ -305,6 +335,12 @@ pub async fn maybe_run_compaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-dynamic-budget fixed targets (16 KiB base) — the regression guard: with this
+    /// budget every fold decision must be byte-identical to the old constants.
+    fn targets_16k() -> CompactTargets {
+        CompactTargets::for_budget(16 * 1024)
+    }
 
     fn turns_of(sizes: &[usize]) -> Vec<String> {
         // Each "turn" is a heading line + a body of `size` filler bytes; split_turns accounting is
@@ -375,43 +411,73 @@ mod tests {
     }
 
     #[test]
+    fn for_budget_derives_the_fixed_fractions() {
+        let t = CompactTargets::for_budget(16 * 1024);
+        assert_eq!(t.tail_target_bytes, 16 * 1024 * 2 / 5);
+        assert_eq!(t.summary_max_bytes, 16 * 1024 * 3 / 10);
+        assert_eq!(t.summarizer_input_bytes, 16 * 1024);
+
+        // Targets scale with the live budget (the whole point of dynamic budgets).
+        let big = CompactTargets::for_budget(64 * 1024);
+        assert_eq!(big.tail_target_bytes, 64 * 1024 * 2 / 5);
+        assert_eq!(big.summary_max_bytes, 64 * 1024 * 3 / 10);
+        assert_eq!(big.summarizer_input_bytes, 64 * 1024);
+    }
+
+    #[test]
+    fn a_larger_budget_folds_less() {
+        // A transcript over the 16 KiB tail target but under a 64 KiB one: the small budget
+        // folds, the big budget is a no-op.
+        let per = 400usize;
+        let small = targets_16k();
+        let count = (small.tail_target_bytes / per) + 6;
+        let turns = turns_of(&vec![per; count]);
+        assert!(choose_high_water(&turns, 0, None, small) > 0);
+        assert_eq!(
+            choose_high_water(&turns, 0, None, CompactTargets::for_budget(64 * 1024)),
+            0,
+            "the same transcript fits a larger budget's tail target"
+        );
+    }
+
+    #[test]
     fn choose_high_water_is_monotonic_and_leaves_a_tail() {
         // Many small turns, total well over the tail target — folding must advance but keep ≥1 tail.
+        let t = targets_16k();
         let per = 400usize;
-        let count = (COMPACT_TAIL_TARGET_BYTES / per) + 6;
+        let count = (t.tail_target_bytes / per) + 6;
         let turns = turns_of(&vec![per; count]);
-        let k = choose_high_water(&turns, 0, None);
+        let k = choose_high_water(&turns, 0, None, t);
         assert!(k < turns.len(), "leaves ≥1 verbatim tail turn");
         assert!(k > 0, "advanced past the oldest turns");
         // The folded slice fits the summarizer input bound (no silent loss).
-        assert!(prefix_bytes(&turns, k) <= COMPACT_SUMMARIZER_INPUT_BYTES);
+        assert!(prefix_bytes(&turns, k) <= t.summarizer_input_bytes);
         // And the resulting tail is at/under target (or one turn shy of it).
-        assert!(tail_bytes(&turns, k) <= COMPACT_TAIL_TARGET_BYTES + per);
+        assert!(tail_bytes(&turns, k) <= t.tail_target_bytes + per);
     }
 
     #[test]
     fn choose_high_water_single_giant_turn_is_a_no_op() {
         // One turn larger than the summarizer input, plus a small tail turn: the giant can't be
         // folded (would overflow the input), so k stays at k_old and the tail stays over budget.
+        let t = targets_16k();
         let turns = vec![
-            format!(
-                "## user\n{}",
-                "x".repeat(COMPACT_SUMMARIZER_INPUT_BYTES + 500)
-            ),
+            format!("## user\n{}", "x".repeat(t.summarizer_input_bytes + 500)),
             "## user\nsmall tail".to_string(),
         ];
-        let k = choose_high_water(&turns, 0, None);
+        let k = choose_high_water(&turns, 0, None, t);
         assert_eq!(k, 0, "a single over-budget turn is never folded");
     }
 
     #[test]
     fn choose_high_water_never_folds_the_final_turn() {
+        let t = targets_16k();
         let turns = turns_of(&[50, 50]); // tiny, under target
-        let k = choose_high_water(&turns, 0, None);
+        let k = choose_high_water(&turns, 0, None, t);
         assert_eq!(k, 0, "under target ⇒ nothing to fold");
         // Even a big two-turn transcript keeps the last turn verbatim.
-        let big = turns_of(&[COMPACT_TAIL_TARGET_BYTES, 200]);
-        let k = choose_high_water(&big, 0, None);
+        let big = turns_of(&[t.tail_target_bytes, 200]);
+        let k = choose_high_water(&big, 0, None, t);
         assert!(k < big.len());
     }
 

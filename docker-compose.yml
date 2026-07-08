@@ -23,6 +23,9 @@ services:
       # Reach Ollama over the compose network by service name, NOT localhost.
       IDEA_VAULT_OLLAMA_URL: "http://ollama:11434"
       IDEA_VAULT_OLLAMA_MODEL: "${IDEA_VAULT_OLLAMA_MODEL:-qwen3.5:4b}"
+      # Initial Ollama context-window override in tokens; 0 = auto (docs/adr/0014). Forwarded
+      # from .env so the containerized run honors it; still retunable live via /settings.
+      IDEA_VAULT_OLLAMA_CTX_TOKENS: "${IDEA_VAULT_OLLAMA_CTX_TOKENS:-0}"
       RUST_LOG: "${RUST_LOG:-info}"
     ports:
       # Loopback-only: open http://localhost:<IDEA_VAULT_HOST_PORT> on the host, not

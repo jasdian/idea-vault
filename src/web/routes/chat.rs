@@ -12,7 +12,6 @@ use axum::Form;
 use chrono::Utc;
 use serde::Deserialize;
 
-use crate::ai::budget::ContextBudget;
 use crate::ai::ollama::ChatMessage;
 use crate::app::AppState;
 use crate::domain::IdeaState;
@@ -20,7 +19,7 @@ use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::respond_with_transcript;
-use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
+use crate::web::routes::reindex_logged;
 use crate::web::WebError;
 
 /// The rigorous-foil persona for free chat (CLAUDE.md: steelman, then stress-test).
@@ -109,7 +108,7 @@ pub async fn chat(
 /// human-readable message on failure for the indicator to surface.
 async fn run_chat(state: &AppState, slug: &str) -> Result<(), String> {
     let vault_dir = &state.config.vault_dir;
-    let context = memory::load::load_context(vault_dir, slug, ContextBudget::new(AI_BUDGET_BYTES))
+    let context = memory::load::load_context(vault_dir, slug, state.llm.context_budget())
         .map_err(|e| e.to_string())?;
     let prompt = format!("{FOIL_INSTRUCTION}\n\n{}", context.text);
 

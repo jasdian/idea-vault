@@ -98,9 +98,10 @@ fn meter_line(
     turns: usize,
     effective_bytes: usize,
     compacted_through: Option<usize>,
+    budget_bytes: usize,
 ) -> String {
     let kb = effective_bytes.div_ceil(1024);
-    let budget_kb = crate::web::routes::AI_BUDGET_BYTES / 1024;
+    let budget_kb = budget_bytes.div_ceil(1024);
     let plural = if turns == 1 { "" } else { "s" };
     let compacted = match compacted_through {
         Some(k) => format!(" · compacted through turn {k}"),
@@ -148,6 +149,7 @@ pub(crate) fn transcript_inner(
     model: &str,
     conversation: &str,
     pending: crate::web::jobs::Pending,
+    budget_bytes: usize,
 ) -> Result<String, WebError> {
     use crate::web::jobs::Pending;
     let turns_html = turns_to_html(slug, conversation)?;
@@ -187,6 +189,7 @@ pub(crate) fn transcript_inner(
         all_turns.len(),
         win.effective_bytes,
         win.compacted_through,
+        budget_bytes,
     ));
     Ok(html)
 }
@@ -205,6 +208,7 @@ pub(crate) fn respond_with_transcript(
         &state.llm.model(),
         &conversation,
         pending,
+        state.llm.context_budget().max_bytes,
     )?))
 }
 
@@ -260,6 +264,7 @@ pub async fn history_page(
         &state.llm.model(),
         &conversation,
         crate::web::jobs::Pending::Idle,
+        state.llm.context_budget().max_bytes,
     )?;
     Ok(crate::web::templates::HistoryPage {
         title: idea.frontmatter.title.clone(),
@@ -383,13 +388,15 @@ pub(crate) fn build_discussion(
     can_store: bool,
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
+    budget_bytes: usize,
 ) -> Result<crate::web::templates::Discussion, WebError> {
     // D20 per-state remedy copy (docs/05-ai-integration.md).
     let (ai_available, unavailable_hint) = availability_hint(backend, health, model);
 
     // The #transcript inner is the one shared renderer — so a fresh page load carries the same
     // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
-    let transcript_html = transcript_inner(vault_dir, slug, model, conversation, pending)?;
+    let transcript_html =
+        transcript_inner(vault_dir, slug, model, conversation, pending, budget_bytes)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),
@@ -415,6 +422,7 @@ fn render_panel(
     model: &str,
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
+    budget_bytes: usize,
 ) -> Result<String, WebError> {
     use askama::Template as _;
 
@@ -439,6 +447,7 @@ fn render_panel(
         can_store,
         skill_names,
         pending,
+        budget_bytes,
     )?
     .render()
     .map_err(|e| WebError::Internal(format!("template render: {e}")))
@@ -473,6 +482,7 @@ pub async fn idea_page(
         &state.llm.model(),
         skill_names,
         pending,
+        state.llm.context_budget().max_bytes,
     )?;
     Ok(IdeaPage {
         title: idea.frontmatter.title.clone(),

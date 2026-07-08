@@ -5,7 +5,6 @@
 use axum::extract::{Path, State};
 use chrono::Utc;
 
-use crate::ai::budget::ContextBudget;
 use crate::app::AppState;
 use crate::concepts;
 use crate::domain::IdeaState;
@@ -13,7 +12,7 @@ use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::{build_discussion, respond_with_transcript};
-use crate::web::routes::{reindex_logged, AI_BUDGET_BYTES};
+use crate::web::routes::reindex_logged;
 use crate::web::templates::{render_markdown, Discussion, Stored};
 use crate::web::WebError;
 
@@ -56,7 +55,7 @@ pub async fn store_idea(
         &state.ai_semaphore,
         &vault_dir,
         &slug,
-        ContextBudget::new(AI_BUDGET_BYTES),
+        state.llm.context_budget(),
     )
     .await?;
     reindex_logged(&state);
@@ -86,8 +85,7 @@ pub async fn reopen_idea(
 
     // D13: MEMORY.md always, fact bodies under budget — the next chat turn (D11) reassembles
     // the same context; loading here validates it and surfaces inclusion counts.
-    let loaded =
-        memory::load::load_context(&vault_dir, &slug, ContextBudget::new(AI_BUDGET_BYTES))?;
+    let loaded = memory::load::load_context(&vault_dir, &slug, state.llm.context_budget())?;
     tracing::info!(
         slug,
         included_memory = loaded.included_memory,
@@ -115,6 +113,7 @@ pub async fn reopen_idea(
         true,
         skill_names,
         pending,
+        state.llm.context_budget().max_bytes,
     )
 }
 
@@ -187,7 +186,7 @@ async fn run_skill_work(
         &state.config.vault_dir,
         slug,
         &skill,
-        ContextBudget::new(AI_BUDGET_BYTES),
+        state.llm.context_budget(),
         &progress,
     )
     .await
@@ -278,7 +277,7 @@ async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Re
         &state.config.vault_dir,
         slug,
         angles,
-        ContextBudget::new(AI_BUDGET_BYTES),
+        state.llm.context_budget(),
         &progress,
     )
     .await

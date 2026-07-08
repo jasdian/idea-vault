@@ -10,9 +10,16 @@ use idea_vault::ai::budget::ContextBudget;
 use idea_vault::ai::{LlmBackend, OllamaClient};
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState};
 use idea_vault::memory::compact;
+use idea_vault::memory::compact::CompactTargets;
 use idea_vault::vault::store;
-use support::{spawn, spawn_sequence, ChatScript, MockOllama};
+use support::{spawn, spawn_sequence, spawn_with_context_length, ChatScript, MockOllama};
 use tokio::sync::Semaphore;
+
+/// The pre-dynamic-budget fixed targets (16 KiB base): with these, every fold decision below is
+/// byte-identical to the old constants — the regression guard for the dynamic-budget change.
+fn targets_16k() -> CompactTargets {
+    CompactTargets::for_budget(16 * 1024)
+}
 
 /// Per-turn byte accounting used for `covered_bytes` (same as the engine/assembler).
 fn prefix_bytes(turns: &[String], k: usize) -> usize {
@@ -65,7 +72,7 @@ async fn inner_folds_exactly_the_head_slice_and_writes_a_correct_fingerprint() {
     append_marked(vault, "i", 0, 10); // ~10 KB transcript, well over the 0.40 tail target
 
     let sem = Semaphore::new(2);
-    let out = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let out = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .expect("a fold happened");
@@ -109,14 +116,14 @@ async fn second_round_reuses_the_prior_summary_and_never_refolds_the_head() {
     append_marked(vault, "i", 0, 10);
 
     let sem = Semaphore::new(2);
-    let r1 = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let r1 = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .unwrap();
 
     // Append more head-growing turns so round 2 has a new slice to fold.
     append_marked(vault, "i", 10, 8);
-    let r2 = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let r2 = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .unwrap();
@@ -155,12 +162,12 @@ async fn empty_model_output_aborts_and_leaves_the_previous_summary_intact() {
     append_marked(vault, "i", 0, 10);
 
     let sem = Semaphore::new(2);
-    let first = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let first = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .unwrap();
     append_marked(vault, "i", 10, 8);
-    let err = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let err = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -187,7 +194,7 @@ async fn delete_turn_after_the_fold_boundary_preserves_the_fingerprint() {
     seed(vault, "i", IdeaState::InDiscussion);
     append_marked(vault, "i", 0, 10);
     let sem = Semaphore::new(2);
-    let folded = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let folded = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .unwrap();
@@ -218,7 +225,7 @@ async fn delete_turn_inside_the_fold_breaks_the_fingerprint_and_rebuilds_from_ze
     seed(vault, "i", IdeaState::InDiscussion);
     append_marked(vault, "i", 0, 10);
     let sem = Semaphore::new(2);
-    let folded = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let folded = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .unwrap();
@@ -235,7 +242,7 @@ async fn delete_turn_inside_the_fold_breaks_the_fingerprint_and_rebuilds_from_ze
     );
 
     // The next compaction rebuilds from k_old = 0 (the stale summary is discarded, not extended).
-    let rebuilt = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i")
+    let rebuilt = compact::run_compaction_inner(&backend(&mock), &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .unwrap();
@@ -274,7 +281,7 @@ async fn store_reads_the_full_transcript_and_never_touches_compacted_md() {
     let sem = Semaphore::new(2);
     let llm = backend(&mock);
 
-    compact::run_compaction_inner(&llm, &sem, vault, "i")
+    compact::run_compaction_inner(&llm, &sem, vault, "i", targets_16k())
         .await
         .unwrap()
         .unwrap();
@@ -300,5 +307,65 @@ async fn store_reads_the_full_transcript_and_never_touches_compacted_md() {
     assert_eq!(
         compacted_before, compacted_after,
         "Store never rewrites or deletes compacted.md"
+    );
+}
+
+#[tokio::test]
+async fn a_big_native_context_window_raises_the_threshold_so_no_fold_fires() {
+    // ~15 KB transcript: over the 0.80 × 16 KiB fallback trigger, but far under the trigger once
+    // /api/show advertises a 32k-token window (budget 64 KiB) — the dynamic budget in action.
+    let mock = spawn_with_context_length(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["## Decisions\n- should never be asked".into()]),
+        32_768,
+    )
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path();
+    seed(vault, "i", IdeaState::InDiscussion);
+    append_marked(vault, "i", 0, 12);
+
+    let sem = Semaphore::new(2);
+    let llm = backend(&mock);
+    llm.refresh_ollama_ctx().await; // the boot-time cache warm
+    compact::run_compaction(&llm, &sem, vault, "i", false)
+        .await
+        .unwrap();
+
+    assert!(
+        store::read_compacted(vault, "i").unwrap().is_none(),
+        "under the 32k-window threshold, the auto path must not fold"
+    );
+    assert!(mock.chat_bodies().is_empty(), "no model call was made");
+}
+
+#[tokio::test]
+async fn an_unanswered_api_show_falls_back_to_the_16k_budget_and_still_folds() {
+    // The plain mock 404s /api/show: the budget stays at the pre-dynamic 16 KiB fallback, so the
+    // same ~15 KB transcript trips the 0.80 threshold and the auto path folds as before.
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["## Decisions\n- folded at the fallback budget".into()]),
+    )
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path();
+    seed(vault, "i", IdeaState::InDiscussion);
+    append_marked(vault, "i", 0, 12);
+
+    let sem = Semaphore::new(2);
+    let llm = backend(&mock);
+    llm.refresh_ollama_ctx().await; // 404 → nothing cached → fallback budget
+    compact::run_compaction(&llm, &sem, vault, "i", false)
+        .await
+        .unwrap();
+
+    let compacted = store::read_compacted(vault, "i").unwrap().unwrap();
+    assert!(compacted.frontmatter.compacted_through > 0);
+    // The chat call carried num_ctx at the fallback window (the silent-truncation fix).
+    let body = &mock.chat_bodies()[0];
+    assert!(
+        body.contains("\"num_ctx\":8192"),
+        "fold call sends the fallback num_ctx: {body}"
     );
 }

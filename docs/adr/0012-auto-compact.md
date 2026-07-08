@@ -4,6 +4,13 @@
 - **Date:** 2026-07-07
 - **Deciders:** owner
 
+> **Amended by [ADR-0014](./0014-dynamic-context-budget.md).** The fixed `AI_BUDGET_BYTES = 16 * 1024`
+> constant and the specific "16 KiB" / "~16 KB of ~16 KB" figures below are superseded: the budget
+> is now derived live per backend/model (`LlmBackend::context_budget()`), and compaction's targets
+> (`memory::compact::CompactTargets`) are the same 0.80/0.40/0.30/1.00 fractions applied to that
+> live budget instead of to a constant. Every other decision here — sidecar not truth, prefix
+> fingerprint, pre-emptive best-effort fold, bounded high-water advance — is unchanged.
+
 ## Context
 
 A discussion that "runs an idea into the ground" grows without bound, but a local model

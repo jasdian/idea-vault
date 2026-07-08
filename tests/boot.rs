@@ -42,6 +42,8 @@ fn test_state() -> AppState {
         },
         auto_compact: true,
         compact_threshold: 0.80,
+        ollama_ctx_tokens: 0,
+        claude_ctx_tokens: 0,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");

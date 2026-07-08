@@ -36,6 +36,8 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         claude: default_claude_settings(&vault_dir),
         auto_compact: true,
         compact_threshold: 0.80,
+        ollama_ctx_tokens: 0,
+        claude_ctx_tokens: 0,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");

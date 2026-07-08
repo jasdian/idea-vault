@@ -44,6 +44,13 @@ pub struct Config {
     /// The effective-size fraction of the AI budget at which auto-compact fires (default 0.80,
     /// clamped 0.5..=0.95).
     pub compact_threshold: f32,
+    /// Initial Ollama context-window override in tokens; `0` (default) = auto — derive from the
+    /// model via `/api/show`. Nonzero values are clamped to 1024..=2_000_000. Initial value only:
+    /// the Settings page retunes it live (ADR-0011).
+    pub ollama_ctx_tokens: usize,
+    /// Initial claude-code context-window override in tokens; `0` (default) = auto — derive from
+    /// the model name. Nonzero values are clamped to 1024..=2_000_000. Initial value only.
+    pub claude_ctx_tokens: usize,
 }
 
 /// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
@@ -82,6 +89,10 @@ const DEFAULT_OLLAMA_TEMPERATURE: f32 = 0.7;
 const DEFAULT_CLAUDE_EFFORT: &str = "high";
 const DEFAULT_AUTO_COMPACT: bool = true;
 const DEFAULT_COMPACT_THRESHOLD: f32 = 0.80;
+/// Clamp band for a nonzero context-window override (tokens): below 1k is useless, above 2M is
+/// beyond any supported model (the claude 1M window fits comfortably).
+pub const CTX_TOKENS_MIN: usize = 1_024;
+pub const CTX_TOKENS_MAX: usize = 2_000_000;
 
 impl Config {
     /// Build configuration from the real process environment.
@@ -167,6 +178,10 @@ impl Config {
             .filter(|t| (0.5..=0.95).contains(t))
             .unwrap_or(DEFAULT_COMPACT_THRESHOLD);
 
+        // Per-backend context-window overrides (dynamic budget): 0 = auto; nonzero clamped.
+        let ollama_ctx_tokens = parse_ctx_tokens(&lookup, "IDEA_VAULT_OLLAMA_CTX_TOKENS");
+        let claude_ctx_tokens = parse_ctx_tokens(&lookup, "IDEA_VAULT_CLAUDE_CTX_TOKENS");
+
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
                 .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
@@ -199,7 +214,29 @@ impl Config {
             claude,
             auto_compact,
             compact_threshold,
+            ollama_ctx_tokens,
+            claude_ctx_tokens,
         }
+    }
+}
+
+/// Parse a context-window override env var: unset or `0` = auto (`0`); unparsable = auto with a
+/// warning; any other value is clamped into the supported 1024..=2_000_000 token band.
+fn parse_ctx_tokens(lookup: &impl Fn(&str) -> Option<String>, key: &str) -> usize {
+    match lookup(key) {
+        None => 0,
+        Some(raw) => match raw.trim().parse::<usize>() {
+            Ok(0) => 0,
+            Ok(n) => n.clamp(CTX_TOKENS_MIN, CTX_TOKENS_MAX),
+            Err(_) => {
+                tracing::warn!(
+                    value = %raw,
+                    key,
+                    "context-tokens override unparsable as usize, falling back to 0 (auto)"
+                );
+                0
+            }
+        },
     }
 }
 
@@ -262,6 +299,34 @@ mod tests {
         // Auto-compact defaults on, threshold 0.80.
         assert!(cfg.auto_compact);
         assert_eq!(cfg.compact_threshold, 0.80);
+        // Context windows default to auto (0).
+        assert_eq!(cfg.ollama_ctx_tokens, 0);
+        assert_eq!(cfg.claude_ctx_tokens, 0);
+    }
+
+    #[test]
+    fn ctx_tokens_override_zero_clamp_and_fallback() {
+        // Explicit 0 stays auto; a plain value passes through.
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_OLLAMA_CTX_TOKENS", "0");
+        map.insert("IDEA_VAULT_CLAUDE_CTX_TOKENS", "64000");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert_eq!(cfg.ollama_ctx_tokens, 0);
+        assert_eq!(cfg.claude_ctx_tokens, 64_000);
+
+        // Nonzero values are clamped into 1024..=2_000_000.
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_OLLAMA_CTX_TOKENS", "12");
+        map.insert("IDEA_VAULT_CLAUDE_CTX_TOKENS", "9999999");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert_eq!(cfg.ollama_ctx_tokens, CTX_TOKENS_MIN);
+        assert_eq!(cfg.claude_ctx_tokens, CTX_TOKENS_MAX);
+
+        // Unparsable falls back to auto (0), not a panic.
+        let mut map = HashMap::new();
+        map.insert("IDEA_VAULT_OLLAMA_CTX_TOKENS", "lots");
+        let cfg = Config::from_lookup(lookup_from(map));
+        assert_eq!(cfg.ollama_ctx_tokens, 0);
     }
 
     #[test]
