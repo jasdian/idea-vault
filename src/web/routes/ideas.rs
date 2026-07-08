@@ -139,6 +139,16 @@ fn error_block(message: &str) -> String {
     )
 }
 
+/// A one-shot neutral outcome line (a job that finished fine but changed nothing, e.g. a forced
+/// compaction with nothing to fold) — the quiet sibling of [`error_block`]: same transcript slot,
+/// no alarm styling.
+fn notice_block(message: &str) -> String {
+    format!(
+        r#"<div class="foil-notice" role="status">{}</div>"#,
+        esc(message)
+    )
+}
+
 /// The complete inner HTML of `#transcript`: the turns, then a job indicator / error block if a
 /// job is active, then the usage meter. This is the single renderer every transcript response
 /// goes through — the idea page, the poll endpoint, and chat/skill/swarm/delete all emit it, so
@@ -171,6 +181,7 @@ pub(crate) fn transcript_inner(
     match pending {
         Pending::Running { secs, note } => html.push_str(&pending_block(slug, secs, &note)),
         Pending::Failed(msg) => html.push_str(&error_block(&msg)),
+        Pending::Notice(msg) => html.push_str(&notice_block(&msg)),
         Pending::Idle => {}
     }
     // The full transcript is never hidden (every turn is rendered above); this collapsible

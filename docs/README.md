@@ -64,7 +64,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D30) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0015 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0016 | — |
 
 ## Locked decisions (at a glance)
 
@@ -75,7 +75,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Code:** single crate, strict one-way module deps ([ADR-0005](./adr/0005-single-crate-vs-workspace.md)).
 - **Swarm:** bounded concurrency + context budget ([ADR-0006](./adr/0006-bounded-concurrency-swarm.md)).
 - **State:** canonical in frontmatter ([ADR-0007](./adr/0007-state-in-frontmatter-not-db.md)).
-- **Auto-compact:** a fingerprinted, deletable `compacted.md` sidecar rolls up the conversation head, folded pre-emptively and best-effort before each reply ([ADR-0012](./adr/0012-auto-compact.md)).
+- **Auto-compact:** a fingerprinted, deletable `compacted.md` sidecar rolls up the conversation head, folded pre-emptively and best-effort before each reply ([ADR-0012](./adr/0012-auto-compact.md)); a forced "compact now" fold targets a zero verbatim tail (not the automatic path's 0.40 target) and a genuine no-op surfaces as a one-shot notice ([ADR-0016](./adr/0016-forced-compact-folds-fully.md)).
 - **Deployment:** app + Ollama in containers, GPU optional (override), env-driven config ([ADR-0008](./adr/0008-containerized-local-deployment.md)).
 - **claude-code in containers:** host CLI bind-mounted read-only, auth via `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`, CLI state on a `claude-state` volume via `HOME=/claude` ([ADR-0013](./adr/0013-containerized-claude-code.md)).
 - **Context budget:** derived live per backend/model (`/api/show` for Ollama, model-name mapping for claude-code), overridable per backend, no longer a fixed constant ([ADR-0014](./adr/0014-dynamic-context-budget.md)).

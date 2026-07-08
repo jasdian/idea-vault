@@ -53,6 +53,18 @@ impl CompactTargets {
             summarizer_input_bytes: budget_bytes,
         }
     }
+
+    /// Targets for an owner-forced fold (ADR-0016): a zero tail target, so `choose_high_water`
+    /// advances until only the final turn stays verbatim (or the summarizer-input bound stops the
+    /// round). The auto path's 2/5 tail target exists to avoid *unnecessary* folds; "compact now"
+    /// is the owner declaring the fold necessary, so it must not defer to that slack — under a
+    /// large dynamic budget (ADR-0014) the 2/5 target made the button a silent no-op.
+    pub fn forced(budget_bytes: usize) -> Self {
+        Self {
+            tail_target_bytes: 0,
+            ..Self::for_budget(budget_bytes)
+        }
+    }
 }
 
 /// Max fold rounds per compaction (a cold reopened idea converges in one compaction instead of
@@ -268,36 +280,65 @@ pub async fn run_compaction_inner(
     Ok(Some(compacted))
 }
 
+/// What a whole compaction ([`run_compaction`]) actually did — so the manual route can tell an
+/// honest no-op apart from a real fold and show the owner a notice instead of nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactOutcome {
+    /// At least one round folded and rewrote `compacted.md`.
+    Folded,
+    /// No round had anything to fold (under threshold, single-turn tail, or already compacted).
+    NothingToFold,
+}
+
 /// Fold `slug` toward the tail target. When `force` is false this first applies the settings gate
 /// (auto-compact on, and effective size at/over `compact_threshold` of the budget) and no-ops
-/// otherwise — so no threshold logic sits on the request hot path. Loops up to
-/// [`MAX_FOLD_ROUNDS`] so a cold/long transcript converges in one compaction. `conversation.md` is
-/// never written; only `compacted.md` is (re)written. Returns a human-readable error string for
-/// the job indicator.
+/// otherwise — so no threshold logic sits on the request hot path. When `force` is true the gate
+/// is skipped and the fold runs at [`CompactTargets::forced`] (zero tail target — fold everything
+/// except the final turn, ADR-0016). Loops up to [`MAX_FOLD_ROUNDS`] so a cold/long transcript
+/// converges in one compaction. `conversation.md` is never written; only `compacted.md` is
+/// (re)written. Returns a human-readable error string for the job indicator.
 pub async fn run_compaction(
     llm: &LlmBackend,
     sem: &Semaphore,
     vault_dir: &Path,
     slug: &str,
     force: bool,
-) -> Result<(), String> {
+) -> Result<CompactOutcome, String> {
     // Snapshot the live budget ONCE per compaction and derive every target from it — the gate
     // and all fold rounds see the same numbers even if the Settings page flips mid-fold. (A
     // budget change between compactions just means one convergence burst at the new targets;
     // the covered_bytes fingerprint is budget-independent, so nothing goes stale.)
     let budget_bytes = llm.context_budget().max_bytes;
     if !force && !over_threshold(llm, vault_dir, slug, budget_bytes).map_err(|e| e.to_string())? {
-        return Ok(());
+        return Ok(CompactOutcome::NothingToFold);
     }
-    let targets = CompactTargets::for_budget(budget_bytes);
+    let targets = if force {
+        CompactTargets::forced(budget_bytes)
+    } else {
+        CompactTargets::for_budget(budget_bytes)
+    };
+    let mut rounds = 0usize;
     for _ in 0..MAX_FOLD_ROUNDS {
         match run_compaction_inner(llm, sem, vault_dir, slug, targets).await {
-            Ok(Some(_)) => continue,   // folded a round; check whether more is needed
-            Ok(None) => return Ok(()), // converged / nothing to fold
+            Ok(Some(c)) => {
+                rounds += 1;
+                tracing::info!(
+                    slug,
+                    force,
+                    round = rounds,
+                    compacted_through = c.frontmatter.compacted_through,
+                    "compaction folded a round"
+                );
+            }
+            Ok(None) => break, // converged / nothing to fold
             Err(e) => return Err(e.to_string()),
         }
     }
-    Ok(())
+    if rounds == 0 {
+        tracing::debug!(slug, force, "compaction had nothing to fold");
+        return Ok(CompactOutcome::NothingToFold);
+    }
+    Ok(CompactOutcome::Folded)
 }
 
 /// The auto path's threshold gate: auto-compact enabled AND the *effective* size (summary + tail,
@@ -329,7 +370,9 @@ pub async fn maybe_run_compaction(
     vault_dir: &Path,
     slug: &str,
 ) -> Result<(), String> {
-    run_compaction(llm, sem, vault_dir, slug, false).await
+    run_compaction(llm, sem, vault_dir, slug, false)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -422,6 +465,45 @@ mod tests {
         assert_eq!(big.tail_target_bytes, 64 * 1024 * 2 / 5);
         assert_eq!(big.summary_max_bytes, 64 * 1024 * 3 / 10);
         assert_eq!(big.summarizer_input_bytes, 64 * 1024);
+    }
+
+    #[test]
+    fn forced_targets_zero_the_tail_and_keep_the_other_bounds() {
+        let budget = 400 * 1024;
+        let forced = CompactTargets::forced(budget);
+        let auto = CompactTargets::for_budget(budget);
+        assert_eq!(forced.tail_target_bytes, 0);
+        assert_eq!(forced.summary_max_bytes, auto.summary_max_bytes);
+        assert_eq!(forced.summarizer_input_bytes, auto.summarizer_input_bytes);
+    }
+
+    #[test]
+    fn forced_targets_fold_everything_but_the_final_turn() {
+        // A conversation far under the auto tail target (the "compact now on a big budget" case,
+        // ADR-0016): the auto targets are a no-op, the forced targets fold all but the last turn.
+        let budget = 400 * 1024;
+        let turns = turns_of(&[400, 400, 400, 400, 400]);
+        assert_eq!(
+            choose_high_water(&turns, 0, None, CompactTargets::for_budget(budget)),
+            0,
+            "auto targets: under the tail target ⇒ nothing to fold"
+        );
+        assert_eq!(
+            choose_high_water(&turns, 0, None, CompactTargets::forced(budget)),
+            turns.len() - 1,
+            "forced targets: everything except the final turn"
+        );
+    }
+
+    #[test]
+    fn forced_targets_on_a_single_turn_are_a_no_op() {
+        // One turn ⇒ nothing foldable even when forced (guard (c): the final turn stays verbatim),
+        // so run_compaction reports NothingToFold and the route shows the notice.
+        let turns = turns_of(&[400]);
+        assert_eq!(
+            choose_high_water(&turns, 0, None, CompactTargets::forced(400 * 1024)),
+            0
+        );
     }
 
     #[test]

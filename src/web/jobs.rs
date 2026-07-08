@@ -22,10 +22,13 @@ use std::time::Instant;
 
 use tokio::task::AbortHandle;
 
-/// One idea's job slot. `Failed` is read once (by the next poll) then cleared.
+/// One idea's job slot. `Failed` and `Notice` are read once (by the next poll) then cleared.
 pub enum JobStatus {
     Running,
     Failed(String),
+    /// The job finished fine but changed nothing on disk (e.g. a forced compaction with nothing
+    /// to fold) — a one-shot neutral message, so an honest no-op is never a silent one.
+    Notice(String),
 }
 
 pub struct Job {
@@ -52,6 +55,9 @@ pub enum Pending {
     Running { secs: u64, note: String },
     /// The last job failed; carries the message. Consumed here (cleared from the map).
     Failed(String),
+    /// The last job completed as an honest no-op; carries a neutral one-shot message. Consumed
+    /// here (cleared from the map), exactly like `Failed`.
+    Notice(String),
     /// No job — the transcript on disk is final.
     Idle,
 }
@@ -146,6 +152,22 @@ pub fn mark_failed(jobs: &Jobs, slug: &str, message: String) {
     }
 }
 
+/// The job finished as an honest no-op — keep a neutral message so the next poll can show it,
+/// then it's cleared (same one-shot lifecycle as [`mark_failed`]).
+pub fn mark_notice(jobs: &Jobs, slug: &str, message: String) {
+    if let Ok(mut map) = jobs.lock() {
+        map.insert(
+            slug.to_string(),
+            Job {
+                status: JobStatus::Notice(message),
+                started: Instant::now(),
+                abort: None,
+                note: String::new(),
+            },
+        );
+    }
+}
+
 /// Read (and, for a failure, consume) the current job state for an idea.
 pub fn peek(jobs: &Jobs, slug: &str) -> Pending {
     let Ok(mut map) = jobs.lock() else {
@@ -162,13 +184,17 @@ pub fn peek(jobs: &Jobs, slug: &str) -> Pending {
             note: note.clone(),
         },
         Some(Job {
-            status: JobStatus::Failed(_),
+            status: JobStatus::Failed(_) | JobStatus::Notice(_),
             ..
         }) => match map.remove(slug) {
             Some(Job {
                 status: JobStatus::Failed(msg),
                 ..
             }) => Pending::Failed(msg),
+            Some(Job {
+                status: JobStatus::Notice(msg),
+                ..
+            }) => Pending::Notice(msg),
             _ => Pending::Idle,
         },
         None => Pending::Idle,
@@ -218,5 +244,19 @@ mod tests {
     fn cancel_of_an_idle_slot_is_false() {
         let jobs = new_registry();
         assert!(!cancel(&jobs, "i"));
+    }
+
+    #[test]
+    fn mark_notice_is_consumed_exactly_once() {
+        let jobs = new_registry();
+        assert!(try_claim(&jobs, "i"));
+        mark_notice(&jobs, "i", "nothing to fold".into());
+        match peek(&jobs, "i") {
+            Pending::Notice(msg) => assert_eq!(msg, "nothing to fold"),
+            _ => panic!("expected Notice"),
+        }
+        // One-shot: the next poll is back to Idle, and the slot is claimable again.
+        assert!(matches!(peek(&jobs, "i"), Pending::Idle));
+        assert!(try_claim(&jobs, "i"));
     }
 }

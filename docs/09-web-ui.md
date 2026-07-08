@@ -6,7 +6,8 @@
 > [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md),
 > [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md) (supersedes the earlier SSE decision,
 > [ADR-0004](./adr/0004-sse-token-streaming.md)),
-> [ADR-0011](./adr/0011-live-switchable-llm-backend.md).
+> [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
+> [ADR-0016](./adr/0016-forced-compact-folds-fully.md) (the compact route's `Notice` pending state).
 
 ## Interaction model
 
@@ -49,6 +50,7 @@ flowchart LR
         R13b["POST /settings — apply live settings → settings form"]
         R18["POST /idea/:slug/extract — run knowledge extraction (D30, job) → transcript + indicator"]
         R20["POST /idea/:slug/artifact/:name/delete — remove one artifact file → artifacts panel"]
+        R21["POST /idea/:slug/compact — fold now (ADR-0012/0016, job) → transcript + indicator | notice"]
     end
     subgraph admin["Admin"]
         R10["POST /admin/reindex — rebuild index (D15)"]
@@ -74,12 +76,15 @@ flowchart LR
     R18 --> T_TURN
     R19 --> T_ART["templates/artifact.html (.md) | raw .html export"]
     R20 --> T_ARTS["templates/_artifacts.html"]
+    R21 --> T_TURN
 ```
 
 Route groups map to `web::routes` submodules: `ideas` (R1, R2, R3, R8, R9b, R12, R14), `chat` (R9),
 `memory`/idea-actions (R4–R7, R15, R16 — the module name predates the delete routes but still owns
 them), `settings` (R13, R13b), `admin` (R10, R11, R17), `artifacts` (R18, R19, R20 — knowledge
-extraction and its per-idea artifact files, [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)).
+extraction and its per-idea artifact files, [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)),
+`compact` (R21 — the manual "compact now" fold,
+[ADR-0012](./adr/0012-auto-compact.md)/[ADR-0016](./adr/0016-forced-compact-folds-fully.md)).
 
 ## D16 — HTTP request / middleware pipeline
 
@@ -133,16 +138,18 @@ base.html`.
 ## HTMX / polling patterns
 
 - **Create / actions:** `hx-post` on forms/buttons; server returns a partial that `hx-swap` inserts.
-- **Chat / skill / swarm / extract (background job + poll):** the compose form (or a skill/swarm button)
-  posts to its route; the handler claims the per-idea job slot, persists what it can up front,
-  spawns a detached task, and immediately returns a transcript partial ending in a "thinking…"
-  indicator block. That block is itself an HTMX fragment
+- **Chat / skill / swarm / extract / compact (background job + poll):** the compose form (or a
+  skill/swarm/compact button) posts to its route; the handler claims the per-idea job slot,
+  persists what it can up front, spawns a detached task, and immediately returns a transcript
+  partial ending in a "thinking…" indicator block. That block is itself an HTMX fragment
   (`hx-get="/idea/:slug/pending" hx-trigger="load delay:1500ms" hx-target="#transcript"`) that
   re-fires ~1.5s after it lands; each poll response either re-emits the same self-triggering
   indicator (job still running, with an updated elapsed-seconds count), an error block (job
-  failed — consumed on read), or the finished transcript with no further trigger (job done). This
-  survives navigation because the underlying model call runs in a task detached from any one
-  request ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
+  failed — consumed on read), a neutral notice block (job completed as a genuine no-op — consumed
+  on read the same way, currently only emitted by the manual compact route's `NothingToFold`
+  outcome, [ADR-0016](./adr/0016-forced-compact-folds-fully.md)), or the finished transcript with
+  no further trigger (job done). This survives navigation because the underlying model call runs in
+  a task detached from any one request ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
 - **Out-of-band state refresh:** transcript responses (chat, poll, cancel, skill, swarm, extract,
   compact, delete-turn) append two top-level `hx-swap-oob="true"` fragments after the `#transcript` inner
   HTML: the `#idea-state` subhead badge and the `#idea-actions` block (`_actions.html`, an
@@ -162,8 +169,8 @@ base.html`.
 | Piece | Location |
 |-------|----------|
 | Router + AppState + middleware | `app.rs` |
-| Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts}` |
-| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, extract R18, and the R9b poll endpoint) |
+| Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts,compact}` |
+| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, extract R18, compact R21, and the R9b poll endpoint) |
 | Template structs | `web::templates` |
 | Template sources | `templates/*.html` |
 
@@ -173,4 +180,5 @@ base.html`.
 - [06-concepts/swarm](./06-concepts/swarm.md) — D30, the extraction flow R18/R19/R20 drive.
 - [07-flows](./07-flows.md) — the flows that enter through these routes.
 - [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md), [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
-  [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md).
+  [ADR-0012](./adr/0012-auto-compact.md), [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md),
+  [ADR-0016](./adr/0016-forced-compact-folds-fully.md).

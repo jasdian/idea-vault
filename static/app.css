@@ -415,6 +415,15 @@ h1.title {
 }
 .foil-error strong { font-family: var(--mono); font-size: .8rem; }
 
+/* The quiet sibling of .foil-error: a one-shot neutral outcome ("nothing to fold"), styled as a
+   marginal note rather than an alarm. */
+.foil-notice {
+  margin: 1rem 0 .5rem; padding: .7rem .85rem; border-radius: var(--radius);
+  font-family: var(--mono); font-size: .8rem; color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 5%, var(--paper));
+  border: 1px dashed var(--rule-strong);
+}
+
 .meter {
   font-family: var(--mono); font-size: .72rem; color: var(--faint);
   letter-spacing: .01em; margin: 1rem 0 .25rem; padding-top: .5rem;

@@ -11,6 +11,15 @@
 > live budget instead of to a constant. Every other decision here — sidecar not truth, prefix
 > fingerprint, pre-emptive best-effort fold, bounded high-water advance — is unchanged.
 
+> **Amended by [ADR-0016](./0016-forced-compact-folds-fully.md).** This ADR's description of the
+> manual route — "folds on demand … ignoring the toggle/threshold" — is superseded only for what a
+> forced fold *targets*: `force = true` now selects `tail_target_bytes: 0`
+> (`CompactTargets::forced`) instead of reusing the automatic path's 0.40 tail target, so a forced
+> fold advances until only the final turn stays verbatim, and a genuine no-op surfaces as a one-shot
+> `Notice` rather than a silent completed job. Everything else here — sidecar not truth, prefix
+> fingerprint, the automatic phase-0 path's 0.80/0.40/0.30/1.00 fractions, bounded high-water
+> advance, refusal on `Stored` — is unchanged.
+
 ## Context
 
 A discussion that "runs an idea into the ground" grows without bound, but a local model
