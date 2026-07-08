@@ -48,6 +48,18 @@ xdg-open http://localhost:3000     # or just browse to it
 docker compose down            # stop; named volumes (index, models) persist
 ```
 
+> **Using claude-code? Pin the override in `.env`.** The `-f` flags are per-invocation: a later
+> plain `docker compose up -d` recreates the stack **without** the claude override and the foil
+> goes offline ("the `claude` CLI isn't runnable"). Make it permanent by setting, in `.env`:
+>
+> ```dotenv
+> COMPOSE_FILE=docker-compose.yml:docker-compose.claude.yml
+> ```
+>
+> From then on every `docker compose` command (`up -d`, `restart`, `down`, …) includes the
+> claude layer with no flags. Order matters — base file first; insert `docker-compose.gpu.yml`
+> before the claude entry if you run GPU mode.
+
 Until the model is pulled, the app runs fine but shows a **degraded AI** banner — by design.
 
 ## Choosing a model
