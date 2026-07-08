@@ -77,6 +77,30 @@ async fn chat_persists_both_turns_and_returns_the_transcript() {
 }
 
 #[tokio::test]
+async fn first_chat_turn_carries_oob_badge_and_actions() {
+    // The first turn flips Draft → InDiscussion server-side while the swap only targets
+    // #transcript — the response must carry out-of-band fragments so the subhead badge and the
+    // moves/store controls update without a full reload.
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::Draft);
+
+    let (status, body) = post_form(state.clone(), "/idea/chatty/chat", "message=push").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("hx-swap-oob"), "OOB fragments present");
+    assert!(body.contains("state--in_discussion"), "badge flipped");
+    assert!(body.contains("id=\"idea-actions\""));
+    assert!(
+        body.contains("/idea/chatty/store"),
+        "store control appears once discussion opens"
+    );
+
+    // The poll completion response re-asserts the same fragments.
+    let final_body = support::web::poll_until(state, "/idea/chatty/pending", "turn--foil").await;
+    assert!(final_body.contains("state--in_discussion") && final_body.contains("hx-swap-oob"));
+}
+
+#[tokio::test]
 async fn failed_send_keeps_the_user_turn_and_surfaces_an_error() {
     // The reply fails (stream dies). Under the background-job model the user turn is persisted up
     // front (so it survives navigation) and the failure surfaces as a visible error via /pending —

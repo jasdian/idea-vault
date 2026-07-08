@@ -94,6 +94,27 @@ async fn compose_box_is_live_when_ollama_is_available() {
 }
 
 #[tokio::test]
+async fn draft_page_has_oob_targets_but_no_oob_fragments() {
+    // The full page must render the badge and the (empty) actions container — the anchors the
+    // out-of-band swaps replace later — but never the `hx-swap-oob` fragments themselves, which
+    // belong only to transcript responses (duplicate-id guard for the
+    // transcript_inner vs respond_with_transcript split).
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::Draft, "body\n");
+
+    let (status, body) = get(state, "/idea/sharp-idea").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("id=\"idea-state\""));
+    assert!(body.contains("id=\"idea-actions\""), "OOB target exists");
+    assert!(!body.contains("hx-swap-oob"), "full pages carry no OOB");
+    assert!(
+        !body.contains("/idea/sharp-idea/store"),
+        "a Draft offers no store control"
+    );
+}
+
+#[tokio::test]
 async fn stored_idea_shows_reopen_panel_not_compose() {
     let (state, vault_dir) = test_state();
     seed(&vault_dir, IdeaState::Stored, "Consolidated statement.\n");

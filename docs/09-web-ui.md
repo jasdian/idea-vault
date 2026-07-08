@@ -109,6 +109,7 @@ templates/
   _idea_row.html         # partial — a single idea in the list
   _turn.html             # partial — one conversation turn (user/assistant); also the poll-target shape
   _discussion.html       # partial — the discussion pane (compose box + transcript/poll target)
+  _actions.html          # partial — the #idea-actions block (moves/swarm/store); also sent OOB
   _stored.html           # partial — stored view (consolidated body + memory facts)
   _search_results.html   # partial — FTS results
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
@@ -131,6 +132,13 @@ base.html`.
   failed — consumed on read), or the finished transcript with no further trigger (job done). This
   survives navigation because the underlying model call runs in a task detached from any one
   request ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
+- **Out-of-band state refresh:** transcript responses (chat, poll, cancel, skill, swarm, compact,
+  delete-turn) append two top-level `hx-swap-oob="true"` fragments after the `#transcript` inner
+  HTML: the `#idea-state` subhead badge and the `#idea-actions` block (`_actions.html`, an
+  always-present container so a Draft page still has the OOB target). This is how the first chat
+  turn's Draft → InDiscussion flip becomes visible — badge and moves/store controls update without
+  a reload, while the composer (outside `#transcript`) survives a poll completing mid-typing.
+  Store and reopen swap all of `#discussion`, so they carry only the OOB badge.
 - **Markdown rendering:** idea bodies and memory facts are rendered server-side (markdown → sanitized
   HTML) before templating; the browser only receives HTML.
 - **Degraded AI:** when `/admin/health` (or the boot probe) reports the active LLM backend absent,

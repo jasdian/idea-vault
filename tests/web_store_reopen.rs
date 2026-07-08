@@ -53,9 +53,11 @@ async fn store_consolidates_extracts_and_lands_stored() {
 
     let (status, body) = post_form(state, "/idea/vaulted/store", "").await;
     assert_eq!(status, StatusCode::OK);
-    // The stored partial: consolidated body + reopen affordance.
+    // The stored partial: consolidated body + reopen affordance + the OOB subhead badge flip
+    // (the store form swaps #discussion, but the badge lives outside it).
     assert!(body.contains("Consolidated best statement."));
     assert!(body.contains("hx-post=\"/idea/vaulted/reopen\""));
+    assert!(body.contains("state--stored") && body.contains("hx-swap-oob"));
 
     // Truth: state=stored in frontmatter, memory on disk, conversation untouched.
     let idea = store::read_idea(&vault_dir, "vaulted").unwrap();
@@ -135,9 +137,12 @@ async fn reopen_flips_state_loads_context_and_returns_discussion() {
 
     let (status, body) = post_form(state, "/idea/vaulted/reopen", "").await;
     assert_eq!(status, StatusCode::OK);
-    // The discussion pane returns, transcript intact, compose live (mock is Available).
+    // The discussion pane returns, transcript intact, compose live (mock is Available), store
+    // control back, and the OOB subhead badge flipped to reopened.
     assert!(body.contains("hx-post=\"/idea/vaulted/chat\""));
     assert!(body.contains("dig in"), "transcript rendered");
+    assert!(body.contains("/idea/vaulted/store"), "store control back");
+    assert!(body.contains("state--reopened") && body.contains("hx-swap-oob"));
 
     // D13 truth-idempotence: only the state flipped; body and memory untouched.
     let idea = store::read_idea(&vault_dir, "vaulted").unwrap();

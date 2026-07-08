@@ -194,22 +194,70 @@ pub(crate) fn transcript_inner(
     Ok(html)
 }
 
+/// Render the `#idea-actions` block (`_actions.html`) — the state-dependent moves/swarm/store
+/// controls. Shared by the full-page `_discussion.html` render (`oob = false`) and the
+/// out-of-band fragment appended to transcript responses (`oob = true`).
+pub(crate) fn render_actions(
+    slug: &str,
+    skill_names: Vec<String>,
+    can_store: bool,
+    oob: bool,
+) -> Result<String, WebError> {
+    use askama::Template as _;
+    crate::web::templates::Actions {
+        slug: slug.to_string(),
+        can_store,
+        skill_names,
+        oob,
+    }
+    .render()
+    .map_err(|e| WebError::Internal(format!("template render: {e}")))
+}
+
+/// The out-of-band state badge: replaces `#idea-state` in the page subhead so a state flip that
+/// happens under a `#transcript`/`#discussion` swap (first chat turn, store, reopen) is visible
+/// without a full reload.
+pub(crate) fn state_badge_oob(state: IdeaState) -> String {
+    let s = state.as_str();
+    format!(r#"<span id="idea-state" class="state state--{s}" hx-swap-oob="true">{s}</span>"#)
+}
+
 /// Read the current transcript + job state and render it — the response chat/skill/swarm/delete
 /// and the poll endpoint return.
+///
+/// Besides the `#transcript` inner HTML, the response carries two top-level out-of-band fragments
+/// re-asserting the current on-disk state: the `#idea-state` badge and the `#idea-actions` block.
+/// The first chat turn flips Draft → InDiscussion server-side while the swap only targets
+/// `#transcript`; without these the badge and the moves/store controls stay stale until F5.
+/// Deliberately OOB (not a wider swap target): the composer sits outside `#transcript` and must
+/// survive a poll completing while the owner is typing. Full-page renders go through
+/// `transcript_inner` directly and must NOT carry these fragments (duplicate ids).
 pub(crate) fn respond_with_transcript(
     state: &AppState,
     slug: &str,
 ) -> Result<axum::response::Html<String>, WebError> {
     let conversation = store::read_conversation(&state.config.vault_dir, slug)?;
     let pending = crate::web::jobs::peek(&state.jobs, slug);
-    Ok(axum::response::Html(transcript_inner(
+    let mut html = transcript_inner(
         &state.config.vault_dir,
         slug,
         &state.llm.model(),
         &conversation,
         pending,
         state.llm.context_budget().max_bytes,
-    )?))
+    )?;
+
+    let idea = store::read_idea(&state.config.vault_dir, slug)?;
+    // The D9 store guard, not the page's `!= Draft` shortcut: delete-turn can reach this on a
+    // Stored idea, which must not be offered the discussion controls.
+    let can_store = matches!(
+        idea.frontmatter.state,
+        IdeaState::InDiscussion | IdeaState::Reopened
+    );
+    let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
+    html.push_str(&state_badge_oob(idea.frontmatter.state));
+    html.push_str(&render_actions(slug, skill_names, can_store, true)?);
+    Ok(axum::response::Html(html))
 }
 
 /// Render the memory panel (`_memory.html`) — the always-on MEMORY.md index with per-fact delete.
@@ -397,14 +445,14 @@ pub(crate) fn build_discussion(
     // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
     let transcript_html =
         transcript_inner(vault_dir, slug, model, conversation, pending, budget_bytes)?;
+    let actions_html = render_actions(slug, skill_names, can_store, false)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),
         ai_available,
-        can_store,
         unavailable_hint,
-        skill_names,
         transcript_html,
+        actions_html,
     })
 }
 

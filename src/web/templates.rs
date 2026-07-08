@@ -117,18 +117,33 @@ pub struct Turn {
 pub struct Discussion {
     pub slug: String,
     pub ai_available: bool,
-    /// Whether Store is a legal D9 transition from the idea's current state
-    /// (InDiscussion/Reopened yes; Draft no — the UI must not offer a guaranteed 400).
-    pub can_store: bool,
     /// The D20 per-state remedy shown in the banner when AI is unavailable. Backend-aware
     /// (`routes::ideas::availability_hint`): `ollama pull <model>` for ModelMissing; for
     /// Unreachable, `ollama serve` under the Ollama backend or a `claude`-CLI hint under claude-code.
     pub unavailable_hint: String,
-    /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
-    pub skill_names: Vec<String>,
     /// The full `#transcript` inner HTML (turns + any job indicator/error + usage meter),
     /// produced by `routes::ideas::transcript_inner` — the single source for page + swap + poll.
     pub transcript_html: String,
+    /// The `#idea-actions` block (`_actions.html`), pre-rendered so the same partial serves the
+    /// full page and the out-of-band swap transcript responses carry (empty shell in Draft).
+    pub actions_html: String,
+}
+
+/// Partial: the state-dependent action block (moves/swarm/compact/store) (`templates/_actions.html`).
+/// The `#idea-actions` container always renders — empty when `can_store` is false — so the
+/// out-of-band swap carried by transcript responses has a target even on a Draft page. With
+/// `oob = true` the root carries `hx-swap-oob="true"` and htmx replaces the in-page container
+/// instead of swapping it into `#transcript`.
+#[derive(Template, WebTemplate)]
+#[template(path = "_actions.html")]
+pub struct Actions {
+    pub slug: String,
+    /// Whether Store is a legal D9 transition from the idea's current state
+    /// (InDiscussion/Reopened yes; Draft/Stored no — the UI must not offer a guaranteed 400).
+    pub can_store: bool,
+    /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
+    pub skill_names: Vec<String>,
+    pub oob: bool,
 }
 
 /// Partial: stored view (consolidated body + memory) (R4, `templates/_stored.html`).

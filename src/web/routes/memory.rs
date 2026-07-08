@@ -11,10 +11,12 @@ use crate::domain::IdeaState;
 use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
-use crate::web::routes::ideas::{build_discussion, respond_with_transcript};
+use crate::web::routes::ideas::{build_discussion, respond_with_transcript, state_badge_oob};
 use crate::web::routes::reindex_logged;
-use crate::web::templates::{render_markdown, Discussion, Stored};
+use crate::web::templates::{render_markdown, Stored};
+
 use crate::web::WebError;
+use askama::Template as _;
 
 /// R4 — `POST /idea/{slug}/store` — consolidate + extract memory, transition to `Stored` (D12).
 ///
@@ -25,7 +27,7 @@ use crate::web::WebError;
 pub async fn store_idea(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Result<Stored, WebError> {
+) -> Result<axum::response::Html<String>, WebError> {
     let vault_dir = state.config.vault_dir.clone();
     let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
     match idea.frontmatter.state {
@@ -61,10 +63,16 @@ pub async fn store_idea(
     reindex_logged(&state);
     tracing::info!(slug, new_facts = outcome.new_facts, "idea stored");
 
-    Ok(Stored {
+    // The store form swaps `#discussion`, which refreshes the panel — but the subhead badge sits
+    // outside it, so the response carries an out-of-band badge flip too.
+    let mut html = Stored {
         slug,
         body_html: render_markdown(&outcome.consolidated_body),
-    })
+    }
+    .render()
+    .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
+    html.push_str(&state_badge_oob(IdeaState::Stored));
+    Ok(axum::response::Html(html))
 }
 
 /// R5 — `POST /idea/{slug}/reopen` — re-enter discussion with memory loaded as context (D13).
@@ -74,7 +82,7 @@ pub async fn store_idea(
 pub async fn reopen_idea(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Result<Discussion, WebError> {
+) -> Result<axum::response::Html<String>, WebError> {
     let vault_dir = state.config.vault_dir.clone();
     let mut idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
     if idea.frontmatter.state != IdeaState::Stored {
@@ -103,7 +111,9 @@ pub async fn reopen_idea(
     let health = state.llm.probe().await;
     let skill_names = state.skills.list().iter().map(|s| s.name.clone()).collect();
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
-    build_discussion(
+    // The reopen form swaps `#discussion` (buttons come back with it); the subhead badge sits
+    // outside, so carry an out-of-band badge flip alongside.
+    let mut html = build_discussion(
         &vault_dir,
         &slug,
         &conversation,
@@ -114,7 +124,11 @@ pub async fn reopen_idea(
         skill_names,
         pending,
         state.llm.context_budget().max_bytes,
-    )
+    )?
+    .render()
+    .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
+    html.push_str(&state_badge_oob(IdeaState::Reopened));
+    Ok(axum::response::Html(html))
 }
 
 /// Concept actions run only in the two active discussion states (D9 has no skill/swarm edge
