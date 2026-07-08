@@ -14,6 +14,19 @@ pub mod schema;
 
 use thiserror::Error;
 
+/// Private-Use-Area sentinel codepoints [`queries::search`] asks `snippet()` to wrap match spans
+/// in, instead of HTML markup. Rationale: `search_fts.content` is owner-authored plain text that
+/// the web layer must HTML-escape before display (never trust it as markup); escaping first and
+/// *then* turning these two sentinels into `<mark>...</mark>` lets a snippet be both safe and
+/// highlighted. U+E000/U+E001 sit in the Private Use Area, which no real document text will ever
+/// contain (no Unicode block assigns them a meaning) — but "never" is a claim about well-behaved
+/// input, not adversarial or binary-garbage input, so [`reindex::reindex`] defensively strips any
+/// occurrence of these two codepoints from every string it indexes. That keeps the contract exact
+/// rather than merely probabilistic: any sentinel byte found in a rendered snippet came from
+/// `snippet()` marking a match, never from the vault.
+pub(crate) const SNIPPET_MATCH_OPEN: char = '\u{E000}';
+pub(crate) const SNIPPET_MATCH_CLOSE: char = '\u{E001}';
+
 /// Errors surfaced by the derived-index module.
 #[derive(Debug, Error)]
 pub enum IndexError {

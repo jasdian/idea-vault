@@ -120,16 +120,25 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Data | Canonical location (truth) | Indexed copy (derived) |
 |------|----------------------------|------------------------|
 | Idea state | `idea.md` frontmatter `state:` | `ideas.state` |
-| Title | `idea.md` frontmatter `title:` | `ideas.title` |
-| Tags | `idea.md` frontmatter `tags:` | `tags` + `idea_tags` |
-| Idea body text | `idea.md` body | `search_fts` |
-| Conversation text | `conversation.md` | `search_fts` |
+| Title | `idea.md` frontmatter `title:` | `ideas.title` + `search_fts` (`kind = 'title'`, always) |
+| Tags | `idea.md` frontmatter `tags:` | `tags` + `idea_tags` + `search_fts` (`kind = 'tags'`, one row of the space-joined names, only when non-empty) |
+| Idea body text | `idea.md` body | `search_fts` (`kind = 'idea_body'`) |
+| Conversation text | `conversation.md` | `search_fts` (`kind = 'conversation'`) |
 | Compacted rolling summary | `compacted.md` | *(none — derived sidecar, never indexed; ADR-0012)* |
-| Memory fact | `memory/<fact>.md` | `memory_facts` |
+| Memory fact (frontmatter) | `memory/<fact>.md` | `memory_facts` |
+| Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
 | Knowledge-extraction artifact (finding or synthesis) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`) |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
 | `[[slug]]` links | inside bodies (idea/conversation/memory only — **not** mined from artifact bodies) | `backlinks` |
 | Timestamps | frontmatter `created:`/`updated:` | `ideas.created_at`/`updated_at` |
+
+All strings funneled into `search_fts` are passed through a `sanitized()` helper (`index::reindex`)
+that strips the two Private-Use-Area sentinel codepoints (`index::SNIPPET_MATCH_OPEN`/
+`SNIPPET_MATCH_CLOSE`, U+E000/U+E001) `queries::search`'s `snippet()` call uses to delimit matched
+spans — the defensive half of the sentinel contract: no owner-authored text can forge a match
+marker the web layer would mistake for a real highlight (`routes::ideas::highlight_snippet`
+escapes first and only then translates the sentinel pair into `<mark>`, so this is belt-and-
+suspenders, not the only guard).
 
 ## D8 — Frontmatter schema
 
@@ -245,7 +254,7 @@ erDiagram
     }
     search_fts {
         integer idea_id
-        text kind "idea_body | conversation"
+        text kind "title | tags | idea_body | conversation | memory | artifact"
         text content
     }
 ```
@@ -275,7 +284,7 @@ sequenceDiagram
         Reidx->>Parse: parse frontmatter + bodies
         Reidx->>DB: upsert ideas, tags, idea_tags
         Reidx->>DB: upsert memory_facts
-        Reidx->>DB: insert search_fts (body + conversation + artifacts, kind-tagged)
+        Reidx->>DB: insert search_fts (title, tags, body, conversation, memory facts, artifacts — kind-tagged, sanitized)
         Reidx->>DB: insert backlinks ([[slug]] found in idea/conversation/memory only)
     end
     Reidx->>DB: resolve backlinks.target_idea_id by slug

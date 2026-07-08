@@ -5,7 +5,11 @@
   {% for hit in hits %}
   <li>
     <a href="/idea/{{ hit.slug }}">{{ hit.title }}</a>
-    <span class="snippet">{{ hit.snippet }}</span>
+    {% if !hit.kind_chip.is_empty() %}
+    <span class="hit-kind">{{ hit.kind_chip }}</span>
+    {% endif %}
+    {# snippet_html is pre-escaped-then-highlighted by routes::ideas::highlight_snippet — safe. #}
+    <span class="snippet">{{ hit.snippet_html|safe }}</span>
   </li>
   {% endfor %}
 </ul>

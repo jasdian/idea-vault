@@ -70,6 +70,17 @@ async fn search_snippets_are_escaped_and_hostile_queries_never_500() {
         !body.contains("<script>"),
         "snippet content must be escaped, never raw HTML"
     );
+    // The escape-then-mark pipeline (routes::ideas::highlight_snippet): the matched term itself
+    // renders inside a real <mark>, and the escaped hostile markup survives as inert text right
+    // next to it in the same snippet — proof escaping ran on the whole snippet before marking.
+    assert!(
+        body.contains("<mark>nightjar</mark>"),
+        "matched term must render inside <mark>: {body}"
+    );
+    assert!(
+        body.contains("&lt;script&gt;"),
+        "hostile markup must survive as escaped text: {body}"
+    );
 
     for hostile in [
         "%22unbalanced",
@@ -87,6 +98,94 @@ async fn search_snippets_are_escaped_and_hostile_queries_never_500() {
     let (status, body) = get(state, "/search?q=").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("No matches."));
+}
+
+#[tokio::test]
+async fn search_snippet_pipeline_never_fabricates_a_mark_from_injected_sentinels() {
+    // A body carrying the literal PUA sentinel codepoint search() uses to delimit matches
+    // (index::SNIPPET_MATCH_OPEN, U+E000) — reindex::sanitized strips it before it ever reaches
+    // search_fts (docs: "the defensive half of the sentinel contract"), and even if it somehow
+    // slipped through, routes::ideas::highlight_snippet drops any stray/unpaired sentinel rather
+    // than rendering it as markup. Either layer alone is enough to guard this; both must hold.
+    let (state, vault_dir) = test_state();
+    seed(
+        &vault_dir,
+        "sentinel",
+        "A body with a literal \u{E000} sentinel char and a keyword: falconry.\n",
+    );
+    let (status, _) = post_form(state.clone(), "/admin/reindex", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = get(state.clone(), "/search?q=falconry").await;
+    assert_eq!(status, StatusCode::OK);
+    // The real match highlights normally...
+    assert!(
+        body.contains("<mark>falconry</mark>"),
+        "the genuine match must still highlight: {body}"
+    );
+    // ...and the raw sentinel never reaches the response, whether as itself or as a fabricated
+    // extra <mark> pair that didn't correspond to an actual FTS match span.
+    assert!(
+        !body.contains('\u{E000}') && !body.contains('\u{E001}'),
+        "raw sentinel codepoints must never reach the response: {body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_fact_hit_shows_its_provenance_chip() {
+    let (state, vault_dir) = test_state();
+    seed(&vault_dir, "gizmo", "Nothing special in the body.\n");
+    store::write_memory_fact(
+        &vault_dir,
+        "gizmo",
+        &idea_vault::domain::MemoryFact {
+            frontmatter: idea_vault::domain::MemoryFactFrontmatter {
+                slug: "insight".into(),
+                title: "Insight".into(),
+                tags: vec![],
+                created: Utc.with_ymd_and_hms(2026, 7, 7, 11, 0, 0).unwrap(),
+                links: vec![],
+            },
+            body: "The plutonian variance was the deciding factor.\n".into(),
+        },
+    )
+    .unwrap();
+    let (status, _) = post_form(state.clone(), "/admin/reindex", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = get(state, "/search?q=plutonian").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("/idea/gizmo"),
+        "hit links to the idea: {body}"
+    );
+    assert!(
+        body.contains(r#"<span class="hit-kind">memory</span>"#),
+        "a memory-fact hit must carry the memory provenance chip: {body}"
+    );
+    assert!(
+        body.contains("<mark>plutonian</mark>"),
+        "the matched fact-body term must highlight too: {body}"
+    );
+}
+
+#[tokio::test]
+async fn title_and_body_hits_carry_no_provenance_chip() {
+    let (state, vault_dir) = test_state();
+    seed(
+        &vault_dir,
+        "alpha",
+        "This body mentions wombats twice: wombats.\n",
+    );
+    let (status, _) = post_form(state.clone(), "/admin/reindex", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = get(state, "/search?q=wombats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("hit-kind"),
+        "a body-only match needs no provenance chip: {body}"
+    );
 }
 
 #[tokio::test]

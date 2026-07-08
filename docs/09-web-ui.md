@@ -45,7 +45,7 @@ flowchart LR
         R5["POST /idea/:slug/reopen — Reopen (D13) → discussion view"]
         R6["POST /idea/:slug/skill/:name — run skill (D18, job) → transcript + indicator"]
         R7["POST /idea/:slug/swarm — run swarm (D14, job) → transcript + indicator"]
-        R8["GET /search?q= — results fragment (FTS)"]
+        R8["GET /search?q= — results fragment (ranked FTS: weighted bm25 + backlink prior + highlight)"]
         R9["POST /idea/:slug/chat — chat turn (D11, job) → transcript + indicator"]
         R9b["GET /idea/:slug/pending — poll target → transcript (indicator | error | final)"]
         R14["POST /idea/:slug/fork — branch to a new InDiscussion idea → HX-Redirect"]
@@ -231,6 +231,16 @@ base.html`.
   `#discussion` synchronously, so it carries only the OOB badge.
 - **Markdown rendering:** idea bodies and memory facts are rendered server-side (markdown → sanitized
   HTML) before templating; the browser only receives HTML.
+- **R8 search result rendering:** `index::queries::search` ranks google-style (per-`kind` bm25
+  weighting + a capped inbound-backlink prior + a small multi-kind-corroboration bonus — see
+  `index/queries.rs` for the exact algebra) and returns each hit's snippet as plain text with
+  Private-Use-Area sentinel codepoints (not HTML) delimiting the matched span, plus the winning
+  `kind` (`title`/`tags`/`idea_body`/`conversation`/`memory`/`artifact`). `routes::ideas::search`
+  turns that into the `_search_results.html` view: HTML-escape the *whole* snippet first, then
+  translate the sentinel pair into `<mark>`/`</mark>` — escape-then-mark, never the reverse, is the
+  XSS boundary (`routes::ideas::highlight_snippet`) — and renders a small mono provenance chip for
+  non-obvious kinds (`tags`/`memory`/`artifact`/`conversation`; `title`/`idea_body` get no chip,
+  since the owner already expects a match there).
 - **MCP servers and the usage meter's "(+N KB tools)" term:** the `/mcp` page
   ([ADR-0018](./adr/0018-mcp-servers.md)) manages the owner's registry of MCP endpoints outside any
   one idea's discussion — its routes (R24–R31) carry no `:slug` and don't touch `web::jobs`, except

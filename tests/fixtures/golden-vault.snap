@@ -20,10 +20,21 @@
   stored-idea | in-discussion | in-discussion
 [search_fts]
   caf-ber-ide | idea_body
+  caf-ber-ide | title
   draft-idea | idea_body
+  draft-idea | title
   in-discussion | conversation
   in-discussion | idea_body
+  in-discussion | tags
+  in-discussion | title
   reopened-merged | conversation
   reopened-merged | idea_body
+  reopened-merged | memory
+  reopened-merged | memory
+  reopened-merged | tags
+  reopened-merged | title
   stored-idea | conversation
   stored-idea | idea_body
+  stored-idea | memory
+  stored-idea | tags
+  stored-idea | title

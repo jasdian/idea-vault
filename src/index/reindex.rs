@@ -9,10 +9,26 @@ use std::path::Path;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection};
 
-use super::IndexError;
+use super::{IndexError, SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
 use crate::domain::links;
 use crate::domain::slug as domain_slug;
 use crate::vault::{store, walk};
+
+/// Strip the [`SNIPPET_MATCH_OPEN`]/[`SNIPPET_MATCH_CLOSE`] sentinel codepoints from content
+/// before it enters `search_fts`. These two Private-Use-Area codepoints are never legitimately
+/// present in owner-authored markdown, but stripping here — at the one place all indexed text
+/// funnels through — makes that a guarantee rather than an assumption, so `queries::search` can
+/// use them as unambiguous match markers no matter what ends up on disk.
+fn sanitized(content: &str) -> String {
+    if content.contains(SNIPPET_MATCH_OPEN) || content.contains(SNIPPET_MATCH_CLOSE) {
+        content
+            .chars()
+            .filter(|c| *c != SNIPPET_MATCH_OPEN && *c != SNIPPET_MATCH_CLOSE)
+            .collect()
+    } else {
+        content.to_string()
+    }
+}
 
 /// Row counts produced by a reindex, used for verification (D15).
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -153,16 +169,33 @@ pub fn reindex(conn: &mut Connection, vault_dir: &Path) -> Result<ReindexCounts,
             )?;
         }
 
-        // 8. Search content: idea body + conversation transcript.
+        // 8. Search content — one `kind` row per field so queries::search can weight fields
+        // independently (a title hit should outrank an equally bm25-scored body hit). Coverage
+        // is now every owner-authored surface: title, tags, idea body, conversation transcript,
+        // and (below, alongside the memory-facts loop) each fact's title+body — previously only
+        // idea_body/conversation/artifact were indexed, leaving the title/tags/fact-body text the
+        // owner actually wrote unsearchable.
+        tx.execute(
+            "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'title', ?2)",
+            params![idea_id, sanitized(&fm.title)],
+        )?;
+        if !fm.tags.is_empty() {
+            // Space-joined so multi-word tags stay separable tokens; omitted entirely when there
+            // are no tags rather than indexing an empty row.
+            tx.execute(
+                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'tags', ?2)",
+                params![idea_id, sanitized(&fm.tags.join(" "))],
+            )?;
+        }
         tx.execute(
             "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'idea_body', ?2)",
-            params![idea_id, idea.body],
+            params![idea_id, sanitized(&idea.body)],
         )?;
         let conversation = store::read_conversation(vault_dir, &entry.slug)?;
         if !conversation.is_empty() {
             tx.execute(
                 "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'conversation', ?2)",
-                params![idea_id, conversation],
+                params![idea_id, sanitized(&conversation)],
             )?;
         }
 
@@ -182,7 +215,10 @@ pub fn reindex(conn: &mut Connection, vault_dir: &Path) -> Result<ReindexCounts,
                 "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'artifact', ?2)",
                 params![
                     idea_id,
-                    format!("{}\n\n{}", artifact.frontmatter.title, artifact.body)
+                    sanitized(&format!(
+                        "{}\n\n{}",
+                        artifact.frontmatter.title, artifact.body
+                    ))
                 ],
             )?;
         }
@@ -209,6 +245,17 @@ pub fn reindex(conn: &mut Connection, vault_dir: &Path) -> Result<ReindexCounts,
                 ],
             )?;
             counts.facts += 1;
+
+            // Fact bodies are owner-authored durable truth (the `memory_facts` table and
+            // MEMORY.md are index-only pointers, no body column) — one 'memory' search_fts row
+            // per fact, title+body, so extracted facts are finally searchable like idea_body.
+            tx.execute(
+                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'memory', ?2)",
+                params![
+                    idea_id,
+                    sanitized(&format!("{}\n\n{}", fact.frontmatter.title, fact.body))
+                ],
+            )?;
 
             for target in links::extract_links(&fact.body) {
                 targets.push(target);
@@ -553,6 +600,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kind, "idea_body");
+    }
+
+    #[test]
+    fn sanitized_strips_snippet_sentinels_but_leaves_ordinary_text_alone() {
+        // Defensive half of the snippet-sentinel contract (docs on SNIPPET_MATCH_OPEN/CLOSE):
+        // even if a sentinel codepoint somehow reached indexed content, it must never survive
+        // into search_fts, or queries::search's snippet() marking would become ambiguous.
+        let poisoned = format!("before {SNIPPET_MATCH_OPEN}mid{SNIPPET_MATCH_CLOSE} after");
+        assert_eq!(sanitized(&poisoned), "before mid after");
+        assert_eq!(sanitized("ordinary café text"), "ordinary café text");
+    }
+
+    #[test]
+    fn fts_covers_title_tags_and_memory_fact_bodies() {
+        // Coverage regression: title, tags, and memory-fact bodies were previously never written
+        // to search_fts at all (memory_facts has no body column — fact bodies were unsearchable
+        // truth). Three terms, each planted in exactly one of those three surfaces and nowhere
+        // else in the fixture, prove all three are now indexed under the right `kind`.
+        let tmp = tempfile::tempdir().unwrap();
+        store::write_idea(
+            tmp.path(),
+            &idea(
+                "gamma",
+                "Zoravian Cascade",
+                IdeaState::Draft,
+                &["ephemeral-widgets"],
+                "A plain idea body with no special vocabulary.\n",
+            ),
+        )
+        .unwrap();
+        store::write_memory_fact(
+            tmp.path(),
+            "gamma",
+            &fact(
+                "insight-one",
+                "Insight one",
+                &[],
+                "The durable conclusion mentions quixotic phrasing nowhere else.\n",
+            ),
+        )
+        .unwrap();
+
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM search_fts WHERE search_fts MATCH 'zoravian'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "title");
+
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM search_fts WHERE search_fts MATCH 'ephemeral'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "tags");
+
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM search_fts WHERE search_fts MATCH 'quixotic'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "memory");
     }
 
     #[test]
