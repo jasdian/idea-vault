@@ -79,7 +79,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D30), and ADRs 0001–0016. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D30), and ADRs 0001–0017. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.

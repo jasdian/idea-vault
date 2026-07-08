@@ -12,12 +12,15 @@
 //! - [`backend`] — the [`LlmBackend`] enum that lets callers target either backend behind one API.
 //! - [`stream`] — adapts a backend's token stream into SSE events (D11).
 //! - [`budget`] — assembles a prompt within the model's context limit (D21).
+//! - [`web`] — keyless web-search + page-fetch tool leaves (ADR-0017), executed by the router's
+//!   bounded Ollama tool loop; claude-code uses its own WebSearch/WebFetch instead.
 
 pub mod backend;
 pub mod budget;
 pub mod claude_code;
 pub mod ollama;
 pub mod stream;
+pub mod web;
 
 pub use backend::{LlmBackend, LlmSettings};
 pub use claude_code::ClaudeCodeClient;

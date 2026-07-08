@@ -52,6 +52,15 @@
   </fieldset>
 
   <fieldset class="settings__group">
+    <legend>web access</legend>
+    <label class="opt">
+      <input type="checkbox" name="web_access" value="true" {% if web_access %}checked{% endif %} />
+      <span>Let the foil crawl the internet — search + fetch pages on Ollama (built-in tools),
+        WebSearch/WebFetch on claude-code. Off = fully offline.</span>
+    </label>
+  </fieldset>
+
+  <fieldset class="settings__group">
     <legend>auto-compact</legend>
     <label class="opt">
       <input type="checkbox" name="auto_compact" value="true" {% if auto_compact %}checked{% endif %} />

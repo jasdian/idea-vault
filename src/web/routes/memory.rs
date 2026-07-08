@@ -299,6 +299,62 @@ pub async fn run_swarm(
     respond_with_transcript(&state, &slug)
 }
 
+/// R22 — `POST /idea/{slug}/workflow/{name}` — run a deterministic workflow as a background job
+/// (D19). Script-driven control flow (fixed fan-out → judge → synthesize), as opposed to the
+/// free-form swarm: the same workflow takes the same path every run; only step content varies.
+/// Only the final synthesis is persisted, as one labelled turn.
+pub async fn run_workflow(
+    State(state): State<AppState>,
+    Path((slug, name)): Path<(String, String)>,
+) -> Result<axum::response::Html<String>, WebError> {
+    let vault_dir = state.config.vault_dir.clone();
+    let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
+    guard_discussion_state(idea.frontmatter.state)?;
+    // Unknown name is a synchronous 404, not an error turn (run_workflow checks again, but that
+    // now runs in the background task).
+    if concepts::workflows::get_workflow(&name).is_none() {
+        return Err(WebError::NotFound(format!("workflow: {name}")));
+    }
+
+    if !jobs::try_claim(&state.jobs, &slug) {
+        return respond_with_transcript(&state, &slug);
+    }
+    let ts = state.clone();
+    let tslug = slug.clone();
+    let handle = tokio::spawn(async move {
+        jobs::set_note(
+            &ts.jobs,
+            &tslug,
+            &format!("workflow · {name}: fan out → judge → synthesize"),
+        );
+        match run_workflow_work(&ts, &tslug, &name).await {
+            Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
+            Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
+        }
+    });
+    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    respond_with_transcript(&state, &slug)
+}
+
+async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(), String> {
+    let outcome = concepts::workflows::run_workflow(
+        &state.llm,
+        &state.ai_semaphore,
+        &state.skills,
+        &state.config.vault_dir,
+        slug,
+        name,
+        state.llm.context_budget(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if outcome.synthesis.trim().is_empty() {
+        return Err("the workflow produced nothing — try again".to_string());
+    }
+    reindex_logged(state);
+    Ok(())
+}
+
 async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Result<(), String> {
     let progress = progress_sink(state, slug);
     let outcome = concepts::swarm::swarm(

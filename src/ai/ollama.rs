@@ -27,6 +27,11 @@ const DEFAULT_TOKEN_TIMEOUT: Duration = Duration::from_secs(120);
 /// or absent server yields `None` — callers fall back rather than block on metadata.
 const SHOW_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Wall-clock multiple of `token_timeout` granted to one non-streaming tool round (ADR-0017).
+/// The streaming path polices per-token *gaps*; a non-streaming round must cover the WHOLE
+/// generation — a local thinking model needs minutes of wall clock while never being "inactive".
+const TOOL_ROUND_TIMEOUT_FACTOR: u32 = 4;
+
 /// A live token stream from `/api/chat`: each item is one content chunk, in order. The stream
 /// ends after Ollama's `done: true`; an `Err` item (timeout/protocol/transport) is terminal.
 pub type TokenStream = BoxStream<'static, Result<String, AiError>>;
@@ -165,6 +170,49 @@ impl OllamaClient {
             out.push_str(&item?);
         }
         Ok(out)
+    }
+
+    /// One non-streaming tool-calling round (`POST /api/chat`, `stream: false`, ADR-0017):
+    /// `messages` are raw Ollama-wire message objects (they may carry `tool_calls` /
+    /// `role: "tool"` shapes [`ChatMessage`] deliberately doesn't model), `tools` is the
+    /// function-definition array (or `None` on the forced final round). Returns the response
+    /// `message` object — the caller inspects `content` vs `tool_calls`.
+    ///
+    /// A non-2xx answer surfaces as [`AiError::Backend`] *with the body text*, because the
+    /// caller's degrade path needs to recognize Ollama's "model does not support tools" 400.
+    ///
+    /// Timeout note: `token_timeout` is an *inactivity* bound calibrated for the streaming path
+    /// (any single token gap). A non-streaming round has no token-level activity signal — the
+    /// whole generation (a thinking model can easily produce minutes of it) arrives at once —
+    /// so the wall-clock bound here is `token_timeout × TOOL_ROUND_TIMEOUT_FACTOR`.
+    pub async fn chat_tools(
+        &self,
+        options: ChatOptions,
+        messages: &[serde_json::Value],
+        tools: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, AiError> {
+        let url = format!("{}/api/chat", self.base_url);
+        let mut body = build_chat_body(&self.model, options, &[]);
+        body["messages"] = serde_json::Value::Array(messages.to_vec());
+        body["stream"] = serde_json::Value::Bool(false);
+        if let Some(tools) = tools {
+            body["tools"] = tools.clone();
+        }
+
+        let round_timeout = self.token_timeout * TOOL_ROUND_TIMEOUT_FACTOR;
+        let response = tokio::time::timeout(round_timeout, self.http.post(&url).json(&body).send())
+            .await
+            .map_err(|_| AiError::Timeout)??;
+        let status = response.status();
+        let text = tokio::time::timeout(round_timeout, response.text())
+            .await
+            .map_err(|_| AiError::Timeout)??;
+        if !status.is_success() {
+            return Err(AiError::Backend(format!("ollama {status}: {text}")));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| AiError::Protocol(format!("chat_tools response not JSON: {e}")))?;
+        Ok(v.get("message").cloned().unwrap_or(serde_json::Value::Null))
     }
 
     /// Query the configured model's native context window in tokens (`POST /api/show`).

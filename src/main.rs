@@ -147,6 +147,8 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         cwd,
         add_dirs,
         allowed_tools,
+        // The live web-access toggle decides the deny-list per call (ai::backend::claude).
+        disallowed_tools: Vec::new(),
         model: model.clone(),
         system_prompt,
         skip_permissions,
@@ -162,6 +164,7 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         compact_threshold: config.compact_threshold,
         ollama_ctx_tokens: config.ollama_ctx_tokens,
         claude_ctx_tokens: config.claude_ctx_tokens,
+        web_access: config.web_access,
     };
     Ok(LlmBackend::new(ollama, claude_base, settings))
 }

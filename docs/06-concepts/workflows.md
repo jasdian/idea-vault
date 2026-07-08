@@ -52,6 +52,21 @@ flowchart TD
   outputs may be logged but are not necessarily persisted as turns (kept out of truth to reduce
   noise).
 
+## UI trigger
+
+The canonical `interrogate` workflow (currently the only entry in `builtin_workflows()`) is
+UI-triggerable, not just a library call: `POST /idea/{slug}/workflow/{name}`
+([R22](../09-web-ui.md#d17--route-map), `web::routes::memory::run_workflow`) follows the same
+claim → spawn → poll background-job shape as the skill (R6) and swarm (R7) routes
+([D11](../05-ai-integration.md), [ADR-0010](../adr/0010-ai-turns-as-background-jobs.md)). Two
+synchronous guards run before the job is claimed: the idea must be `InDiscussion`/`Reopened` (400
+otherwise) and `name` must resolve via `get_workflow` (404 if unknown, so a bad name never becomes
+a background job at all). Only the converged synthesis is persisted, as one
+`## assistant (workflow: {name})` turn — the transcript label keeps the workflow kind
+(`foil · workflow {name}`), so a workflow run stays visually distinct from a same-named skill turn
+(`foil · {name}`). `templates/_actions.html` renders one `chip chip--workflow` button per
+`builtin_workflows()` entry.
+
 ## Workflow vs swarm
 
 They share machinery (bounded parallel agents), but:

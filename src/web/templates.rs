@@ -85,6 +85,8 @@ pub struct SettingsForm {
     /// Auto-compact toggle + trigger fraction (docs/adr/0012).
     pub auto_compact: bool,
     pub compact_threshold: String,
+    /// Web access toggle (ADR-0017): the foil may search the web / fetch pages on either backend.
+    pub web_access: bool,
     /// Per-backend context-window overrides in tokens ("0" = auto, derived from the model).
     pub ollama_ctx_tokens: String,
     pub claude_ctx_tokens: String,
@@ -149,7 +151,15 @@ pub struct Actions {
     /// renders `disabled` while busy (a click would only bounce off `try_claim` anyway); the OOB
     /// actions refresh re-enables it once the job finishes or is cancelled.
     pub busy: bool,
+    /// The built-in deterministic workflows (D19) — one chip each, next to swarm.
+    pub workflows: Vec<WorkflowChip>,
     pub oob: bool,
+}
+
+/// One workflow button: name (the route segment) + description (the hover title).
+pub struct WorkflowChip {
+    pub name: String,
+    pub description: String,
 }
 
 /// One row of the artifacts panel: a file under `vault/<slug>/artifacts/` (docs/adr/0015).

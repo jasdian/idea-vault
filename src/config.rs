@@ -51,6 +51,9 @@ pub struct Config {
     /// Initial claude-code context-window override in tokens; `0` (default) = auto — derive from
     /// the model name. Nonzero values are clamped to 1024..=2_000_000. Initial value only.
     pub claude_ctx_tokens: usize,
+    /// Web access at boot (ADR-0017): the foil may search the web / fetch pages on either
+    /// backend. Defaults on; live-toggleable on the Settings page.
+    pub web_access: bool,
 }
 
 /// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
@@ -89,6 +92,9 @@ const DEFAULT_OLLAMA_TEMPERATURE: f32 = 0.7;
 const DEFAULT_CLAUDE_EFFORT: &str = "high";
 const DEFAULT_AUTO_COMPACT: bool = true;
 const DEFAULT_COMPACT_THRESHOLD: f32 = 0.80;
+/// Web access default (ADR-0017): on — the owner asked for a foil that can crawl the internet;
+/// `IDEA_VAULT_WEB_ACCESS=false` (or the Settings toggle) restores a fully offline run.
+const DEFAULT_WEB_ACCESS: bool = true;
 /// Clamp band for a nonzero context-window override (tokens): below 1k is useless, above 2M is
 /// beyond any supported model (the claude 1M window fits comfortably).
 pub const CTX_TOKENS_MIN: usize = 1_024;
@@ -182,6 +188,11 @@ impl Config {
         let ollama_ctx_tokens = parse_ctx_tokens(&lookup, "IDEA_VAULT_OLLAMA_CTX_TOKENS");
         let claude_ctx_tokens = parse_ctx_tokens(&lookup, "IDEA_VAULT_CLAUDE_CTX_TOKENS");
 
+        // Web access (ADR-0017): on unless explicitly `false`/`0`; live-toggleable in Settings.
+        let web_access = lookup("IDEA_VAULT_WEB_ACCESS")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(DEFAULT_WEB_ACCESS);
+
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
                 .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
@@ -216,6 +227,7 @@ impl Config {
             compact_threshold,
             ollama_ctx_tokens,
             claude_ctx_tokens,
+            web_access,
         }
     }
 }
@@ -327,6 +339,19 @@ mod tests {
         map.insert("IDEA_VAULT_OLLAMA_CTX_TOKENS", "lots");
         let cfg = Config::from_lookup(lookup_from(map));
         assert_eq!(cfg.ollama_ctx_tokens, 0);
+    }
+
+    #[test]
+    fn web_access_defaults_on_and_disables_explicitly() {
+        let cfg = Config::from_lookup(lookup_from(HashMap::new()));
+        assert!(cfg.web_access, "web access defaults on (ADR-0017)");
+
+        for off in ["false", "0"] {
+            let mut map = HashMap::new();
+            map.insert("IDEA_VAULT_WEB_ACCESS", off);
+            let cfg = Config::from_lookup(lookup_from(map));
+            assert!(!cfg.web_access);
+        }
     }
 
     #[test]

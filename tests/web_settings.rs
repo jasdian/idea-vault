@@ -7,6 +7,28 @@ use axum::http::StatusCode;
 use support::web::{get, post_form, test_state};
 
 #[tokio::test]
+async fn web_access_toggle_round_trips_through_the_form() {
+    // ollama_only test settings boot with web access OFF (the mock speaks no tool protocol).
+    let (state, _vault) = test_state();
+    let (status, body) = get(state.clone(), "/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("name=\"web_access\""));
+    assert!(!body.contains("name=\"web_access\" value=\"true\" checked"));
+
+    // Turn it on: the checkbox posts, the runtime settings flip, the form re-renders checked.
+    let (status, body) =
+        post_form(state.clone(), "/settings", "backend=ollama&web_access=true").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("name=\"web_access\" value=\"true\" checked"));
+    assert!(state.llm.settings().web_access);
+
+    // Omitted checkbox = off (the HTML-form contract, same as auto_compact).
+    let (_, body) = post_form(state.clone(), "/settings", "backend=ollama").await;
+    assert!(!body.contains("name=\"web_access\" value=\"true\" checked"));
+    assert!(!state.llm.settings().web_access);
+}
+
+#[tokio::test]
 async fn settings_page_renders_the_form() {
     let (state, _vault) = test_state();
     let (status, body) = get(state, "/settings").await;

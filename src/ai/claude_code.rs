@@ -30,6 +30,7 @@ pub struct ClaudeCodeClient {
     cwd: PathBuf,
     add_dirs: Vec<PathBuf>,
     allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
     model: Option<String>,
     system_prompt: Option<String>,
     skip_permissions: bool,
@@ -43,6 +44,10 @@ pub struct ClaudeCodeConfig {
     pub cwd: PathBuf,
     pub add_dirs: Vec<PathBuf>,
     pub allowed_tools: Vec<String>,
+    /// Tools the CLI must NOT use (`--disallowedTools`). A deny wins over everything, including
+    /// `--dangerously-skip-permissions` — how the web-access toggle keeps an off state honest
+    /// (ADR-0017).
+    pub disallowed_tools: Vec<String>,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub skip_permissions: bool,
@@ -56,6 +61,7 @@ impl ClaudeCodeClient {
             cwd: cfg.cwd,
             add_dirs: cfg.add_dirs,
             allowed_tools: cfg.allowed_tools,
+            disallowed_tools: cfg.disallowed_tools,
             model: cfg.model,
             system_prompt: cfg.system_prompt,
             skip_permissions: cfg.skip_permissions,
@@ -168,6 +174,11 @@ impl ClaudeCodeClient {
             cmd.arg("--dangerously-skip-permissions");
         } else if !self.allowed_tools.is_empty() {
             cmd.arg("--allowedTools").arg(self.allowed_tools.join(","));
+        }
+        if !self.disallowed_tools.is_empty() {
+            // Passed in every mode: a deny must hold even under --dangerously-skip-permissions.
+            cmd.arg("--disallowedTools")
+                .arg(self.disallowed_tools.join(","));
         }
         for dir in &self.add_dirs {
             cmd.arg("--add-dir").arg(dir);

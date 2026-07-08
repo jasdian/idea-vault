@@ -11,6 +11,12 @@
       <button type="submit" class="chip chip--swarm"
               title="Fans out subagents that attack the idea from 4 angles (premortem, cheapest-disproof, constraints, second-order effects), then converges them into one synthesis. Runs serially on a local model, so it takes a while.">swarm</button>
     </form>
+    {% for wf in workflows %}
+    <form hx-post="/idea/{{ slug }}/workflow/{{ wf.name }}" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip chip--workflow"
+              title="Deterministic workflow (D19): {{ wf.description }}. Runs serially on a local model, so it takes a while.">⛓ {{ wf.name }}</button>
+    </form>
+    {% endfor %}
     <span class="moves__caption">attacks from 4 angles, then converges into one synthesis</span>
   </div>
 

@@ -25,6 +25,7 @@ fn client(binary: &str, mode: Option<&str>) -> ClaudeCodeClient {
         cwd: PathBuf::from("."),
         add_dirs: Vec::new(),
         allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
         model: mode.map(str::to_string),
         system_prompt: None,
         skip_permissions: true,

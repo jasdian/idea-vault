@@ -328,6 +328,7 @@ h1.title {
 .chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .chip:disabled { opacity: .5; cursor: progress; }
 .chip--swarm { border-color: var(--accent); color: var(--accent); }
+.chip--workflow { border-color: var(--accent); color: var(--accent); border-style: dashed; }
 
 /* The terminal lifecycle action — pulled out of the chip rail and given its own bar so it
    reads as the commit, not just another move. Filled indigo (default .btn), not a ghost chip. */

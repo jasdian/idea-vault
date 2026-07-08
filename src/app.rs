@@ -41,6 +41,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/idea/{slug}/reopen", post(memory::reopen_idea))
         .route("/idea/{slug}/skill/{name}", post(memory::run_skill))
         .route("/idea/{slug}/swarm", post(memory::run_swarm))
+        .route("/idea/{slug}/workflow/{name}", post(memory::run_workflow))
         .route(
             "/idea/{slug}/turn/{index}/delete",
             post(memory::delete_turn),

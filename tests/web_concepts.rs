@@ -95,6 +95,42 @@ async fn run_swarm_defaults_to_the_canonical_angles_and_persists_only_synthesis(
 }
 
 #[tokio::test]
+async fn run_workflow_interrogate_persists_only_synthesis_and_guards() {
+    // Repeat script: the 4 fixed D19 steps and the synthesizer answer the same way.
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["workflow synthesis".into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 2);
+    seed(&vault_dir, IdeaState::InDiscussion);
+
+    let (status, _) = post_form(state.clone(), "/idea/movable/workflow/interrogate", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let body = support::web::poll_until(
+        state.clone(),
+        "/idea/movable/pending",
+        "foil · workflow interrogate",
+    )
+    .await;
+    assert!(body.contains("workflow synthesis"));
+
+    // Fixed DAG: 4 fan-out steps + 1 synthesizer = 5 model calls, one labelled turn persisted.
+    assert_eq!(mock.chat_bodies().len(), 5);
+    let convo = store::read_conversation(&vault_dir, "movable").unwrap();
+    assert_eq!(
+        convo
+            .matches("## assistant (workflow: interrogate)")
+            .count(),
+        1
+    );
+
+    // Unknown workflow → synchronous 404, no job started.
+    let (status, _) = post_form(state, "/idea/movable/workflow/nope", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn run_swarm_custom_angles_and_unknown_angle_400() {
     let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["out".into()])).await;
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);

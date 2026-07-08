@@ -9,7 +9,8 @@
 > [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md) (supersedes the earlier SSE decision,
 > [ADR-0004](./adr/0004-sse-token-streaming.md)),
 > [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
-> [ADR-0014](./adr/0014-dynamic-context-budget.md) (dynamic per-backend/model context budget).
+> [ADR-0014](./adr/0014-dynamic-context-budget.md) (dynamic per-backend/model context budget),
+> [ADR-0017](./adr/0017-web-access-tools.md) (live-toggleable web access on either backend).
 
 ## The `ai` boundary
 
@@ -36,6 +37,25 @@ Submodules:
 - `ai::budget` — assembles a prompt within the model's context limit ([D21](./06-concepts/swarm.md));
   the limit itself is now derived live per backend/model rather than a fixed constant
   ([ADR-0014](./adr/0014-dynamic-context-budget.md)).
+- `ai::web` — keyless web tools gated by the live `web_access` setting
+  ([ADR-0017](./adr/0017-web-access-tools.md)): `web_search` (DuckDuckGo's no-JS HTML endpoint,
+  env-overridable via `IDEA_VAULT_SEARCH_URL`) and `fetch_url` (GET + tag-strip, truncated to
+  12,000 chars). Only consumed by the Ollama path — claude-code brings its own `WebSearch`/
+  `WebFetch` tools, which the router allows/disallows instead of calling into this module.
+
+**Web access tool-calling loop ([ADR-0017](./adr/0017-web-access-tools.md)).** When `web_access` is
+on, `LlmBackend::chat` on the Ollama path runs a **bounded tool-calling loop** over `/api/chat`
+(`stream: false`, `tools: ai::web::tool_definitions()`): up to `MAX_TOOL_ROUNDS = 4` rounds of
+"model may call tools" (at most `MAX_CALLS_PER_ROUND = 3` executed calls per round, each dispatched
+through `ai::web::execute_tool`, which is infallible — every failure mode becomes readable
+tool-result text, never a turn failure), followed by one forced tool-free call so the loop always
+terminates in a plain answer. A model that rejects the `tools` field (`400 does not support tools`)
+falls back to the plain streaming call. Because a non-streaming round has no token-to-token gaps to
+bound, it gets its own wall-clock timeout, `token_timeout × TOOL_ROUND_TIMEOUT_FACTOR` (4×), instead
+of the usual inactivity timeout. On the claude-code path, the router instead allows the CLI's own
+`WebSearch`/`WebFetch` tools (plus a system-prompt hint) when `web_access` is on, and passes
+`--disallowedTools WebSearch,WebFetch` when off — a deny that holds even under
+`--dangerously-skip-permissions`.
 
 `AppState` holds one `LlmBackend` (`state.llm`); handlers never talk to `OllamaClient` or
 `ClaudeCodeClient` directly.
@@ -248,3 +268,4 @@ Principles: **truth-preserving** (index errors never lose vault data — reindex
 - [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md) — background-job model (supersedes SSE).
 - [ADR-0011](./adr/0011-live-switchable-llm-backend.md) — live backend router + Settings page.
 - [ADR-0014](./adr/0014-dynamic-context-budget.md) — dynamic per-backend/model context budget (`/api/show`, `num_ctx`, overrides).
+- [ADR-0017](./adr/0017-web-access-tools.md) — live `web_access` setting, `ai::web` tool loop (Ollama), WebSearch/WebFetch allow-deny (claude-code).

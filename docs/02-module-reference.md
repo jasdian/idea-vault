@@ -42,6 +42,7 @@ flowchart TB
             A_BK["backend.rs — LlmBackend live router + LlmSettings (ADR-0009/0011)"]
             A_STREAM["stream.rs — Ollama NDJSON → token stream"]
             A_BUDGET["budget.rs — context budgeting (D21)"]
+            A_WEB["web.rs — keyless web_search/fetch_url + tool defs (ADR-0017)"]
         end
 
         subgraph memory["memory/ (feature)"]
@@ -145,7 +146,9 @@ flowchart TD
   Ollama HTTP client and the `claude` CLI backend, dispatching per call from runtime-tunable
   `LlmSettings` ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)); also health probe and
   context budgeting. Provider-swap is localized here (out of scope beyond these two,
-  [ADR-0003](./adr/0003-ollama-local-only-ai.md)).
+  [ADR-0003](./adr/0003-ollama-local-only-ai.md)). `ai::web` supplies the keyless `web_search`/
+  `fetch_url` tool leaves the router's bounded tool-calling loop executes on the Ollama path when
+  the live `web_access` setting is on ([ADR-0017](./adr/0017-web-access-tools.md)).
 - **`memory`** — the memory feature: extract facts at Store ([D12](./06-concepts/memory.md)), load
   them at Reopen ([D13](./06-concepts/memory.md)), resolve backlinks ([D23](./06-concepts/memory.md)).
 - **`concepts`** — skills, agents, workflows, the swarm orchestrator, and knowledge extraction

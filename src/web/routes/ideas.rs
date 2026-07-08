@@ -50,10 +50,13 @@ fn turn_label(role: &str) -> (String, bool) {
             return ("foil".to_string(), false);
         }
         let inner = rest.trim_start_matches('(').trim_end_matches(')');
-        let lens = inner
-            .split_once(':')
-            .map(|(_, v)| v.trim())
-            .unwrap_or(inner);
+        let lens = match inner.split_once(':') {
+            // Keep the "workflow" kind in the label — a deterministic workflow run and a skill
+            // of the same name must stay distinguishable in the transcript.
+            Some((kind, v)) if kind.trim() == "workflow" => format!("workflow {}", v.trim()),
+            Some((_, v)) => v.trim().to_string(),
+            None => inner.to_string(),
+        };
         return (format!("foil · {lens}"), false);
     }
     (role.to_string(), false)
@@ -216,11 +219,20 @@ pub(crate) fn render_actions(
     oob: bool,
 ) -> Result<String, WebError> {
     use askama::Template as _;
+    // The workflow chips come straight off the static built-in registry — no caller threading.
+    let workflows = crate::concepts::workflows::builtin_workflows()
+        .iter()
+        .map(|w| crate::web::templates::WorkflowChip {
+            name: w.name.to_string(),
+            description: w.description.to_string(),
+        })
+        .collect();
     crate::web::templates::Actions {
         slug: slug.to_string(),
         can_store,
         skill_names,
         busy,
+        workflows,
         oob,
     }
     .render()

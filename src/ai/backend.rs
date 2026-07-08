@@ -27,6 +27,12 @@ pub(crate) const FALLBACK_OLLAMA_CTX_TOKENS: usize = 8_192;
 /// per-backend override (`ollama_ctx_tokens`) bypasses the cap: the owner asked for it.
 pub(crate) const DEFAULT_OLLAMA_CTX_CAP: usize = 32_768;
 
+/// Web-tool loop bounds (ADR-0017): rounds of "model may call tools", and executed calls per
+/// round. 4 rounds × 3 calls is plenty for search-then-read-two-pages; anything deeper burns
+/// local-model context for diminishing returns.
+const MAX_TOOL_ROUNDS: usize = 4;
+const MAX_CALLS_PER_ROUND: usize = 3;
+
 /// How long a failed `/api/show` probe is remembered before it is retried. Without a negative
 /// cache, an Ollama that answers `/api/chat` but persistently fails `/api/show` (a proxy, a
 /// version that lacks the route, a model-name mismatch) would pay the probe timeout on EVERY
@@ -81,6 +87,11 @@ pub struct LlmSettings {
     /// claude-code context-window override in tokens; `0` = auto
     /// ([`claude_window_tokens`] of the model name — no default cap).
     pub claude_ctx_tokens: usize,
+    /// Web access (ADR-0017): let the foil crawl the internet. On Ollama this runs the bounded
+    /// [`ai::web`](crate::ai::web) tool loop (web_search + fetch_url); on claude-code it allows
+    /// the CLI's own WebSearch/WebFetch tools. Off ⇒ both backends stay fully offline (the
+    /// claude tools are explicitly disallowed, not merely unrequested).
+    pub web_access: bool,
 }
 
 /// The live LLM router: both backends available, dispatch chosen per-call from [`LlmSettings`].
@@ -115,6 +126,7 @@ impl LlmBackend {
             cwd: std::path::PathBuf::from("."),
             add_dirs: Vec::new(),
             allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
             model: None,
             system_prompt: None,
             skip_permissions: true,
@@ -132,6 +144,10 @@ impl LlmBackend {
                 compact_threshold: 0.80,
                 ollama_ctx_tokens: 0,
                 claude_ctx_tokens: 0,
+                // Off in the test/Ollama-only constructor: the mock server speaks the streaming
+                // protocol only, and unit tests must never touch the real network. Production
+                // boots from `Config::web_access` (default on) in main.rs.
+                web_access: false,
             },
         )
     }
@@ -149,19 +165,40 @@ impl LlmBackend {
         *self.settings.write().expect("llm settings lock poisoned") = next;
     }
 
-    /// Build a claude-code client for the current settings: apply the model override and append the
-    /// effort hint to the system prompt (the CLI has no effort flag).
+    /// Build a claude-code client for the current settings: apply the model override, append the
+    /// effort hint to the system prompt (the CLI has no effort flag), and apply the web-access
+    /// toggle (ADR-0017) — allow the CLI's own WebSearch/WebFetch when on, explicitly disallow
+    /// them when off (an allowlist omission would not survive `--dangerously-skip-permissions`).
     fn claude(&self) -> ClaudeCodeClient {
         let s = self.settings();
         let mut cfg = self.claude_base.clone();
         if !s.claude_model.trim().is_empty() {
             cfg.model = Some(s.claude_model.trim().to_string());
         }
+        let mut hints: Vec<String> = Vec::new();
         if !s.claude_effort.trim().is_empty() {
-            let hint = format!(
+            hints.push(format!(
                 "Reasoning effort: {}. Match the depth of your analysis to it.",
                 s.claude_effort.trim()
+            ));
+        }
+        if s.web_access {
+            for tool in ["WebSearch", "WebFetch"] {
+                if !cfg.allowed_tools.iter().any(|t| t == tool) {
+                    cfg.allowed_tools.push(tool.to_string());
+                }
+            }
+            hints.push(
+                "Web access is enabled: use WebSearch/WebFetch when live external facts \
+                 (market numbers, prior art, competitors, current events) would sharpen the \
+                 interrogation, and cite the URLs you used."
+                    .to_string(),
             );
+        } else {
+            cfg.disallowed_tools = vec!["WebSearch".to_string(), "WebFetch".to_string()];
+        }
+        if !hints.is_empty() {
+            let hint = hints.join("\n\n");
             cfg.system_prompt = Some(match cfg.system_prompt {
                 Some(p) => format!("{p}\n\n{hint}"),
                 None => hint,
@@ -295,7 +332,8 @@ impl LlmBackend {
         }
     }
 
-    /// Non-streaming completion (extraction, skills, agents).
+    /// Non-streaming completion (extraction, skills, agents). With web access on (ADR-0017) the
+    /// Ollama path runs the bounded tool loop instead of a plain one-shot call.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
         let s = self.settings();
         match s.backend {
@@ -305,10 +343,95 @@ impl LlmBackend {
                 // one conservative turn, never an over-budget one.
                 self.refresh_ollama_ctx().await;
                 let options = self.ollama_options(&s, &messages);
-                self.ollama.chat_with(options, messages).await
+                if s.web_access {
+                    self.ollama_chat_with_web(options, messages).await
+                } else {
+                    self.ollama.chat_with(options, messages).await
+                }
             }
             LlmBackendKind::ClaudeCode => self.claude().chat(messages).await,
         }
+    }
+
+    /// The Ollama web-tool loop (ADR-0017): offer `web_search`/`fetch_url` on a non-streaming
+    /// `/api/chat`, execute whatever the model calls, feed results back as `role: "tool"`
+    /// messages, and repeat — bounded by [`MAX_TOOL_ROUNDS`] rounds and [`MAX_CALLS_PER_ROUND`]
+    /// executions per round, then one forced tool-free call so the turn always ends in prose.
+    ///
+    /// Degrades, never dies (D20): a model without tool support ("does not support tools") falls
+    /// back to the plain offline call, and a failed search/fetch returns as readable tool-result
+    /// text the model can route around ([`crate::ai::web::execute_tool`] is infallible).
+    async fn ollama_chat_with_web(
+        &self,
+        options: ChatOptions,
+        messages: Vec<ChatMessage>,
+    ) -> Result<String, AiError> {
+        let tools = crate::ai::web::tool_definitions();
+        let mut convo: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect();
+
+        for round in 0..MAX_TOOL_ROUNDS {
+            let msg = match self.ollama.chat_tools(options, &convo, Some(&tools)).await {
+                Ok(msg) => msg,
+                // First round only: a model without tool support answers 400 — run the turn as
+                // a plain offline call instead of failing it.
+                Err(AiError::Backend(detail))
+                    if round == 0 && detail.contains("does not support tools") =>
+                {
+                    tracing::warn!(
+                        model = self.ollama.model(),
+                        "web access is on but the model does not support tools; \
+                         falling back to a plain offline call"
+                    );
+                    return self.ollama.chat_with(options, messages).await;
+                }
+                Err(e) => return Err(e),
+            };
+
+            let calls = msg
+                .get("tool_calls")
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if calls.is_empty() {
+                // No (more) tool use — the content is the reply.
+                return Ok(msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default()
+                    .to_string());
+            }
+
+            convo.push(msg.clone());
+            for call in calls.iter().take(MAX_CALLS_PER_ROUND) {
+                let name = call
+                    .pointer("/function/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default();
+                let args = call
+                    .pointer("/function/arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                tracing::info!(tool = name, args = %args, "web tool call (ollama loop)");
+                let result = crate::ai::web::execute_tool(name, &args).await;
+                convo.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": result,
+                }));
+            }
+        }
+
+        // Rounds exhausted: one final call WITHOUT tools so the model must answer in prose off
+        // everything it gathered.
+        let msg = self.ollama.chat_tools(options, &convo, None).await?;
+        Ok(msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string())
     }
 
     /// Streaming completion (D11). Terminal on error; aborts its backend when dropped, so a partial
