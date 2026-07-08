@@ -100,6 +100,6 @@
 
 ## Diagram vocabulary
 
-- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D28`, catalogued in
+- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D29`, catalogued in
   [08-diagrams](./08-diagrams.md). References elsewhere use the ID.
 - **Home doc** — the single document a diagram is authored in; the registry only links to it.

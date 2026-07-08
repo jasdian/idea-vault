@@ -70,8 +70,11 @@ WORKDIR /app
 
 # Pre-create + chown the mountpoints BEFORE dropping privileges. Docker copies
 # this ownership onto a freshly-created named volume (the cosmic/zomboid
-# volume-ownership gotcha) so the non-root process can write index.db.
-RUN mkdir -p /data /vault && chown -R ${APP_UID}:${APP_GID} /data /vault
+# volume-ownership gotcha) so the non-root process can write index.db. /claude
+# is the claude-code state home (docker-compose.claude.yml mounts a named
+# volume there and sets HOME=/claude); without the chown a fresh claude-state
+# volume is root-owned and the non-root `user:` cannot write CLI state.
+RUN mkdir -p /data /vault /claude && chown -R ${APP_UID}:${APP_GID} /data /vault /claude
 
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/idea-vault /usr/local/bin/idea-vault
 # If you do NOT embed static assets with rust-embed, ship them instead:

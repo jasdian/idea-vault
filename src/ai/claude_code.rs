@@ -282,6 +282,10 @@ async fn next_token(mut st: StreamState) -> Option<(Result<String, AiError>, Str
                     st,
                 ));
             }
+            Line::ErrorResult(detail) => {
+                st.finished = true;
+                return Some((Err(AiError::Backend(format!("claude error: {detail}"))), st));
+            }
             Line::Result(result_text) => {
                 st.finished = true;
                 // If partial-message streaming produced nothing, fall back to the result text so
@@ -305,6 +309,10 @@ enum Line {
     Token(String),
     AuthError(String),
     Result(Option<String>),
+    /// A terminal `result` with `is_error: true` — carries the error text (e.g. "Invalid API key ·
+    /// Please run /login" for a bad/expired token) so the turn fails visibly instead of ending as
+    /// a misleading empty reply.
+    ErrorResult(String),
     Ignore,
 }
 
@@ -344,13 +352,12 @@ fn classify_line(line: &str) -> Line {
             _ => Line::Ignore,
         },
         Some("result") => {
-            let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-            let text = if is_error {
-                None
+            let text = v.get("result").and_then(|r| r.as_str()).map(str::to_string);
+            if v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
+                Line::ErrorResult(text.unwrap_or_else(|| "unknown error".into()))
             } else {
-                v.get("result").and_then(|r| r.as_str()).map(str::to_string)
-            };
-            Line::Result(text)
+                Line::Result(text)
+            }
         }
         _ => Line::Ignore,
     }
@@ -385,9 +392,15 @@ mod tests {
     }
 
     #[test]
-    fn classify_error_result_has_no_text() {
+    fn classify_error_result_surfaces_text() {
         let line = r#"{"type":"result","is_error":true,"result":"boom"}"#;
-        assert!(matches!(classify_line(line), Line::Result(None)));
+        assert!(matches!(classify_line(line), Line::ErrorResult(t) if t == "boom"));
+    }
+
+    #[test]
+    fn classify_error_result_without_text_still_errors() {
+        let line = r#"{"type":"result","is_error":true}"#;
+        assert!(matches!(classify_line(line), Line::ErrorResult(t) if t == "unknown error"));
     }
 
     #[test]

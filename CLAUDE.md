@@ -79,7 +79,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D28), and ADRs 0001–0011. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D29), and ADRs 0001–0014. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -143,6 +143,7 @@ is scaffolded). Full topology, build pipeline, and pitfalls are in
 cp .env.example .env                                                   # set IDEA_VAULT_UID/GID to your id -u / id -g
 docker compose up -d --build                                           # CPU mode (default)
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d   # GPU mode (nvidia; needs nvidia-container-toolkit)
+docker compose -f docker-compose.yml -f docker-compose.claude.yml up -d --build   # claude-code backend in-container (ADR-0013; needs a one-time host `claude setup-token` → CLAUDE_CODE_OAUTH_TOKEN in .env)
 docker compose --profile tools run --rm ollama-pull                    # first run: pull the model
 # open http://localhost:3000
 docker compose down
@@ -153,14 +154,24 @@ docker compose down
 `IDEA_VAULT_OLLAMA_URL` (default `http://localhost:11434`; `http://ollama:11434` in-compose),
 `IDEA_VAULT_OLLAMA_MODEL`, `IDEA_VAULT_AI_CONCURRENCY` (default `2`, the shared Ollama-call bound K,
 ADR-0006), `IDEA_VAULT_OLLAMA_TIMEOUT_SECS` (default `120`, the hard inactivity timeout),
-`IDEA_VAULT_OLLAMA_TEMPERATURE` (default `0.7`, range `0.0..=2.0`), and `IDEA_VAULT_CLAUDE_EFFORT`
+`IDEA_VAULT_OLLAMA_TEMPERATURE` (default `0.7`, range `0.0..=2.0`), `IDEA_VAULT_CLAUDE_EFFORT`
 (default `high`; injected as a system-prompt hint, since the claude CLI has no per-call effort
-flag). The last two are only the **initial** values — the live Settings page
-(`GET`/`POST /settings`, [ADR-0011](docs/adr/0011-live-switchable-llm-backend.md)) can retune
-backend/temperature/model/effort at runtime with no restart.
+flag), and the dynamic-context-budget overrides `IDEA_VAULT_OLLAMA_CTX_TOKENS` /
+`IDEA_VAULT_CLAUDE_CTX_TOKENS` (default `0` = auto-derive from the model, else clamped
+`1024..=2_000_000` tokens; [ADR-0014](docs/adr/0014-dynamic-context-budget.md)). All of the above
+are only the **initial** values — the live Settings page (`GET`/`POST /settings`,
+[ADR-0011](docs/adr/0011-live-switchable-llm-backend.md)) can retune
+backend/temperature/model/effort/context-window at runtime with no restart.
 **Never hardcode `localhost:11434` or a localhost bind** — it breaks the
 containerized run. `vault/` is a host bind mount (truth you own); the SQLite index and Ollama models
-are named volumes (rebuildable / re-pullable). GPU touches only the Ollama service.
+are named volumes (rebuildable / re-pullable). GPU touches only the Ollama service. The **claude-code
+container override** (`docker-compose.claude.yml`, [ADR-0013](docs/adr/0013-containerized-claude-code.md))
+bind-mounts the host's own `claude` CLI read-only and persists its state (`.claude/`, `.claude.json`)
+on a `claude-state` named volume via `HOME=/claude`; it needs `IDEA_VAULT_CLAUDE_HOST_BIN` (host CLI
+path, default `~/.local/bin/claude`) and `CLAUDE_CODE_OAUTH_TOKEN` (from a one-time host
+`claude setup-token`) in `.env` — see [docs/12-deployment.md](docs/12-deployment.md) for the
+run commands and pitfalls (rebuild-before-first-volume-creation, restart-for-CLI-update,
+probe-green-but-auth-broken).
 
 ## Conventions
 

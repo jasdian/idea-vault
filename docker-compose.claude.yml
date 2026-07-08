@@ -1,0 +1,69 @@
+# docker-compose.claude.yml
+# Claude Code backend override — layer on top of the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.claude.yml up -d --build
+#
+# Composable with the GPU override (disjoint services — this touches only
+# idea-vault, the gpu file touches only ollama):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.claude.yml up -d
+#
+# What it does: bind-mounts the HOST's `claude` CLI into the container (ro) and
+# makes it the default LLM backend (docs/adr/0009 + 0011 + 0013). The binary is
+# NOT baked into the image — you keep updating it on the host as usual.
+#
+# Auth: one-time on the host, run `claude setup-token` and put the resulting
+# token in .env as CLAUDE_CODE_OAUTH_TOKEN. The `:?` guard below fails `up`
+# fast with a clear message when it is unset — WITHOUT it the container would
+# start fine (`claude --version` needs no auth, so the health probe stays
+# green) and only the first chat turn would fail.
+#
+# Symlink note: the host default ~/.local/bin/claude is a symlink into
+# ~/.local/share/claude/versions/<ver>. Docker dereferences the symlink when
+# the container STARTS, so the mount stays valid across host CLI updates — a
+# plain `docker compose -f docker-compose.yml -f docker-compose.claude.yml
+# restart idea-vault` picks up the new version.
+#
+# State: HOME=/claude relocates ALL CLI state — .claude/ (projects, history,
+# settings) and .claude.json — onto the claude-state named volume, so claude
+# project history persists across container recreation. The image's default
+# $HOME=/app is root-owned and would not be writable by the non-root `user:`.
+#
+# PITFALL — rebuild before the volume is first created: the image chowns the
+# /claude mountpoint (Dockerfile) and Docker copies that ownership onto a
+# FRESH named volume only. If claude-state was created from an older image
+# (root-owned /claude), the CLI cannot write its state. Recovery:
+#   docker compose -f docker-compose.yml -f docker-compose.claude.yml down
+#   docker volume rm idea-vault_claude-state
+#   docker compose -f docker-compose.yml -f docker-compose.claude.yml up -d --build
+#
+# Ollama still starts (depends_on in the base file is untouched): the backend
+# is live-switchable back to Ollama on the Settings page (ADR-0011), so the
+# local model stays one toggle away.
+services:
+  idea-vault:
+    environment:
+      # Boot with claude-code active (still just the INITIAL value — Settings
+      # can live-switch, ADR-0011). Set IDEA_VAULT_LLM_BACKEND in .env to boot
+      # with Ollama instead.
+      IDEA_VAULT_LLM_BACKEND: "${IDEA_VAULT_LLM_BACKEND:-claude-code}"
+      # Fixed in-container path of the ro-mounted host binary (below) — the
+      # container has no PATH entry for it.
+      IDEA_VAULT_CLAUDE_BIN: "/opt/claude/claude"
+      IDEA_VAULT_CLAUDE_MODEL: "${IDEA_VAULT_CLAUDE_MODEL:-}"
+      IDEA_VAULT_CLAUDE_EFFORT: "${IDEA_VAULT_CLAUDE_EFFORT:-high}"
+      # Initial claude-code context-window override in tokens; 0 = auto (docs/adr/0014).
+      IDEA_VAULT_CLAUDE_CTX_TOKENS: "${IDEA_VAULT_CLAUDE_CTX_TOKENS:-0}"
+      # Long-lived auth token from a one-time host `claude setup-token`; the
+      # spawned CLI inherits it from the app's env. `:?` = fail `up` fast.
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:?run 'claude setup-token' on the host and set it in .env}"
+      # CLI derives .claude/ + .claude.json from $HOME → all state on the volume.
+      HOME: "/claude"
+      # The binary is ro + host-managed; the CLI must not try to update itself.
+      DISABLE_AUTOUPDATER: "1"
+    volumes:
+      # The host CLI (symlink dereferenced at container start — see header).
+      - "${IDEA_VAULT_CLAUDE_HOST_BIN:-~/.local/bin/claude}:/opt/claude/claude:ro"
+      # Persistent CLI state (projects, history, auth cache) — see HOME above.
+      - claude-state:/claude
+
+volumes:
+  claude-state:

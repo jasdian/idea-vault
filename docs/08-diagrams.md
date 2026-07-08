@@ -6,7 +6,7 @@
 
 ## Conventions
 
-- **ID** — stable `D1`…`D28` (see Coverage below for why the range runs past D25). References
+- **ID** — stable `D1`…`D29` (see Coverage below for why the range runs past D25). References
   across docs use the ID.
 - **Tool** — all diagrams are **Mermaid** in `mermaid` fenced code blocks, rendering inline on GitHub with no
   build step (see [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md) ethos; escape hatches below).
@@ -71,13 +71,14 @@
 | **D26** | Deployment | Container topology: app + ollama, network, volumes, bind mount | [12-deployment](./12-deployment.md) |
 | **D27** | Flowchart | Multi-stage image build (cargo-chef → runtime) | [12-deployment](./12-deployment.md) |
 | **D28** | Flowchart | CPU vs GPU compose composition (override merge) | [12-deployment](./12-deployment.md) |
+| **D29** | Deployment | claude-code container topology: host CLI bind-mount, `CLAUDE_CODE_OAUTH_TOKEN`, `claude-state` volume | [12-deployment](./12-deployment.md) |
 
 ## Coverage
 
-- **28 IDs, D1–D28** (D17 is used but note that D1–D25 was the originally-stated range; D26–D28
-  were added for containerized deployment without renumbering — the range is D1–D28 in practice,
+- **29 IDs, D1–D29** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
+  were added for containerized deployment without renumbering — the range is D1–D29 in practice,
   not D1–D25), each authored exactly once. **D1–D15** are the mandatory core (they cover every
-  flow named in [CLAUDE.md](../CLAUDE.md)); **D16–D25** complete the SOTA set; **D26–D28** cover
+  flow named in [CLAUDE.md](../CLAUDE.md)); **D16–D25** complete the SOTA set; **D26–D29** cover
   containerized deployment.
 - The six core flows from CLAUDE.md map to: new idea **D10**, chat (background job + poll, not SSE
   — ADR-0010) **D11**, store+memory **D12**, reopen+memory **D13**, swarm **D14**, reindex **D15**.

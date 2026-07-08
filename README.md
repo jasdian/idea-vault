@@ -38,6 +38,10 @@ docker compose up -d --build
 # --- GPU mode (nvidia) instead — see prerequisites below ---
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 
+# --- claude-code backend instead of/alongside Ollama (needs a one-time host
+#     `claude setup-token` -> CLAUDE_CODE_OAUTH_TOKEN in .env; see docs/12-deployment.md) ---
+docker compose -f docker-compose.yml -f docker-compose.claude.yml up -d --build
+
 # open the app
 xdg-open http://localhost:3000     # or just browse to it
 
@@ -88,6 +92,7 @@ topology, build pipeline, volume strategy, and pitfalls.
 | [`Dockerfile`](Dockerfile) | Multi-stage Rust build (cargo-chef, bundled SQLite, rustls, non-root) |
 | [`docker-compose.yml`](docker-compose.yml) | Base stack: `idea-vault` + `ollama` + `ollama-pull` (CPU) |
 | [`docker-compose.gpu.yml`](docker-compose.gpu.yml) | nvidia GPU override for the `ollama` service |
+| [`docker-compose.claude.yml`](docker-compose.claude.yml) | claude-code backend override — bind-mounts the host `claude` CLI + persists its state on a `claude-state` volume (see `docs/adr/0013-containerized-claude-code.md`) |
 | [`.env.example`](.env.example) | uid/gid, model, log level |
 
 ## Data & privacy
