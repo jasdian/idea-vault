@@ -408,7 +408,10 @@ a.tagchip:hover { border-color: var(--accent); }
 }
 .newidea__hint .rail__kbd { color: var(--muted); }
 
-.idea-row { padding: .7rem 0; border-bottom: 1px solid var(--rule); display: flex; align-items: baseline; gap: .6rem; }
+.idea-row {
+  padding: .7rem 0; border-bottom: 1px solid var(--rule);
+  display: flex; align-items: baseline; gap: .5rem .6rem; flex-wrap: wrap;
+}
 .idea-row a { font-family: var(--serif); font-size: 1.1rem; color: var(--ink); text-decoration: none; }
 .idea-row a:hover { color: var(--accent); }
 .idea-row .idea-meta { font-family: var(--mono); font-size: .72rem; color: var(--faint); margin-left: auto; white-space: nowrap; }
@@ -644,6 +647,14 @@ a.tagchip:hover { border-color: var(--accent); }
   color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
+/* Wraps the status chip + the optional "known tools" disclosure so both still swap as one unit
+   under the same #mcp-status-<name> id (hx-swap="outerHTML" needs a stable root). */
+.mcp__status-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: .3rem; flex: 0 1 auto; max-width: 100%; }
+.mcp__tools { font-family: var(--mono); font-size: .68rem; color: var(--muted); text-align: left; }
+.mcp__tools summary { cursor: pointer; color: var(--faint); }
+.mcp__tools summary:hover { color: var(--accent); }
+.mcp__tools ul { list-style: none; margin: .3rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .15rem; }
+.mcp__tools code { color: var(--accent); }
 
 /* ---- mcp edit form: change url / token in place (fieldset-free — it's one row, not a group) --- */
 .mcp__edit-form { display: flex; flex-direction: column; gap: .6rem; }
@@ -751,4 +762,11 @@ body.palette-open { overflow: hidden; }
   .rail__link { padding: 0 0 0 .9rem; }
   .leaf { padding: 1.25rem 1.1rem 4rem; }
   .leaf > * { max-width: none; }
+
+  /* The desktop-only `margin-left: auto` on .commit hugs the button to the far right once
+     .commit-bar wraps to two lines — isolated and off-balance on a narrow screen. Stack instead,
+     full-width button, so it reads as one intentional block rather than a layout accident. */
+  .commit-bar { flex-direction: column; align-items: stretch; gap: .6rem; }
+  .commit { margin: 0; }
+  .commit .btn--commit { width: 100%; }
 }

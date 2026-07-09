@@ -39,7 +39,7 @@ pub async fn compact(
 
     let ts = state.clone();
     let tslug = slug.clone();
-    let handle = tokio::spawn(async move {
+    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
         jobs::set_note(&ts.jobs, &tslug, "compacting older turns…");
         // force = true: ignore the toggle/threshold and fold at the forced (zero-tail) targets.
         let r = compact::run_compaction(
@@ -62,7 +62,7 @@ pub async fn compact(
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    jobs::set_abort(&state.jobs, &slug, abort);
 
     respond_with_transcript(&state, &slug)
 }

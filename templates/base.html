@@ -125,7 +125,49 @@
         });
       }
       document.addEventListener("DOMContentLoaded", addCopyButtons);
-      document.body.addEventListener("htmx:afterSwap", addCopyButtons);
+      // Listen on `document`, not `document.body`: this script runs synchronously in <head>,
+      // before <body> exists yet, so `document.body` is null at this point and registering on it
+      // throws (silently aborting the rest of this script block — this bit everyone below it
+      // too, before this fix). htmx events bubble, so `document` catches the same swaps.
+      document.addEventListener("htmx:afterSwap", addCopyButtons);
+
+      // Self-healing "thinking" poll: the background-job indicator (ADR-0010) is a self-repolling
+      // hx-trigger="load delay:1500ms" chain — every response must itself carry a fresh copy of
+      // the indicator to keep polling. htmx never swaps on a 4xx/5xx response, and a dropped
+      // connection swaps nothing either, so either failure permanently kills the chain with no
+      // listener to resume it — the last-rendered "…Ns" sits frozen until a manual reload. Retry
+      // the same element's load trigger after a short delay instead of letting it die silently.
+      (function () {
+        function retryPendingPoll(e) {
+          var elt = e.detail && e.detail.elt;
+          if (!elt || !elt.classList || !elt.classList.contains("foil-pending")) return;
+          setTimeout(function () {
+            if (document.body.contains(elt)) htmx.trigger(elt, "load");
+          }, 2000);
+        }
+        document.addEventListener("htmx:responseError", retryPendingPoll);
+        document.addEventListener("htmx:sendError", retryPendingPoll);
+      })();
+
+      // Land at the bottom of an actively InDiscussion conversation instead of the top — the
+      // owner is there to keep pushing the exchange, not to re-read the opening line every time.
+      // Gated on #idea-state's live text (kept fresh by every transcript response's OOB badge,
+      // see state_badge_oob) rather than a static attribute, so the very first chat turn (which
+      // flips Draft -> InDiscussion mid-page, no reload) is caught too. Runs on every #transcript
+      // swap, including poll ticks, so it keeps pinning to bottom as the reply streams in — but
+      // Draft/Stored/Reopened-before-first-turn are left at their natural scroll position.
+      (function () {
+        function scrollDiscussionToBottom() {
+          var stateBadge = document.getElementById("idea-state");
+          if (!stateBadge || stateBadge.textContent.trim() !== "in_discussion") return;
+          window.scrollTo(0, document.body.scrollHeight);
+        }
+        document.addEventListener("DOMContentLoaded", scrollDiscussionToBottom);
+        document.addEventListener("htmx:afterSwap", function (e) {
+          var target = e.detail && e.detail.target;
+          if (target && target.id === "transcript") scrollDiscussionToBottom();
+        });
+      })();
     </script>
   </head>
   <body>

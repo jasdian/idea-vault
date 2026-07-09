@@ -183,6 +183,11 @@ pub struct Actions {
     pub busy: bool,
     /// The built-in deterministic workflows (D19) — one chip each, next to swarm.
     pub workflows: Vec<WorkflowChip>,
+    /// The trailing sentence fragment in the swarm/workflow/extract tooltips ("Runs serially
+    /// <this>, so it takes a while.") — precomputed per the active `LlmBackendKind` (like
+    /// `availability_hint`'s remedy copy) rather than branching in the template, so the copy is
+    /// never a lie about which backend is actually running the call.
+    pub backend_note: String,
     pub oob: bool,
 }
 
@@ -323,6 +328,11 @@ pub struct McpStatus {
     pub text: String,
     pub ok: bool,
     pub errored: bool,
+    /// The server's last-known tool list (name + description), from `McpRegistry::known_tools`.
+    /// Unlike `text`/`ok`/`errored`, this deliberately survives a page refresh and an unrelated
+    /// probe failure — it is a display convenience, not a health claim (see the registry field
+    /// doc). Empty means "never successfully probed this process lifetime".
+    pub tools: Vec<crate::mcp::ToolSummary>,
 }
 
 /// One search hit, pre-rendered for `_search_results.html` from `index::queries::SearchHit` by

@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use crate::app::AppState;
-use crate::domain::{slug as domain_slug, Idea, IdeaFrontmatter, IdeaState};
+use crate::domain::{slug as domain_slug, Idea, IdeaFrontmatter, IdeaState, MAX_IDEA_TAGS};
 use crate::index::{queries, reindex};
 use crate::vault::store;
 use crate::web::templates::{IdeaPage, IdeaRow, ListPage, SearchResults};
@@ -239,14 +239,28 @@ pub(crate) fn transcript_inner(
     Ok(html)
 }
 
+/// The trailing sentence fragment in the swarm/workflow/extract tooltips, worded for whichever
+/// backend is actually going to run the call — see `Actions::backend_note` doc. Split out for the
+/// same unit-testability reason `availability_hint` is.
+fn backend_note(backend: crate::config::LlmBackendKind) -> String {
+    use crate::config::LlmBackendKind;
+    let via = match backend {
+        LlmBackendKind::Ollama => "on your local Ollama model",
+        LlmBackendKind::ClaudeCode => "via claude-code",
+    };
+    format!("Runs serially {via}, so it takes a while.")
+}
+
 /// Render the `#idea-actions` block (`_actions.html`) — the state-dependent moves/swarm/store
 /// controls. Shared by the full-page `_discussion.html` render (`oob = false`) and the
 /// out-of-band fragment appended to transcript responses (`oob = true`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_actions(
     slug: &str,
     skill_names: Vec<String>,
     can_store: bool,
     busy: bool,
+    backend: crate::config::LlmBackendKind,
     oob: bool,
 ) -> Result<String, WebError> {
     use askama::Template as _;
@@ -264,6 +278,7 @@ pub(crate) fn render_actions(
         skill_names,
         busy,
         workflows,
+        backend_note: backend_note(backend),
         oob,
     }
     .render()
@@ -314,7 +329,14 @@ pub(crate) fn respond_with_transcript(
     );
     let skill_names = state.skills.move_names();
     html.push_str(&state_badge_oob(idea.frontmatter.state));
-    html.push_str(&render_actions(slug, skill_names, can_store, busy, true)?);
+    html.push_str(&render_actions(
+        slug,
+        skill_names,
+        can_store,
+        busy,
+        state.llm.settings().backend,
+        true,
+    )?);
     // Third OOB fragment: the artifacts panel, so a finished extraction (or any transcript
     // refresh) surfaces the new files without a reload — the panel sits outside `#transcript`.
     html.push_str(&crate::web::routes::artifacts::render_artifacts_panel(
@@ -559,7 +581,7 @@ pub(crate) fn build_discussion(
         budget_bytes,
         tools_bytes,
     )?;
-    let actions_html = render_actions(slug, skill_names, can_store, busy, false)?;
+    let actions_html = render_actions(slug, skill_names, can_store, busy, backend, false)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),
@@ -755,9 +777,6 @@ pub struct TagsForm {
     pub tags: String,
 }
 
-/// Cap on the owner-edited tag set — enough to classify, few enough to stay chips not prose.
-const MAX_TAGS: usize = 10;
-
 /// `POST /idea/{slug}/tags` — replace the idea's tag set. Tokens are slugified (the tag alphabet
 /// is the slug alphabet — that is what reindex, the `kind='tags'` search rows, and the chip URLs
 /// all assume); junk tokens drop silently; empty input clears the set. Like rename, this is a
@@ -775,7 +794,7 @@ pub async fn set_tags(
                 tags.push(tag);
             }
         }
-        if tags.len() == MAX_TAGS {
+        if tags.len() == MAX_IDEA_TAGS {
             break;
         }
     }

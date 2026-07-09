@@ -86,6 +86,15 @@ that offers each enabled server's tools to whichever backend is active.
   invented as zero-cost, it's simply not counted yet). This is **stale-but-honest**: the cache can lag
   a server's actual current tool set by one probe/turn, which is preferable to a per-render network
   call blocking every page load on N servers' health.
+- **The "known tools" disclosure.** `McpRegistry` keeps a second in-memory, never-persisted cache
+  (`known_tools`: server name → last-known `Vec<ToolSummary>`, name + description only, never the
+  JSON schema) alongside `tools_bytes`, same stale-but-honest posture and same population trigger (a
+  probe). Unlike the probe *status* chip — which deliberately re-renders as "not probed" on every
+  `GET /mcp` load, because a stale "ok" would misrepresent a server's current health — the tool-name
+  list is a display convenience, not a health claim, so it is read back and shown even across a page
+  refresh and even alongside a since-failed reprobe. `crate::mcp` still never imports `ai::mcp`
+  (§ dependency rule below): `ToolSummary` is a local, minimal mirror of `ai::mcp::McpTool`, and
+  `web::routes::mcp` does the conversion.
 
 ## Consequences
 

@@ -36,6 +36,11 @@ Job>>>`) keyed by idea slug, **one job per idea**:
 - `mark_done(jobs, slug)` — clear the slot on success (the result is already on disk).
 - `mark_failed(jobs, slug, message)` — record a human-readable failure message, read once by the
   next poll then cleared.
+- `spawn_job(jobs, slug, work) -> AbortHandle` — every route's `tokio::spawn` call site goes through
+  this instead of `tokio::spawn` directly: it wraps `work` in `catch_unwind` so a panic partway
+  through (not just a `Result::Err`) still reaches `mark_failed` instead of leaving the slot
+  `Running` forever with nothing left to ever clear it — a bare `tokio::spawn` swallows a panicking
+  task's result silently.
 - `peek(jobs, slug) -> Pending` — `Pending::Running(u64)` (elapsed whole seconds since start),
   `Pending::Failed(String)` (consumed on read), or `Pending::Idle` (no job — the transcript on disk
   is final).
@@ -57,7 +62,12 @@ Mechanics of one turn (chat as the canonical case; skill and swarm follow the sa
    navigation) a **server-driven "thinking… Ns" indicator** — the elapsed-seconds count is computed
    server-side from `Job.started`, not tracked in the browser — and swap in the finished transcript
    once `peek` reports `Idle`. A `Failed` result surfaces as a visible error in the transcript pane,
-   consumed exactly once.
+   consumed exactly once. The indicator is a **self-repolling** `hx-trigger="load delay:1500ms"`
+   element: each poll response must itself carry a fresh copy to keep the chain alive. htmx never
+   swaps on a 4xx/5xx (or a dropped-connection) response, which would otherwise permanently kill the
+   chain with the last-rendered "…Ns" frozen on screen; a `base.html` listener on
+   `htmx:responseError`/`htmx:sendError` re-fires the same element's `load` trigger after a short
+   delay so a transient failure self-heals instead of requiring a manual reload.
 
 Skills (`POST /idea/{slug}/skill/{name}`) and swarm (`POST /idea/{slug}/swarm`) use the identical
 claim → spawn → poll pattern; only the work inside the detached task differs (a single skill

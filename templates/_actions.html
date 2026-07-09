@@ -9,14 +9,14 @@
     {% endif %}{% endfor %}
     <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML">
       <button type="submit" class="chip chip--swarm"
-              title="Fans out subagents that attack the idea from 4 angles (premortem, cheapest-disproof, constraints, second-order effects), then converges them into one synthesis. Runs serially on a local model, so it takes a while.">swarm</button>
+              title="Fans out subagents that attack the idea from 4 angles (premortem, cheapest-disproof, constraints, second-order effects), then converges them into one synthesis. {{ backend_note }}">swarm</button>
     </form>
     {% for wf in workflows %}
     <form hx-post="/idea/{{ slug }}/workflow/{{ wf.name }}" hx-target="#transcript" hx-swap="innerHTML">
       {# Text-only like the sibling chips — an emoji glyph inflates the chip's line box and makes
          it tower over the rest of the row; the dashed border is the workflow marker. #}
       <button type="submit" class="chip chip--workflow"
-              title="Deterministic workflow (D19): {{ wf.description }}. Runs serially on a local model, so it takes a while.">{{ wf.name }}</button>
+              title="Deterministic workflow (D19): {{ wf.description }}. {{ backend_note }}">{{ wf.name }}</button>
     </form>
     {% endfor %}
     <span class="moves__caption">attacks from 4 angles, then converges into one synthesis</span>
@@ -29,7 +29,7 @@
     </form>
     <form class="extract" hx-post="/idea/{{ slug }}/extract" hx-target="#transcript" hx-swap="innerHTML">
       <button type="submit" class="chip chip--extract"
-              title="Fans out explore subagents that each harvest one category of durable knowledge (decisions, facts, open questions, risks, next actions), keeps every finding as a markdown file under artifacts/, and converges a synthesis. Runs serially on a local model, so it takes a while.">⛏ extract knowledge</button>
+              title="Fans out explore subagents that each harvest one category of durable knowledge (decisions, facts, open questions, risks, next actions), keeps every finding as a markdown file under artifacts/, and converges a synthesis. {{ backend_note }}">⛏ extract knowledge</button>
       <label class="extract__opt" title="Additionally write a self-contained HTML report of the run into artifacts/">
         <input type="checkbox" name="html" value="true"> + HTML report
       </label>

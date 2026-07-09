@@ -17,9 +17,11 @@
 //! indicator shows real per-step progress rather than a bare spinner.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use futures::FutureExt as _;
 use tokio::task::AbortHandle;
 
 /// One idea's job slot. `Failed` and `Notice` are read once (by the next poll) then cleared.
@@ -87,6 +89,32 @@ pub fn try_claim(jobs: &Jobs, slug: &str) -> bool {
         },
     );
     true
+}
+
+/// Spawn a claimed job's detached task with a panic backstop. Every call site already converts
+/// `work`'s own `Result` to [`mark_done`]/[`mark_failed`] internally — but if `work` itself
+/// *panics* partway through (a template render, an unexpected slice index, ...), a bare
+/// `tokio::spawn` never runs either arm: the slot stays `Running` forever, the "thinking… Ns"
+/// poll (ADR-0010) keeps counting with no error ever surfacing, and the owner's only way out is
+/// restarting the process. `catch_unwind`ing the future here converts that into an honest
+/// `mark_failed`, matching what every other failure mode in this job already does. Returns the
+/// [`AbortHandle`] the caller passes to [`set_abort`], same as calling `tokio::spawn` directly.
+pub fn spawn_job<F>(jobs: &Jobs, slug: &str, work: F) -> AbortHandle
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let jobs = jobs.clone();
+    let slug = slug.to_string();
+    let handle = tokio::spawn(async move {
+        if AssertUnwindSafe(work).catch_unwind().await.is_err() {
+            mark_failed(
+                &jobs,
+                &slug,
+                "internal error: the background job panicked".to_string(),
+            );
+        }
+    });
+    handle.abort_handle()
 }
 
 /// Register the spawned task's abort handle on the (already claimed) slot, so [`cancel`] can stop
@@ -204,6 +232,32 @@ pub fn peek(jobs: &Jobs, slug: &str) -> Pending {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn spawn_job_catches_a_panic_and_marks_failed_instead_of_leaving_the_slot_stuck() {
+        let jobs = new_registry();
+        assert!(try_claim(&jobs, "i"));
+        let abort = spawn_job(&jobs, "i", async {
+            panic!("boom");
+        });
+        set_abort(&jobs, "i", abort);
+
+        // Poll until the spawned task has run (it's a separate tokio task, so give it a beat).
+        let mut pending = peek(&jobs, "i");
+        for _ in 0..100 {
+            if !matches!(pending, Pending::Running { .. }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            pending = peek(&jobs, "i");
+        }
+        match pending {
+            Pending::Failed(msg) => assert!(msg.contains("panicked"), "message was: {msg}"),
+            _ => panic!("expected the panic to surface as Failed"),
+        }
+        // The slot is free again — a panicked job must not wedge the idea forever.
+        assert!(try_claim(&jobs, "i"));
+    }
 
     #[test]
     fn set_note_round_trips_through_peek() {

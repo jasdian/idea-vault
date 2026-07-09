@@ -1,3 +1,12 @@
-<span id="mcp-status-{{ name }}"
-      class="mcp__status{% if ok %} mcp__status--ok{% endif %}{% if errored %} mcp__status--error{% endif %}"
->{{ text }}</span>
+<div id="mcp-status-{{ name }}" class="mcp__status-wrap">
+  <span class="mcp__status{% if ok %} mcp__status--ok{% endif %}{% if errored %} mcp__status--error{% endif %}"
+  >{{ text }}</span>
+  {% if !tools.is_empty() %}
+  <details class="mcp__tools">
+    <summary>{{ tools.len() }} known tool{% if tools.len() != 1 %}s{% endif %}</summary>
+    <ul>
+      {% for t in tools %}<li><code>{{ t.name }}</code>{% if !t.description.is_empty() %} — {{ t.description }}{% endif %}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>

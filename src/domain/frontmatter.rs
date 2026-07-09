@@ -7,6 +7,11 @@ use crate::domain::artifact::ArtifactKind;
 use crate::domain::idea::IdeaState;
 use crate::domain::DomainError;
 
+/// Cap on `IdeaFrontmatter::tags`, shared by every writer (the owner-edit form and store-time
+/// model-suggested merge) so the set stays chips, not prose, no matter how many store/reopen
+/// cycles an idea goes through.
+pub const MAX_IDEA_TAGS: usize = 10;
+
 /// The structured header of `idea.md`. Field names and the serialized `state` values are a data
 /// contract (docs/03-data-model.md D8) — do not rename.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -57,6 +57,17 @@ pub enum TokenChange {
     Set(String),
 }
 
+/// A tool's name + human-readable description, as last learned from a probe — the display-safe
+/// subset of `ai::mcp::McpTool` (never the JSON schema, to keep this cache small). Defined here
+/// rather than reused from `ai::mcp` because this module must never import `ai` (see the module
+/// doc); `web::routes::mcp`, which is allowed to see both, does the `McpTool` → `ToolSummary`
+/// conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSummary {
+    pub name: String,
+    pub description: String,
+}
+
 /// Validate a server name: non-empty `[a-z0-9-]`. Kept strict because the name is spliced into
 /// model-facing tool names — an `_` would collide with the `__` separators, spaces/uppercase
 /// would break the claude CLI's `mcp__<name>` allow-prefix convention.
@@ -79,6 +90,12 @@ pub struct McpRegistry {
     /// whatever last listed the tools (a probe, or a turn's bridge), so it can be a little stale;
     /// stale-but-honest beats a per-render network call.
     tools_bytes: RwLock<HashMap<String, usize>>,
+    /// Last-known tool list (name + description) per server, keyed by name. In-memory only, same
+    /// staleness posture as `tools_bytes` — populated by a probe, read by the panel so the tool
+    /// names survive a page refresh even though the probe *status* chip deliberately resets to
+    /// "not probed" on every render (a stale "ok" would be misleading after an edit; a stale
+    /// *tool list* is a display convenience, not a health claim).
+    known_tools: RwLock<HashMap<String, Vec<ToolSummary>>>,
 }
 
 impl McpRegistry {
@@ -114,6 +131,7 @@ impl McpRegistry {
             path,
             servers: RwLock::new(servers),
             tools_bytes: RwLock::new(HashMap::new()),
+            known_tools: RwLock::new(HashMap::new()),
         }
     }
 
@@ -124,6 +142,25 @@ impl McpRegistry {
             .write()
             .expect("mcp tools-bytes lock poisoned")
             .insert(name.to_string(), bytes);
+    }
+
+    /// Record one server's last-known tool list (from a probe). Read by the panel — see the
+    /// `known_tools` field doc.
+    pub fn note_tools(&self, name: &str, tools: Vec<ToolSummary>) {
+        self.known_tools
+            .write()
+            .expect("mcp known-tools lock poisoned")
+            .insert(name.to_string(), tools);
+    }
+
+    /// The last-known tool list for one server, if it has ever been probed this process lifetime.
+    /// `None` (not empty) distinguishes "never probed" from "probed, zero tools exposed".
+    pub fn known_tools(&self, name: &str) -> Option<Vec<ToolSummary>> {
+        self.known_tools
+            .read()
+            .expect("mcp known-tools lock poisoned")
+            .get(name)
+            .cloned()
     }
 
     /// Sum of the last-known tool-definition sizes across *enabled* servers — the meter's
@@ -198,6 +235,10 @@ impl McpRegistry {
             self.tools_bytes
                 .write()
                 .expect("mcp tools-bytes lock poisoned")
+                .remove(name);
+            self.known_tools
+                .write()
+                .expect("mcp known-tools lock poisoned")
                 .remove(name);
         }
         self.save()
@@ -476,6 +517,35 @@ mod tests {
 
         // Neither failure mutated the one real server.
         assert_eq!(reg.list()[0].url, "http://mcp.example/tracker");
+    }
+
+    #[test]
+    fn known_tools_round_trips_and_clears_on_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = McpRegistry::load(tmp.path().join(".mcp-servers.json"));
+        reg.add(server("tracker", true)).unwrap();
+
+        assert_eq!(reg.known_tools("tracker"), None, "never probed yet");
+
+        let tools = vec![
+            ToolSummary {
+                name: "search".into(),
+                description: "find things".into(),
+            },
+            ToolSummary {
+                name: "fetch".into(),
+                description: "".into(),
+            },
+        ];
+        reg.note_tools("tracker", tools.clone());
+        assert_eq!(reg.known_tools("tracker"), Some(tools));
+
+        reg.remove("tracker").unwrap();
+        assert_eq!(
+            reg.known_tools("tracker"),
+            None,
+            "removing a server clears its known-tools cache entry too"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub use artifact::{Artifact, ArtifactKind};
 pub use compacted::Compacted;
 pub use frontmatter::{
     ArtifactFrontmatter, CompactedFrontmatter, IdeaFrontmatter, MemoryFactFrontmatter,
+    MAX_IDEA_TAGS,
 };
 pub use idea::{Idea, IdeaState};
 pub use memory::{MemoryFact, MemoryIndex};

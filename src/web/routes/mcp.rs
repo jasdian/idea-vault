@@ -22,7 +22,7 @@ use serde::Deserialize;
 
 use crate::ai::mcp::McpClient;
 use crate::app::AppState;
-use crate::mcp::{McpServerConfig, TokenChange};
+use crate::mcp::{McpServerConfig, TokenChange, ToolSummary};
 use crate::web::templates::{McpEditRow, McpList, McpPage, McpRow, McpServerRow, McpStatus};
 use crate::web::WebError;
 
@@ -39,20 +39,21 @@ fn truncate_status(message: String) -> String {
     }
 }
 
-fn idle_status(name: &str) -> McpStatus {
+fn idle_status(state: &AppState, name: &str) -> McpStatus {
     McpStatus {
         name: name.to_string(),
         text: "not probed".to_string(),
         ok: false,
         errored: false,
+        tools: state.mcp.known_tools(name).unwrap_or_default(),
     }
 }
 
 /// Build one row's view struct from a registry entry — shared by the full list, `view_server_row`
 /// (the edit form's cancel target), and `update_server`'s re-render so all three stay identical.
-fn server_row(s: McpServerConfig) -> McpServerRow {
+fn server_row(state: &AppState, s: McpServerConfig) -> McpServerRow {
     McpServerRow {
-        status_html: render(idle_status(&s.name)),
+        status_html: render(idle_status(state, &s.name)),
         has_token: s.bearer_token.is_some(),
         name: s.name,
         url: s.url,
@@ -63,7 +64,12 @@ fn server_row(s: McpServerConfig) -> McpServerRow {
 /// Build the current `#mcp` panel from the live registry state.
 fn list_view(state: &AppState) -> McpList {
     McpList {
-        servers: state.mcp.list().into_iter().map(server_row).collect(),
+        servers: state
+            .mcp
+            .list()
+            .into_iter()
+            .map(|s| server_row(state, s))
+            .collect(),
     }
 }
 
@@ -177,7 +183,7 @@ pub async fn view_server_row(
 ) -> Result<McpRow, WebError> {
     let s = find(&state, &name)?;
     Ok(McpRow {
-        server: server_row(s),
+        server: server_row(&state, s),
     })
 }
 
@@ -233,34 +239,49 @@ pub async fn probe_server(
 
     let outcome = probe(&server).await;
     match &outcome {
-        Ok((n, def_bytes)) => {
+        Ok((tools, def_bytes)) => {
             // Feed the usage meter's "(+N KB tools)" term ahead of the first turn — the probe is
             // the earliest moment the schemas' size is known (ADR-0017 honest-meter rule).
             state.mcp.note_tools_bytes(&name, *def_bytes);
-            tracing::info!(server = %name, tools = n, "mcp probe ok");
+            let summaries = tools
+                .iter()
+                .map(|t| ToolSummary {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                })
+                .collect();
+            state.mcp.note_tools(&name, summaries);
+            tracing::info!(server = %name, tools = tools.len(), "mcp probe ok");
         }
         Err(e) => tracing::warn!(server = %name, error = %e, "mcp probe failed"),
     }
+    // Read back from the registry rather than re-deriving from `outcome` on both branches: a
+    // failed reprobe must not blank out a still-good tool list from an earlier successful probe
+    // (the tool list is a display convenience, not tied to this request's outcome — see the
+    // `known_tools` field doc).
+    let tools = state.mcp.known_tools(&name).unwrap_or_default();
     Ok(match outcome {
-        Ok((n, _)) => McpStatus {
+        Ok((n_tools, _)) => McpStatus {
             name,
-            text: format!("{n} tools · ok"),
+            text: format!("{} tools · ok", n_tools.len()),
             ok: true,
             errored: false,
+            tools,
         },
         Err(message) => McpStatus {
             name,
             text: truncate_status(message),
             ok: false,
             errored: true,
+            tools,
         },
     })
 }
 
-/// The bounded network call: `initialize` then `tools/list`, returning the tool count plus the
+/// The bounded network call: `initialize` then `tools/list`, returning the tool list plus the
 /// serialized size of the mangled definitions (what a turn would actually splice into context —
 /// the meter's unit). Split out from the handler so the wiring above stays free of the `?`-chain.
-async fn probe(server: &McpServerConfig) -> Result<(usize, usize), String> {
+async fn probe(server: &McpServerConfig) -> Result<(Vec<crate::ai::mcp::McpTool>, usize), String> {
     let client = McpClient::new(server.url.clone(), server.bearer_token.clone())?;
     let mut session = client.connect().await?;
     let tools = session.list_tools().await?;
@@ -268,5 +289,5 @@ async fn probe(server: &McpServerConfig) -> Result<(usize, usize), String> {
     let def_bytes = crate::ai::backend::merged_tool_definitions(None, &one)
         .to_string()
         .len();
-    Ok((tools.len(), def_bytes))
+    Ok((tools, def_bytes))
 }

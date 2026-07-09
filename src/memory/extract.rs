@@ -15,7 +15,7 @@ use crate::ai::budget::{assemble_context, ContextBudget, ContextInput};
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::domain::{links, slug as domain_slug};
-use crate::domain::{IdeaState, MemoryFact, MemoryFactFrontmatter, MemoryIndex};
+use crate::domain::{IdeaState, MemoryFact, MemoryFactFrontmatter, MemoryIndex, MAX_IDEA_TAGS};
 use crate::memory::load::split_turns;
 use crate::memory::MemoryError;
 use crate::vault::store;
@@ -284,10 +284,14 @@ pub async fn extract_and_store(
     }
 
     // Merge model-suggested tags (additive only: owner-set tags are never removed, and a
-    // re-store can only grow the set — same "memory only grows" posture as facts). The tags
-    // land in idea.md frontmatter, which reindex mines into the tags tables and the
-    // `kind='tags'` search rows.
+    // re-store can only grow the set — same "memory only grows" posture as facts), capped at
+    // MAX_IDEA_TAGS total so repeated store/reopen cycles can't grow the set without bound (the
+    // same ceiling the owner-edit path enforces). The tags land in idea.md frontmatter, which
+    // reindex mines into the tags tables and the `kind='tags'` search rows.
     for tag in parse_tags(&facts_raw) {
+        if idea.frontmatter.tags.len() >= MAX_IDEA_TAGS {
+            break;
+        }
         if !idea.frontmatter.tags.iter().any(|t| t == &tag) {
             idea.frontmatter.tags.push(tag);
         }

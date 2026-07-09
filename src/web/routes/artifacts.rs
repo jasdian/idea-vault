@@ -45,13 +45,13 @@ pub async fn run_extract(
     let ts = state.clone();
     let tslug = slug.clone();
     let want_html = form.html;
-    let handle = tokio::spawn(async move {
+    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
         match run_extract_work(&ts, &tslug, want_html).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    jobs::set_abort(&state.jobs, &slug, abort);
     crate::web::routes::ideas::respond_with_transcript(&state, &slug)
 }
 

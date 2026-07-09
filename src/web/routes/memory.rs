@@ -57,7 +57,7 @@ pub async fn store_idea(
     }
     let ts = state.clone();
     let tslug = slug.clone();
-    let handle = tokio::spawn(async move {
+    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
         jobs::set_note(
             &ts.jobs,
             &tslug,
@@ -68,7 +68,7 @@ pub async fn store_idea(
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    jobs::set_abort(&state.jobs, &slug, abort);
 
     respond_with_transcript(&state, &slug)
 }
@@ -196,13 +196,13 @@ pub async fn run_skill(
     }
     let ts = state.clone();
     let tslug = slug.clone();
-    let handle = tokio::spawn(async move {
+    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
         match run_skill_work(&ts, &tslug, skill).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    jobs::set_abort(&state.jobs, &slug, abort);
     respond_with_transcript(&state, &slug)
 }
 
@@ -290,13 +290,13 @@ pub async fn run_swarm(
     }
     let ts = state.clone();
     let tslug = slug.clone();
-    let handle = tokio::spawn(async move {
+    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
         match run_swarm_work(&ts, &tslug, angles).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    jobs::set_abort(&state.jobs, &slug, abort);
     respond_with_transcript(&state, &slug)
 }
 
@@ -322,7 +322,7 @@ pub async fn run_workflow(
     }
     let ts = state.clone();
     let tslug = slug.clone();
-    let handle = tokio::spawn(async move {
+    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
         jobs::set_note(
             &ts.jobs,
             &tslug,
@@ -333,7 +333,7 @@ pub async fn run_workflow(
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    jobs::set_abort(&state.jobs, &slug, abort);
     respond_with_transcript(&state, &slug)
 }
 

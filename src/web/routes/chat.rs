@@ -74,7 +74,7 @@ pub async fn chat(
     // Detached: the reply outlives this request.
     let task_state = state.clone();
     let task_slug = slug.clone();
-    let handle = tokio::spawn(async move {
+    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
         // Phase 0: pre-emptive, best-effort compaction (auto-compact, docs/adr/0012). It runs
         // BEFORE the reply so the very turn that tripped the threshold is answered off the freshly
         // compacted context — but a compaction failure NEVER fails the turn: it is logged and the
@@ -98,7 +98,7 @@ pub async fn chat(
             Err(msg) => jobs::mark_failed(&task_state.jobs, &task_slug, msg),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, handle.abort_handle());
+    jobs::set_abort(&state.jobs, &slug, abort);
 
     respond_with_transcript(&state, &slug)
 }
