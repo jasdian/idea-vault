@@ -124,6 +124,4 @@ env with localhost-friendly defaults (`IDEA_VAULT_BIND=127.0.0.1:3000`,
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE). See the [`NOTICE`](NOTICE)
-file for attribution requirements — anyone redistributing or building on this code must
-carry those notices forward (Apache-2.0 §4(d)).
+Licensed under the [MIT License](LICENSE).

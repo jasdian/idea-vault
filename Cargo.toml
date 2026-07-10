@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.91"
 description = "Localhost web tool for solo ideation: run an idea into the ground with a local AI, then store it in the vault"
-license = "Apache-2.0"
+license = "MIT"
 
 [dependencies]
 # web
