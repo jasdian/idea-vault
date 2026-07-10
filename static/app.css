@@ -308,6 +308,16 @@ a.tagchip:hover { border-color: var(--accent); }
 .composer textarea::placeholder { color: var(--faint); font-style: italic; }
 .composer__row { display: flex; align-items: center; gap: .75rem; margin-top: .4rem; }
 
+/* Rejected-send notice (#2): a run was already in flight, so the typed message was kept, not sent. */
+.composer-notice {
+  margin: 1.5rem 0 -.5rem;
+  font-family: var(--mono); font-size: .78rem; line-height: 1.45;
+  color: var(--accent);
+  background: var(--accent-soft); border: 1px solid var(--accent);
+  border-radius: var(--radius); padding: .5rem .7rem;
+}
+.composer-notice[hidden] { display: none; }
+
 /* ---- buttons ---------------------------------------------------------- */
 .btn {
   font-family: var(--mono); font-size: .82rem; letter-spacing: .02em;
@@ -368,6 +378,31 @@ a.tagchip:hover { border-color: var(--accent); }
 .chip:disabled { opacity: .5; cursor: progress; }
 .chip--swarm { border-color: var(--accent); color: var(--accent); }
 .chip--workflow { border-color: var(--accent); color: var(--accent); border-style: dashed; }
+
+/* swarm angle picker (#1): a small disclosure hung off the swarm chip, so a swarm can be aimed
+   at chosen angles instead of always firing the canonical four. */
+.swarm { display: inline-flex; align-items: center; gap: .3rem; }
+.swarm-picker { position: relative; }
+.swarm-picker__summary {
+  list-style: none; cursor: pointer; user-select: none;
+  font-family: var(--mono); font-size: .7rem; color: var(--faint);
+  padding: .2rem .35rem; border-radius: 5px;
+}
+.swarm-picker__summary::-webkit-details-marker { display: none; }
+.swarm-picker__summary:hover { color: var(--accent); }
+.swarm-picker__menu {
+  position: absolute; z-index: 20; top: calc(100% + .3rem); left: 0;
+  min-width: 13rem; display: flex; flex-direction: column; gap: .1rem;
+  padding: .45rem; background: var(--surface);
+  border: 1px solid var(--rule-strong); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+}
+.swarm-picker__opt {
+  display: flex; align-items: center; gap: .4rem;
+  font-family: var(--mono); font-size: .78rem; color: var(--ink);
+  padding: .12rem .2rem; cursor: pointer;
+}
+.swarm-picker__opt:hover { color: var(--accent); }
 
 /* The terminal lifecycle action — pulled out of the chip rail and given its own bar so it
    reads as the commit, not just another move. Filled indigo (default .btn), not a ghost chip. */

@@ -20,6 +20,16 @@ use crate::concepts::skills::{hydrate_context, SkillRegistry};
 use crate::concepts::ConceptError;
 use crate::vault::store;
 
+/// The canonical D14 angle set (docs/06-concepts/swarm.md: "swarm(idea, angles=[premortem,
+/// disproof, constraints, 2nd-order])"). Used when a swarm request names no angles — the UI's
+/// angle picker pre-checks exactly these, and an empty request falls back to them server-side.
+pub const DEFAULT_ANGLES: [&str; 4] = [
+    "premortem",
+    "cheapest-disproof",
+    "constraints",
+    "second-order-effects",
+];
+
 /// What a swarm run produced: the converged synthesis plus the per-angle raw results
 /// (`None` = that agent failed and was skipped by the judge — degrade, don't abort).
 #[derive(Debug)]

@@ -2,8 +2,13 @@
   <div id="transcript">{{ transcript_html|safe }}</div>
 
   {% if ai_available %}
+  {# Populated out-of-band by the chat route when a send is rejected because a run is already in
+     flight (#2) — kept hidden/empty otherwise. #}
+  <div id="composer-notice" class="composer-notice" hidden></div>
+  {# Reset only when the server confirms the message was accepted (X-Chat-Accepted). A send that
+     bounced off an in-flight job returns 200 without that header, so the draft is preserved. #}
   <form class="composer" hx-post="/idea/{{ slug }}/chat" hx-target="#transcript" hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) this.reset()">
+        hx-on::after-request="if (event.detail.successful && event.detail.xhr.getResponseHeader('X-Chat-Accepted')) this.reset()">
     <textarea name="message" rows="3"
               placeholder="Push the idea — steelman it, then break it."></textarea>
     <div class="composer__row">

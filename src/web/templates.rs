@@ -177,6 +177,10 @@ pub struct Actions {
     pub can_store: bool,
     /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
     pub skill_names: Vec<String>,
+    /// The swarm angle picker: every candidate attack angle with its default-checked state, so
+    /// the owner can aim a swarm instead of always firing the canonical four (#1). Derived from
+    /// `skill_names` (moves minus the `build-prompt` capstone); `on` marks `swarm::DEFAULT_ANGLES`.
+    pub swarm_angles: Vec<SwarmAngle>,
     /// A job is currently running for this idea. Store is a commitment action, so its button
     /// renders `disabled` while busy (a click would only bounce off `try_claim` anyway); the OOB
     /// actions refresh re-enables it once the job finishes or is cancelled.
@@ -195,6 +199,12 @@ pub struct Actions {
 pub struct WorkflowChip {
     pub name: String,
     pub description: String,
+}
+
+/// One checkbox in the swarm angle picker: the angle (a skill name) and whether it starts checked.
+pub struct SwarmAngle {
+    pub name: String,
+    pub on: bool,
 }
 
 /// One row of the artifacts panel: a file under `vault/<slug>/artifacts/` (docs/adr/0015).
