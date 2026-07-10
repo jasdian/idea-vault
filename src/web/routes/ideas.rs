@@ -272,10 +272,23 @@ pub(crate) fn render_actions(
             description: w.description.to_string(),
         })
         .collect();
+    // The swarm angle picker (#1): every move except the `build-prompt` capstone is a candidate
+    // attack angle; the canonical `swarm::DEFAULT_ANGLES` start checked. Derived from the moves
+    // already threaded in, so no new call-site plumbing — an empty selection falls back to the
+    // same defaults server-side (memory::run_swarm), keeping the picker purely additive.
+    let swarm_angles = skill_names
+        .iter()
+        .filter(|n| n.as_str() != "build-prompt")
+        .map(|n| crate::web::templates::SwarmAngle {
+            name: n.clone(),
+            on: crate::concepts::swarm::DEFAULT_ANGLES.contains(&n.as_str()),
+        })
+        .collect();
     crate::web::templates::Actions {
         slug: slug.to_string(),
         can_store,
         skill_names,
+        swarm_angles,
         busy,
         workflows,
         backend_note: backend_note(backend),

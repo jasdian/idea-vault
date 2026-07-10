@@ -237,19 +237,10 @@ pub struct SwarmForm {
     pub angles: String,
 }
 
-/// The canonical D14 angle set (docs/06-concepts/swarm.md: "swarm(idea, angles=[premortem,
-/// disproof, constraints, 2nd-order])").
 /// Upper bound on one swarm request's fan-out: the semaphore bounds concurrency (K in
 /// flight), this bounds total queued work N so a single request cannot monopolize the shared
 /// AI budget for every other route (ADR-0006 spirit: bounded latency, not just bounded rate).
 const MAX_ANGLES: usize = 8;
-
-const DEFAULT_ANGLES: [&str; 4] = [
-    "premortem",
-    "cheapest-disproof",
-    "constraints",
-    "second-order-effects",
-];
 
 /// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge, as a background job (D14). The
 /// swarm bounds itself on the shared semaphore and persists only the converged synthesis.
@@ -263,7 +254,10 @@ pub async fn run_swarm(
     guard_discussion_state(idea.frontmatter.state)?;
 
     let angles: Vec<String> = if form.angles.trim().is_empty() {
-        DEFAULT_ANGLES.iter().map(|a| a.to_string()).collect()
+        crate::concepts::swarm::DEFAULT_ANGLES
+            .iter()
+            .map(|a| a.to_string())
+            .collect()
     } else {
         form.angles
             .split(',')

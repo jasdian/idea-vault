@@ -7,7 +7,7 @@
 //! One job per idea: a second Send while busy just re-shows the in-flight state.
 
 use axum::extract::{Path, State};
-use axum::response::Html;
+use axum::response::{Html, IntoResponse, Response};
 use axum::Form;
 use chrono::Utc;
 use serde::Deserialize;
@@ -39,7 +39,7 @@ pub async fn chat(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     Form(form): Form<ChatForm>,
-) -> Result<Html<String>, WebError> {
+) -> Result<Response, WebError> {
     let message = form.message.trim().to_string();
     if message.is_empty() {
         return Err(WebError::BadRequest("message must not be empty".into()));
@@ -53,9 +53,16 @@ pub async fn chat(
         ));
     }
 
-    // Busy already: don't queue a second turn — just re-show the in-flight state.
+    // Busy already: don't queue a second turn — but don't silently eat the typed message either.
+    // Re-show the in-flight transcript WITHOUT the accept header, so the composer keeps the draft
+    // (its reset is gated on that header), and surface a notice explaining why nothing was sent.
     if !jobs::try_claim(&state.jobs, &slug) {
-        return respond_with_transcript(&state, &slug);
+        let mut html = respond_with_transcript(&state, &slug)?.0;
+        html.push_str(&composer_notice_oob(Some(
+            "A run is already in progress — your message is still in the box. \
+             Press Send again once it finishes.",
+        )));
+        return Ok(Html(html).into_response());
     }
 
     // Persist the user turn now (survives navigation, shows under the indicator) and make the D9
@@ -100,7 +107,26 @@ pub async fn chat(
     });
     jobs::set_abort(&state.jobs, &slug, abort);
 
-    respond_with_transcript(&state, &slug)
+    // Accepted: the message was persisted and a job spawned. Signal the composer to clear (the
+    // `X-Chat-Accepted` header gates its reset) and clear any stale "run in progress" notice.
+    let mut html = respond_with_transcript(&state, &slug)?.0;
+    html.push_str(&composer_notice_oob(None));
+    Ok(([("X-Chat-Accepted", "1")], Html(html)).into_response())
+}
+
+/// The out-of-band composer notice (`#composer-notice` sits just above the compose box). `Some`
+/// shows the message; `None` renders the container empty and hidden, clearing a prior notice. The
+/// only caller passes a static literal, so no HTML escaping is needed.
+fn composer_notice_oob(message: Option<&str>) -> String {
+    match message {
+        Some(m) => format!(
+            r#"<div id="composer-notice" class="composer-notice" hx-swap-oob="true">{m}</div>"#
+        ),
+        None => {
+            r#"<div id="composer-notice" class="composer-notice" hx-swap-oob="true" hidden></div>"#
+                .to_string()
+        }
+    }
 }
 
 /// The background half: assemble the budgeted context (which already includes the just-persisted

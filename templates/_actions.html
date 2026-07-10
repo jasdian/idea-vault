@@ -7,9 +7,22 @@
       <button type="submit" class="chip" title="Run the {{ name }} move">{{ name }}</button>
     </form>
     {% endif %}{% endfor %}
-    <form hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML">
+    {# The swarm chip carries an angle picker (#1). The checkboxes have no `name`, so they are not
+       submitted natively; the config-request hook joins the checked ones into the single
+       comma-separated `angles` field the route already accepts. With JS off the form still posts
+       (no `angles`), and the server falls back to the canonical four — the picker is additive. #}
+    <form class="swarm" hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML"
+          hx-on::config-request="event.detail.parameters['angles'] = Array.from(this.querySelectorAll('.swarm-angle:checked')).map(function (c) { return c.value; }).join(',')">
       <button type="submit" class="chip chip--swarm"
-              title="Fans out subagents that attack the idea from 4 angles (premortem, cheapest-disproof, constraints, second-order effects), then converges them into one synthesis. {{ backend_note }}">swarm</button>
+              title="Fans out subagents that attack the idea from the selected angles (default: premortem, cheapest-disproof, constraints, second-order effects), then converges them into one synthesis. {{ backend_note }}">swarm</button>
+      <details class="swarm-picker">
+        <summary class="swarm-picker__summary" title="Choose which angles this swarm attacks from — uncheck all to fall back to the canonical four">angles ▾</summary>
+        <div class="swarm-picker__menu">
+          {% for a in swarm_angles %}
+          <label class="swarm-picker__opt"><input type="checkbox" class="swarm-angle" value="{{ a.name }}"{% if a.on %} checked{% endif %}> {{ a.name }}</label>
+          {% endfor %}
+        </div>
+      </details>
     </form>
     {% for wf in workflows %}
     <form hx-post="/idea/{{ slug }}/workflow/{{ wf.name }}" hx-target="#transcript" hx-swap="innerHTML">
