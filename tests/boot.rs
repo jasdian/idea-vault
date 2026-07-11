@@ -63,6 +63,7 @@ fn test_state() -> AppState {
         ai_semaphore: Arc::new(Semaphore::new(1)),
         skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
         jobs: idea_vault::web::jobs::new_registry(),
+        queues: idea_vault::web::jobs::new_queues(),
         mcp,
     }
 }

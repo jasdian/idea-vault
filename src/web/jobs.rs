@@ -16,8 +16,9 @@
 //! and a live **note** the orchestrators advance ("swarm · attacking 2/4: constraints") so the
 //! indicator shows real per-step progress rather than a bare spinner.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -62,6 +63,30 @@ pub enum Pending {
     Notice(String),
     /// No job — the transcript on disk is final.
     Idle,
+}
+
+/// Claim the slot only if it is entirely empty (no `Running`, `Failed`, or `Notice` entry). Unlike
+/// [`try_claim`] — which overwrites a consumed-but-present `Failed`/`Notice` slot so a fresh owner
+/// action can reclaim it — this never clobbers an unshown outcome, so it is the safe gate for the
+/// queue drainer: the drainer must not eat a pending error the owner has not seen yet. Atomic (one
+/// lock), so racing pollers can't both win.
+pub fn try_claim_idle(jobs: &Jobs, slug: &str) -> bool {
+    let Ok(mut map) = jobs.lock() else {
+        return false;
+    };
+    if map.contains_key(slug) {
+        return false;
+    }
+    map.insert(
+        slug.to_string(),
+        Job {
+            status: JobStatus::Running,
+            started: Instant::now(),
+            abort: None,
+            note: String::new(),
+        },
+    );
+    true
 }
 
 /// Try to claim the single job slot. Returns `false` if a job is already running for this idea
@@ -229,6 +254,92 @@ pub fn peek(jobs: &Jobs, slug: &str) -> Pending {
     }
 }
 
+// ---- pending-message queue ------------------------------------------------
+//
+// A discussion idea holds at most one in-flight job (above), so a message sent while a job runs
+// used to be dropped. Instead each idea has a small FIFO of pending chat messages: a busy send is
+// enqueued (not forced to wait), the poll loop drains the next one whenever the idea goes idle,
+// and the owner can drop any queued message before it runs. In-memory like the job slots — a
+// process restart loses an un-started queue, exactly as it loses an in-flight job.
+
+/// One message waiting its turn. `id` is unique per process so the remove control can name it.
+#[derive(Clone)]
+pub struct QueuedMessage {
+    pub id: u64,
+    pub text: String,
+}
+
+/// Per-idea pending-message FIFOs plus the monotonic id source, behind one lock.
+pub struct QueueRegistry {
+    map: Mutex<HashMap<String, VecDeque<QueuedMessage>>>,
+    next_id: AtomicU64,
+}
+
+pub type Queues = Arc<QueueRegistry>;
+
+pub fn new_queues() -> Queues {
+    Arc::new(QueueRegistry {
+        map: Mutex::new(HashMap::new()),
+        next_id: AtomicU64::new(1),
+    })
+}
+
+/// Per-idea cap so a stuck backend can't let the queue grow without bound.
+pub const MAX_QUEUED: usize = 20;
+
+/// Append a pending message; returns its id, or `None` if the idea is already at [`MAX_QUEUED`].
+pub fn enqueue(queues: &Queues, slug: &str, text: &str) -> Option<u64> {
+    let mut map = queues.map.lock().ok()?;
+    let q = map.entry(slug.to_string()).or_default();
+    if q.len() >= MAX_QUEUED {
+        return None;
+    }
+    let id = queues.next_id.fetch_add(1, Ordering::Relaxed);
+    q.push_back(QueuedMessage {
+        id,
+        text: text.to_string(),
+    });
+    Some(id)
+}
+
+/// Pop the oldest pending message (FIFO) for the drainer to start. Removes the idea's empty FIFO.
+pub fn dequeue(queues: &Queues, slug: &str) -> Option<QueuedMessage> {
+    let mut map = queues.map.lock().ok()?;
+    let q = map.get_mut(slug)?;
+    let msg = q.pop_front();
+    if q.is_empty() {
+        map.remove(slug);
+    }
+    msg
+}
+
+/// Drop one queued message by id (the owner's per-item remove control). `true` if it was present.
+pub fn remove_queued(queues: &Queues, slug: &str, id: u64) -> bool {
+    let Ok(mut map) = queues.map.lock() else {
+        return false;
+    };
+    let Some(q) = map.get_mut(slug) else {
+        return false;
+    };
+    let before = q.len();
+    q.retain(|m| m.id != id);
+    let removed = q.len() != before;
+    if q.is_empty() {
+        map.remove(slug);
+    }
+    removed
+}
+
+/// The idea's pending messages in send order (for the queue panel).
+pub fn list_queued(queues: &Queues, slug: &str) -> Vec<QueuedMessage> {
+    let Ok(map) = queues.map.lock() else {
+        return Vec::new();
+    };
+    map.get(slug)
+        .map(|q| q.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +409,50 @@ mod tests {
     fn cancel_of_an_idle_slot_is_false() {
         let jobs = new_registry();
         assert!(!cancel(&jobs, "i"));
+    }
+
+    #[test]
+    fn try_claim_idle_refuses_a_failed_slot_so_the_drainer_never_eats_an_unshown_error() {
+        let jobs = new_registry();
+        mark_failed(&jobs, "i", "boom".into());
+        // A Failed slot is "occupied" until a poll consumes it — the drainer must back off.
+        assert!(!try_claim_idle(&jobs, "i"));
+        // ...but the regular reclaim path still overwrites it (owner-initiated next action).
+        assert!(try_claim(&jobs, "i"));
+    }
+
+    #[test]
+    fn queue_is_fifo_and_removes_the_empty_slot() {
+        let queues = new_queues();
+        let a = enqueue(&queues, "i", "first").unwrap();
+        let b = enqueue(&queues, "i", "second").unwrap();
+        assert_ne!(a, b, "ids are unique");
+        assert_eq!(list_queued(&queues, "i").len(), 2);
+        let first = dequeue(&queues, "i").unwrap();
+        assert_eq!(first.text, "first", "FIFO order");
+        assert!(remove_queued(&queues, "i", b), "remove the remaining by id");
+        assert!(dequeue(&queues, "i").is_none(), "empty now");
+        assert!(list_queued(&queues, "i").is_empty());
+    }
+
+    #[test]
+    fn enqueue_respects_the_per_idea_cap() {
+        let queues = new_queues();
+        for n in 0..MAX_QUEUED {
+            assert!(enqueue(&queues, "i", &format!("m{n}")).is_some());
+        }
+        assert!(
+            enqueue(&queues, "i", "one too many").is_none(),
+            "the cap is enforced"
+        );
+    }
+
+    #[test]
+    fn remove_queued_of_a_missing_id_is_false() {
+        let queues = new_queues();
+        enqueue(&queues, "i", "only").unwrap();
+        assert!(!remove_queued(&queues, "i", 9999));
+        assert!(!remove_queued(&queues, "other", 1));
     }
 
     #[test]

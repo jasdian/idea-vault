@@ -161,6 +161,27 @@ pub struct Discussion {
     /// The `#idea-actions` block (`_actions.html`), pre-rendered so the same partial serves the
     /// full page and the out-of-band swap transcript responses carry (empty shell in Draft).
     pub actions_html: String,
+    /// The `#queue` panel (`_queue.html`), pre-rendered — the pending-message FIFO with per-item
+    /// remove controls. Empty/hidden unless messages were sent while a job was running (#2).
+    pub queue_html: String,
+}
+
+/// One row of the pending-message queue panel (`_queue.html`).
+pub struct QueuedItem {
+    pub id: u64,
+    /// A short, single-line preview of the queued message (the full text is sent when it runs).
+    pub preview: String,
+}
+
+/// Partial: the pending-message queue (`templates/_queue.html`). The `#queue` container always
+/// renders (hidden when empty) so out-of-band transcript responses have a target; with `oob = true`
+/// the root carries `hx-swap-oob="true"`.
+#[derive(Template, WebTemplate)]
+#[template(path = "_queue.html")]
+pub struct Queue {
+    pub slug: String,
+    pub items: Vec<QueuedItem>,
+    pub oob: bool,
 }
 
 /// Partial: the state-dependent action block (moves/swarm/compact/store) (`templates/_actions.html`).

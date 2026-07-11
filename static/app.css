@@ -308,15 +308,35 @@ a.tagchip:hover { border-color: var(--accent); }
 .composer textarea::placeholder { color: var(--faint); font-style: italic; }
 .composer__row { display: flex; align-items: center; gap: .75rem; margin-top: .4rem; }
 
-/* Rejected-send notice (#2): a run was already in flight, so the typed message was kept, not sent. */
-.composer-notice {
-  margin: 1.5rem 0 -.5rem;
-  font-family: var(--mono); font-size: .78rem; line-height: 1.45;
-  color: var(--accent);
-  background: var(--accent-soft); border: 1px solid var(--accent);
-  border-radius: var(--radius); padding: .5rem .7rem;
+/* Pending-message queue (#2): messages sent while a job was running, drained in order, each
+   removable before it sends. */
+.queue { margin: .6rem 0 0; }
+.queue[hidden] { display: none; }
+.queue__box {
+  border: 1px solid var(--rule-strong); border-radius: var(--radius);
+  background: var(--surface); padding: .35rem .6rem;
 }
-.composer-notice[hidden] { display: none; }
+.queue__summary {
+  cursor: pointer; user-select: none;
+  font-family: var(--mono); font-size: .76rem; color: var(--faint);
+}
+.queue__summary:hover { color: var(--accent); }
+.queue__list { list-style: none; margin: .4rem 0 .1rem; padding: 0; display: flex; flex-direction: column; gap: .25rem; }
+.queue__item {
+  display: flex; align-items: center; gap: .5rem;
+  font-family: var(--serif); font-size: .92rem; color: var(--ink);
+}
+.queue__text {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.queue__item form { margin: 0; flex: 0 0 auto; }
+.queue__remove {
+  border: none; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: .8rem; color: var(--faint);
+  padding: .1rem .3rem; border-radius: 4px;
+}
+.queue__remove:hover { color: var(--danger, #b3261e); background: var(--accent-soft); }
 
 /* ---- buttons ---------------------------------------------------------- */
 .btn {

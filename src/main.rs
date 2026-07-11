@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
         skills,
         jobs: idea_vault::web::jobs::new_registry(),
+        queues: idea_vault::web::jobs::new_queues(),
         mcp,
     };
 

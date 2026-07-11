@@ -57,6 +57,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
             ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
             skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
             jobs: idea_vault::web::jobs::new_registry(),
+            queues: idea_vault::web::jobs::new_queues(),
             mcp,
         },
         vault_dir,

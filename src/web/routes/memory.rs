@@ -128,6 +128,7 @@ pub async fn reopen_idea(
     let health = state.llm.probe().await;
     let skill_names = state.skills.move_names();
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
+    let queued_items = crate::web::jobs::list_queued(&state.queues, &slug);
     // The reopen form swaps `#discussion` (buttons come back with it); the subhead badge sits
     // outside, so carry an out-of-band badge flip alongside.
     let mut html = build_discussion(
@@ -140,6 +141,7 @@ pub async fn reopen_idea(
         true,
         skill_names,
         pending,
+        queued_items,
         state.llm.context_budget().max_bytes,
         state.llm.tool_context_bytes(),
     )?

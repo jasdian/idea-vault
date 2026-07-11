@@ -27,6 +27,9 @@ pub struct AppState {
     /// In-flight background AI jobs, one per idea, so a slow model call survives the browser
     /// navigating away (`web::jobs`).
     pub jobs: crate::web::jobs::Jobs,
+    /// Per-idea FIFO of chat messages sent while a job was already running — drained by the poll
+    /// loop as the idea goes idle, instead of dropping the message (`web::jobs` queue).
+    pub queues: crate::web::jobs::Queues,
     /// Persistent MCP server registry (`mcp` module doc). The same `Arc` is handed to the LLM
     /// backend via `with_mcp`, so a registry edit here is live on the next model turn.
     pub mcp: Arc<crate::mcp::McpRegistry>,
@@ -68,6 +71,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))
+        // Remove a message still waiting in the per-idea send queue.
+        .route("/idea/{slug}/queue/{id}/delete", post(chat::remove_queued))
         .route("/idea/{slug}/pending", get(ideas::pending))
         // Cancel a running background job (abort the detached task; nothing partial is saved).
         .route("/idea/{slug}/cancel", post(ideas::cancel_job))
