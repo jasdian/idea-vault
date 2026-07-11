@@ -2,19 +2,20 @@
   <div id="transcript">{{ transcript_html|safe }}</div>
 
   {% if ai_available %}
-  {# Populated out-of-band by the chat route when a send is rejected because a run is already in
-     flight (#2) — kept hidden/empty otherwise. #}
-  <div id="composer-notice" class="composer-notice" hidden></div>
-  {# Reset only when the server confirms the message was accepted (X-Chat-Accepted). A send that
-     bounced off an in-flight job returns 200 without that header, so the draft is preserved. #}
+  {# A send always succeeds (2xx): it either starts now (200) or, if a job is already running,
+     joins the queue (202). Either way the message was accepted, so clear the box. #}
   <form class="composer" hx-post="/idea/{{ slug }}/chat" hx-target="#transcript" hx-swap="innerHTML"
-        hx-on::after-request="if (event.detail.successful && event.detail.xhr.getResponseHeader('X-Chat-Accepted')) this.reset()">
+        hx-on::after-request="if (event.detail.successful) this.reset()">
     <textarea name="message" rows="3"
               placeholder="Push the idea — steelman it, then break it."></textarea>
     <div class="composer__row">
       <button type="submit" class="btn">Send</button>
     </div>
   </form>
+
+  {# The pending-message queue (#2): shows messages sent while a job was running, each removable
+     before it sends. Refreshed out-of-band by every transcript response. #}
+  {{ queue_html|safe }}
 
   {{ actions_html|safe }}
 
