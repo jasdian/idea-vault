@@ -1,0 +1,61 @@
+name: CI
+
+# Build, test, and lint the crate on every pull request and every push to main.
+# The suite is self-contained: tests speak to an in-process mock HTTP server and a fake `claude`
+# shell fixture (no live Ollama or claude CLI), SQLite is vendored (`rusqlite` bundled), and the
+# HTTP client uses rustls — so a stock Ubuntu runner with a Rust toolchain is all that's needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref so a rapid push sequence doesn't pile up.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # --locked: fail if Cargo.lock is stale rather than silently resolving new versions.
+      # --all-targets: compile the lib, the binary, and the integration tests up front.
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Test
+        run: cargo test --locked
+
+  lint:
+    name: fmt & clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      # The crate's stated bar (CLAUDE.md: "cargo fmt && cargo clippy before finishing a change").
+      - name: Clippy (deny warnings)
+        run: cargo clippy --locked --all-targets -- -D warnings
