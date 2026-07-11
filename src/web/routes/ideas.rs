@@ -198,6 +198,7 @@ fn queue_poller(slug: &str) -> String {
 /// job is active, then the usage meter. This is the single renderer every transcript response
 /// goes through — the idea page, the poll endpoint, and chat/skill/swarm/delete all emit it, so
 /// the view is identical whether freshly loaded or swapped in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn transcript_inner(
     vault_dir: &std::path::Path,
     slug: &str,

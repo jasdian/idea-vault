@@ -40,7 +40,7 @@ pub fn load_context(
 
     // … then full fact bodies selectively, most recent first (D13 "by relevance/recency").
     let mut facts = store::read_memory_facts(vault_dir, slug)?;
-    facts.sort_by(|a, b| b.frontmatter.created.cmp(&a.frontmatter.created));
+    facts.sort_by_key(|b| std::cmp::Reverse(b.frontmatter.created));
     memory.extend(
         facts
             .iter()
