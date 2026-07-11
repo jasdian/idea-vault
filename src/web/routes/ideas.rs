@@ -187,8 +187,10 @@ fn notice_block(message: &str) -> String {
 /// re-renders a real indicator. Without this, polling stops the moment a job finishes and a queued
 /// message would sit forever.
 fn queue_poller(slug: &str) -> String {
+    // `r##"…"##` (not `r#"…"#`): the body contains `hx-target="#transcript"`, whose `"#` would
+    // otherwise close a single-hash raw string early — same reason `pending_block` uses `r##`.
     format!(
-        r#"<div class="queue-poll" aria-hidden="true" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="#transcript" hx-swap="innerHTML"></div>"#
+        r##"<div class="queue-poll" aria-hidden="true" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="#transcript" hx-swap="innerHTML"></div>"##
     )
 }
 
