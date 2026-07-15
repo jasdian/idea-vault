@@ -232,3 +232,36 @@ async fn admin_reindex_returns_counts_and_reconciles_hand_edits() {
         "reconciled after manual reindex"
     );
 }
+
+/// ADR-0019 through the browser: the manual reconcile must refuse to wipe a populated index from
+/// an empty vault (409, not a mystery 500), and must obey an explicit `?force=1` override for the
+/// vault the owner genuinely emptied.
+#[tokio::test]
+async fn admin_reindex_refuses_an_empty_vault_with_409_and_honors_force() {
+    let (state, vault_dir) = test_state();
+    seed(&vault_dir, "real", "A genuine idea.\n");
+    let (status, _) = post_form(state.clone(), "/admin/reindex", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The vault "empties" — an unmounted/ghost vault looks exactly like this from the app.
+    std::fs::remove_dir_all(vault_dir.join("real")).unwrap();
+
+    let (status, body) = post_form(state.clone(), "/admin/reindex", "").await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert!(
+        body.contains("force=1"),
+        "must name the escape hatch: {body}"
+    );
+
+    // The index is intact: the idea is still listed, because the wipe never happened.
+    let (_, list) = get(state.clone(), "/").await;
+    assert!(list.contains("Idea real"), "index must survive the refusal");
+
+    // Explicit override: yes, it really is empty.
+    let (status, body) = post_form(state.clone(), "/admin/reindex?force=1", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("\"ideas\":0"), "body: {body}");
+
+    let (_, list) = get(state, "/").await;
+    assert!(!list.contains("Idea real"), "forced rebuild clears it");
+}

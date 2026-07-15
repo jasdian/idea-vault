@@ -16,6 +16,11 @@ pub struct IdeaDirEntry {
 /// D15). An idea directory is an immediate subdirectory of `vault_dir` containing an `idea.md`
 /// (D22: slug == folder name); stray files and non-idea directories are skipped. Entries are
 /// sorted by slug so reindex passes are deterministic. A missing `vault_dir` is an empty vault.
+///
+/// This function stays deliberately naive: "no ideas here" is all it claims, never "the vault is
+/// legitimately empty". Callers must not read the second meaning into the first — an empty result
+/// is also what a wrong or unmounted `vault_dir` looks like. The judgement lives in
+/// `store::ensure_vault_dir`/`probe_vault` and in the reindex guard (ADR-0019).
 pub fn walk_ideas(vault_dir: &Path) -> Result<Vec<IdeaDirEntry>, VaultError> {
     let entries = match std::fs::read_dir(vault_dir) {
         Ok(entries) => entries,

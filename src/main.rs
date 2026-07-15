@@ -51,9 +51,29 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // 2. Vault dir (source of truth).
-    vault::ensure_vault_dir(&config.vault_dir)
-        .with_context(|| format!("ensuring vault dir {}", config.vault_dir.display()))?;
+    // 2. Vault dir (source of truth). Boot does not fail on a suspect vault — a hard exit under
+    // `restart: unless-stopped` is a crash loop, and the whole point is to stay up and SAY so:
+    // the reindex guard keeps the existing index intact and /admin/health reports the vault as
+    // unusable, which turns the container red (ADR-0019).
+    match vault::ensure_vault_dir(&config.vault_dir)
+        .with_context(|| format!("ensuring vault dir {}", config.vault_dir.display()))?
+    {
+        vault::VaultInit::Created => {
+            tracing::info!(dir = %config.vault_dir.display(), "created a new vault")
+        }
+        vault::VaultInit::Adopted => {
+            tracing::info!(dir = %config.vault_dir.display(), "adopted an existing unmarked vault")
+        }
+        vault::VaultInit::Existing => {}
+        vault::VaultInit::Suspect => tracing::error!(
+            dir = %config.vault_dir.display(),
+            marker = vault::VAULT_MARKER,
+            "vault directory is empty and carries no {} marker — if this is not a brand-new vault, \
+             IDEA_VAULT_VAULT_DIR is wrong or the vault filesystem is not mounted yet; refusing to \
+             treat it as authoritative",
+            vault::VAULT_MARKER,
+        ),
+    }
 
     // 3. Open (or create) the derived index.
     let mut conn = index::schema::open_or_create(&config.index_path)
@@ -68,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
                 links = counts.links,
                 "reindex complete"
             ),
+            // The guard firing is the alarm this whole path exists for, not a routine hiccup:
+            // the index it just protected is the only thing still listing the owner's ideas.
+            Err(e @ index::IndexError::RefusingEmptyRebuild { .. }) => {
+                tracing::error!(error = %e, "index preserved; the vault is empty but the index is not")
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "reindex failed at boot; continuing with existing index")
             }

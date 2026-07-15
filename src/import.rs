@@ -364,7 +364,12 @@ mod tests {
         let second = import_dir(&source, &vault, &index).unwrap();
         assert_eq!(second.imported, 0);
         assert_eq!(second.skipped, 2);
-        let dirs = std::fs::read_dir(&vault).unwrap().count();
+        // Count idea DIRECTORIES, not raw entries: the vault root also holds the
+        // `.idea-vault-root` marker file (ADR-0019), which is not an idea.
+        let dirs = std::fs::read_dir(&vault)
+            .unwrap()
+            .filter(|e| e.as_ref().is_ok_and(|e| e.path().is_dir()))
+            .count();
         assert_eq!(dirs, 2, "no duplicate idea directories on re-import");
     }
 

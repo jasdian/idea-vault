@@ -1,0 +1,4 @@
+# idea-vault
+This file marks the directory as an idea-vault vault root.
+Do not delete it: the app treats an unmarked empty directory as a possible wrong/unmounted
+vault path and refuses to trust it (docs/adr/0019).

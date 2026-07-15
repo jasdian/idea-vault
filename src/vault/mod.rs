@@ -8,7 +8,7 @@
 pub mod store;
 pub mod walk;
 
-pub use store::ensure_vault_dir;
+pub use store::{ensure_vault_dir, probe_vault, VaultHealth, VaultInit, VAULT_MARKER};
 
 /// Errors produced by vault I/O and the vault/domain boundary.
 #[derive(Debug, thiserror::Error)]

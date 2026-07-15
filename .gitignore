@@ -1,5 +1,8 @@
 /target
-/vault/
+# The vault is the owner's content and never enters the repo — except its root marker, so a fresh
+# clone materializes `vault/` and Docker never auto-creates the bind source as root (ADR-0019).
+/vault/*
+!/vault/.idea-vault-root
 index.db
 *.db-wal
 *.db-shm

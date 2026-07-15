@@ -114,7 +114,48 @@ pub fn check_drift(conn: &Connection, vault_dir: &Path) -> Result<bool, IndexErr
 /// frontmatter `links:` list — deduplicated per source idea, first-occurrence order. The
 /// conversation transcript is indexed for search but deliberately not mined for backlinks
 /// (chat text mentioning an idea is not a curated cross-reference).
+///
+/// Guarded against the empty-vault wipe (ADR-0019): if the walk finds no ideas while the index
+/// still holds some, this refuses with [`IndexError::RefusingEmptyRebuild`] rather than committing
+/// the DELETEs. Use [`reindex_forced`] for a vault the owner genuinely emptied.
 pub fn reindex(conn: &mut Connection, vault_dir: &Path) -> Result<ReindexCounts, IndexError> {
+    reindex_inner(conn, vault_dir, false)
+}
+
+/// [`reindex`] without the empty-vault guard — the explicit "yes, I really did delete every idea"
+/// path (`POST /admin/reindex?force=1`). Prefer [`reindex`] everywhere else.
+pub fn reindex_forced(
+    conn: &mut Connection,
+    vault_dir: &Path,
+) -> Result<ReindexCounts, IndexError> {
+    reindex_inner(conn, vault_dir, true)
+}
+
+fn reindex_inner(
+    conn: &mut Connection,
+    vault_dir: &Path,
+    force: bool,
+) -> Result<ReindexCounts, IndexError> {
+    // 1. Walk BEFORE opening the transaction, so an empty result can be vetoed without ever
+    //    reaching the DELETEs.
+    let entries = walk::walk_ideas(vault_dir)?;
+
+    // ADR-0019: "no ideas on disk" is indistinguishable from "wrong vault_dir" at this layer —
+    // `walk_ideas` maps a missing directory to an empty vault, and a boot race can bind an empty
+    // ghost directory over the real one. Rebuilding from that input is a correct application of
+    // the ADR-0002 invariant to the WRONG vault: every derived row is deleted and nothing
+    // replaces it. Truth is markdown so nothing is destroyed, but the UI enumerates ideas from
+    // the index alone, so the owner's whole vault silently disappears. Refuse instead.
+    if !force && entries.is_empty() {
+        let indexed: usize = conn.query_row("SELECT COUNT(*) FROM ideas", [], |row| row.get(0))?;
+        if indexed > 0 {
+            return Err(IndexError::RefusingEmptyRebuild {
+                vault_dir: vault_dir.display().to_string(),
+                indexed,
+            });
+        }
+    }
+
     let tx = conn.transaction()?;
     let mut counts = ReindexCounts::default();
 
@@ -128,8 +169,8 @@ pub fn reindex(conn: &mut Connection, vault_dir: &Path) -> Result<ReindexCounts,
          DELETE FROM ideas;",
     )?;
 
-    // 3–9. Walk the vault and repopulate.
-    for entry in walk::walk_ideas(vault_dir)? {
+    // 3–9. Repopulate from the walk.
+    for entry in entries {
         let idea = match store::read_idea(vault_dir, &entry.slug) {
             Ok(idea) => idea,
             Err(e) => {
@@ -477,6 +518,71 @@ mod tests {
         let mut fresh = mem_conn();
         reindex(&mut fresh, tmp.path()).unwrap();
         assert_eq!(snap1, snapshot(&fresh));
+    }
+
+    /// The ADR-0019 regression test: the 2026-07 ghost-mount incident in miniature. An empty vault
+    /// (whether truly emptied or merely unmounted) must not be allowed to delete a populated index.
+    /// Asserts the index is byte-identical afterwards — the DELETEs must never have committed,
+    /// which is the actual data property; the error type alone would not prove it.
+    #[test]
+    fn reindex_refuses_to_wipe_a_populated_index_from_an_empty_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        let counts = reindex(&mut conn, tmp.path()).unwrap();
+        assert!(counts.ideas > 0, "fixture should seed ideas");
+        let before = snapshot(&conn);
+
+        // The vault "disappears" — exactly what a ghost bind mount looks like from in here.
+        for entry in std::fs::read_dir(tmp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            }
+        }
+
+        match reindex(&mut conn, tmp.path()) {
+            Err(IndexError::RefusingEmptyRebuild { indexed, .. }) => {
+                assert_eq!(indexed, counts.ideas)
+            }
+            other => panic!("expected RefusingEmptyRebuild, got {other:?}"),
+        }
+        assert_eq!(before, snapshot(&conn), "the index must be untouched");
+    }
+
+    /// The escape hatch, and proof ADR-0002's unconditional rebuild identity is still available:
+    /// a vault the owner genuinely emptied does rebuild to zero when asked explicitly.
+    #[test]
+    fn reindex_forced_wipes_an_empty_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        for entry in std::fs::read_dir(tmp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            }
+        }
+
+        let counts = reindex_forced(&mut conn, tmp.path()).unwrap();
+        assert_eq!(counts.ideas, 0);
+        assert_eq!(
+            snapshot(&conn),
+            snapshot(&mem_conn()),
+            "index rebuilt empty"
+        );
+    }
+
+    /// The guard must not over-trigger: an empty vault with an empty index is a legitimate first
+    /// run, not a fault. Nothing is at risk, so nothing is refused.
+    #[test]
+    fn reindex_of_an_empty_vault_into_an_empty_index_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = mem_conn();
+        let counts = reindex(&mut conn, tmp.path()).expect("empty vault + empty index is fine");
+        assert_eq!(counts.ideas, 0);
     }
 
     #[test]

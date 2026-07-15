@@ -88,6 +88,8 @@ async fn root_lists_empty_state() {
     assert!(body_string(resp).await.contains("Nothing here yet"));
 }
 
+/// D20 preserved: an absent model is a valid state. The Docker HEALTHCHECK must still pass on a
+/// model-less stack, so an unreachable LLM reports in the body but never fails the probe.
 #[tokio::test]
 async fn health_reports_unreachable() {
     let app = build_router(test_state());
@@ -101,7 +103,36 @@ async fn health_reports_unreachable() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_string(resp).await.contains("unreachable"));
+    let body = body_string(resp).await;
+    assert!(body.contains("unreachable"));
+    assert!(body.contains("\"vault\":\"ok\""), "usable vault: {body}");
+}
+
+/// ADR-0019, the direct regression test for "the Docker healthcheck stayed green for two days
+/// while the vault was gone". An unusable vault is not a degraded state — it is a broken one, and
+/// `curl -fsS` in the HEALTHCHECK must see it.
+#[tokio::test]
+async fn health_is_503_when_the_vault_is_unusable() {
+    let state = test_state();
+    // The vault vanishes underneath the running process — precisely the incident's shape.
+    std::fs::remove_dir_all(&state.config.vault_dir).unwrap();
+
+    let resp = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = body_string(resp).await;
+    assert!(body.contains("\"vault\":\"unreadable\""), "body: {body}");
+    assert!(
+        body.contains("\"status\":\"vault-unusable\""),
+        "body: {body}"
+    );
 }
 
 #[tokio::test]

@@ -49,6 +49,34 @@ async fn deleting_an_idea_removes_the_folder_and_deindexes_it() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Deleting the LAST idea is the one legitimate way to reach "vault empty, index populated" —
+/// precisely the state the ADR-0019 empty-vault guard refuses to rebuild from. The delete route
+/// therefore forces the rebuild; without that, the guard would strand the just-deleted idea in
+/// the list forever, and clicking it would 404. Regression test for that interaction.
+#[tokio::test]
+async fn deleting_the_last_idea_empties_the_list() {
+    let (state, vault) = test_state();
+    seed(&vault, "only-one");
+    // Index it, so at delete time the vault empties while the index still holds a row — the exact
+    // state the guard refuses to rebuild from.
+    let (status, _) = post_form(state.clone(), "/admin/reindex", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, list) = get(state.clone(), "/").await;
+    assert!(list.contains("Idea only-one"), "precondition: it is listed");
+
+    let (status, _) = post_form(state.clone(), "/idea/only-one/delete", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!vault.join("only-one").exists());
+
+    let (_, list) = get(state, "/").await;
+    assert!(
+        !list.contains("Idea only-one"),
+        "the deleted idea must not survive in the index as a phantom row"
+    );
+    assert!(list.contains("Nothing here yet"));
+}
+
 #[tokio::test]
 async fn deleting_a_missing_idea_is_404() {
     let (state, _vault) = test_state();

@@ -45,4 +45,14 @@ pub enum IndexError {
     /// A filesystem error (e.g. creating the index's parent directory).
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Refused to rebuild: the vault walk found no ideas while the index still holds some
+    /// (ADR-0019). Almost always a wrong/unmounted `IDEA_VAULT_VAULT_DIR` rather than a vault the
+    /// owner genuinely emptied — rebuilding would delete every derived row and repopulate nothing.
+    /// The caller that really means it passes `force` (`POST /admin/reindex?force=1`).
+    #[error(
+        "refusing to reindex: vault {vault_dir} has no ideas but the index holds {indexed} — \
+         check the vault path/mount, or pass force to rebuild anyway"
+    )]
+    RefusingEmptyRebuild { vault_dir: String, indexed: usize },
 }

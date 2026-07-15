@@ -512,7 +512,10 @@ pub async fn delete_idea(
     if !store::delete_idea(&state.config.vault_dir, &slug)? {
         return Err(WebError::NotFound(format!("idea: {slug}")));
     }
-    crate::web::routes::reindex_logged(&state);
+    // Forced: deleting the last idea legitimately empties the vault, and the guarded rebuild would
+    // refuse — stranding the just-deleted idea in the list forever (ADR-0019). The `delete_idea`
+    // success above is itself proof the vault is real, so bypassing the guard here is sound.
+    crate::web::routes::reindex_logged_forced(&state);
     Ok((
         [("HX-Redirect", "/".to_string())],
         axum::http::StatusCode::OK,

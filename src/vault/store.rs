@@ -14,11 +14,95 @@ use crate::domain::memory::MemoryIndexEntry;
 use crate::domain::{frontmatter, Compacted, Idea, MemoryFact, MemoryIndex};
 use crate::vault::VaultError;
 
-/// Ensure `dir` exists, creating all missing parent components. Idempotent — succeeds if the
-/// directory already exists.
-pub fn ensure_vault_dir(dir: &Path) -> Result<(), VaultError> {
+/// Marker file at the vault root, written when the vault is first created or adopted (ADR-0019).
+/// Its presence is what distinguishes "this is my vault, currently empty" from "this is some other
+/// directory that merely exists" — the two are otherwise identical on disk, and a boot race that
+/// binds an empty directory over the real vault lands squarely in the second case.
+pub const VAULT_MARKER: &str = ".idea-vault-root";
+
+/// What [`ensure_vault_dir`] found at the vault root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultInit {
+    /// Directory was absent and has been created, with the marker written. A genuine first run.
+    Created,
+    /// Directory existed, marker present. The normal steady state.
+    Existing,
+    /// Directory existed with ideas in it but no marker — a vault predating the marker. Adopted:
+    /// the marker has now been written.
+    Adopted,
+    /// Directory existed, held no marker AND no ideas. Ambiguous: either a directory the owner
+    /// made by hand, or the wrong path entirely (an unmounted vault, a ghost bind mount). The
+    /// marker is deliberately NOT written — writing it would launder a wrong path into a
+    /// legitimate-looking empty vault on the next boot.
+    Suspect,
+}
+
+/// Ensure `dir` exists and report what was actually there (ADR-0019).
+///
+/// This used to be an unconditional `create_dir_all`, which *manufactured* a vault rather than
+/// *verifying* one: point the app at a path that is missing or not-yet-mounted and it would
+/// silently invent an empty vault there and carry on as if that were the truth. The directory is
+/// still created when genuinely absent (first run must work), but the caller now learns which case
+/// it was and can refuse to treat a [`VaultInit::Suspect`] directory as authoritative.
+pub fn ensure_vault_dir(dir: &Path) -> Result<VaultInit, VaultError> {
+    let existed = dir.is_dir();
     fs::create_dir_all(dir)?;
+
+    if !existed {
+        write_marker(dir)?;
+        return Ok(VaultInit::Created);
+    }
+    if dir.join(VAULT_MARKER).is_file() {
+        return Ok(VaultInit::Existing);
+    }
+    // No marker. If there are ideas here it is simply a pre-marker vault — adopt it. If there are
+    // none, we cannot tell a hand-made empty dir from the wrong path, so say so and write nothing.
+    if crate::vault::walk::walk_ideas(dir)?.is_empty() {
+        Ok(VaultInit::Suspect)
+    } else {
+        write_marker(dir)?;
+        Ok(VaultInit::Adopted)
+    }
+}
+
+/// Write the vault marker. Content is informational only — presence is the signal.
+fn write_marker(dir: &Path) -> Result<(), VaultError> {
+    let body = "# idea-vault\n\
+        This file marks the directory as an idea-vault vault root.\n\
+        Do not delete it: the app treats an unmarked empty directory as a possible wrong/unmounted\n\
+        vault path and refuses to trust it (docs/adr/0019).\n";
+    fs::write(dir.join(VAULT_MARKER), body)?;
     Ok(())
+}
+
+/// Whether the vault root is usable right now (ADR-0019) — the check `/admin/health` reports on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultHealth {
+    Ok,
+    /// The directory is missing or cannot be listed.
+    Unreadable,
+    /// Listable but not writable by this process — the shape a root-owned ghost mount takes when
+    /// the app runs non-root: every read is fine and every write is `Permission denied`.
+    Unwritable,
+}
+
+/// Probe the vault root: can we list it, and can we actually create a file in it?
+///
+/// Writability is proven by doing it. Directory permission bits cannot answer the question — a
+/// `root:root 0755` directory looks writable in its metadata and is not writable by uid 1000,
+/// which is exactly the failure this exists to catch.
+pub fn probe_vault(dir: &Path) -> VaultHealth {
+    if fs::read_dir(dir).is_err() {
+        return VaultHealth::Unreadable;
+    }
+    let probe = dir.join(".idea-vault-write-probe");
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            VaultHealth::Ok
+        }
+        Err(_) => VaultHealth::Unwritable,
+    }
 }
 
 /// Validate `slug` at the filesystem boundary and join it onto `vault_dir`. Every public
@@ -952,11 +1036,93 @@ mod tests {
         let target = tmp.path().join("nested").join("vault");
         assert!(!target.exists());
 
-        ensure_vault_dir(&target).expect("first create should succeed");
+        assert_eq!(
+            ensure_vault_dir(&target).expect("first create should succeed"),
+            VaultInit::Created
+        );
         assert!(target.is_dir());
+        assert!(target.join(VAULT_MARKER).is_file(), "marker on create");
 
-        ensure_vault_dir(&target).expect("second call should be idempotent");
+        assert_eq!(
+            ensure_vault_dir(&target).expect("second call should be idempotent"),
+            VaultInit::Existing
+        );
         assert!(target.is_dir());
+    }
+
+    /// The ADR-0019 keystone. An existing, empty, unmarked directory is what a ghost bind mount
+    /// looks like — and boot must NOT write a marker into it. Writing one would bless the wrong
+    /// path and make the next boot look perfectly healthy, laundering the fault permanently.
+    #[test]
+    fn empty_unmarked_dir_is_suspect_and_is_never_marked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ghost = tmp.path().join("ghost");
+        fs::create_dir_all(&ghost).unwrap();
+
+        assert_eq!(ensure_vault_dir(&ghost).unwrap(), VaultInit::Suspect);
+        assert!(
+            !ghost.join(VAULT_MARKER).exists(),
+            "a suspect vault must never be marked — that would launder the wrong path"
+        );
+        // Still suspect on every subsequent boot, which is the point.
+        assert_eq!(ensure_vault_dir(&ghost).unwrap(), VaultInit::Suspect);
+    }
+
+    /// A vault predating the marker: it has ideas, so it is unambiguously real — adopt and mark it.
+    #[test]
+    fn legacy_vault_with_ideas_is_adopted_and_marked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_idea(tmp.path(), &sample_idea("legacy")).unwrap();
+        assert!(!tmp.path().join(VAULT_MARKER).exists());
+
+        assert_eq!(ensure_vault_dir(tmp.path()).unwrap(), VaultInit::Adopted);
+        assert!(tmp.path().join(VAULT_MARKER).is_file());
+        // Once marked, it is simply a normal vault.
+        assert_eq!(ensure_vault_dir(tmp.path()).unwrap(), VaultInit::Existing);
+    }
+
+    /// The marker is a vault-root dotfile and must stay invisible to the index — `walk_ideas`
+    /// admits only directories holding an `idea.md`, so it can never reach `search_fts`.
+    #[test]
+    fn marker_is_invisible_to_the_idea_walk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        ensure_vault_dir(tmp.path()).unwrap();
+        assert!(crate::vault::walk::walk_ideas(tmp.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn probe_reports_ok_on_a_writable_vault_and_unreadable_when_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        ensure_vault_dir(tmp.path()).unwrap();
+        assert_eq!(probe_vault(tmp.path()), VaultHealth::Ok);
+        // The probe must leave nothing behind.
+        assert!(!tmp.path().join(".idea-vault-write-probe").exists());
+
+        assert_eq!(
+            probe_vault(&tmp.path().join("nope")),
+            VaultHealth::Unreadable
+        );
+    }
+
+    /// The exact shape of the incident: a vault this process can list but cannot write.
+    #[cfg(unix)]
+    #[test]
+    fn probe_reports_unwritable_on_a_read_only_vault() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("ro");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Root ignores the write bit, so this assertion is only meaningful as non-root.
+        if probe_vault(&dir) == VaultHealth::Ok {
+            eprintln!("skipping: running as root, permission bits are advisory");
+            return;
+        }
+        assert_eq!(probe_vault(&dir), VaultHealth::Unwritable);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     fn sample_artifact(slug: &str, kind: crate::domain::ArtifactKind) -> crate::domain::Artifact {

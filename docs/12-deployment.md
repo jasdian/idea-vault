@@ -57,7 +57,7 @@ Why these choices (see [03-data-model](./03-data-model.md) truth/derived split):
 
 | Data | Mount | Why |
 |------|-------|-----|
-| `vault/` (markdown, **truth**) | **host bind mount** `./vault:/vault` | user-owned, irreplaceable, git-versioned; must survive `docker volume rm` and app removal |
+| `vault/` (markdown, **truth**) | **host bind mount** `./vault` → `/vault`, long syntax + `create_host_path: false` | user-owned, irreplaceable, git-versioned; must survive `docker volume rm` and app removal. The source **must pre-exist**: the short syntax lets the daemon auto-create it `root:root`, which silently binds a ghost when the vault's filesystem mounts later than Docker ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)) |
 | `.mcp-servers.json` (app config, **not** vault truth) | rides the same **host bind mount** as `vault/` by default | `IDEA_VAULT_MCP_CONFIG` defaults to `<vault>/.mcp-servers.json` purely because the vault bind mount is the one host-persistent path available; it is invisible to reindex ([03-data-model](./03-data-model.md), [ADR-0018](./adr/0018-mcp-servers.md)) |
 | `index.db` (**derived**) | named volume `idea-index:/data` | rebuildable via reindex ([ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md)); app-managed, keep out of the user's tree; WAL sidecars live here too |
 | Ollama models | named volume `ollama-models:/root/.ollama` | multi-GB, re-pullable; pull once, persist across restarts |
@@ -287,6 +287,31 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
 - **App must bind `0.0.0.0`** inside the container or the loopback publish can't reach it.
 - **uid mismatch** on `./vault`: if `id -u` ≠ 1000, set `IDEA_VAULT_UID`/`GID` in `.env` **and**
   rebuild (so the build args match) — else `EACCES` on vault and index writes.
+- **The vault bind source must exist before Docker starts — or Docker invents it.** With the short
+  `./vault:/vault` syntax the daemon **auto-creates a missing source as `root:root`**. If `vault/`
+  lives on a filesystem that mounts *later* than `docker.service` (network/NFS/iSCSI/LVM, or any
+  `_netdev` mount), a boot race binds an empty root-owned **ghost** directory, and the real
+  filesystem then mounts *over* it — hiding the ghost while the container keeps talking to it.
+  Symptom: the UI lists **zero ideas** while every file is intact on disk, the log says
+  `reindex complete ideas=0 facts=0 links=0`, writes fail with
+  `vault error: io error: Permission denied (os error 13)`, and the healthcheck stays **green**.
+  Confirm with `docker exec <c> stat /vault` vs `stat vault` on the host — a **different device or
+  inode** is the ghost. This is why the base file binds `vault/` with long syntax +
+  `create_host_path: false` ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)): a missing
+  source becomes a loud start failure that `restart: unless-stopped` retries until the real mount
+  lands. **Recovery:** `docker compose stop idea-vault`, then reveal the shadowed underlay with a
+  *non-recursive* bind (`sudo mount --bind /home /mnt/x`, which does not carry submounts), `rmdir`
+  the empty ghost chain (`rmdir` refuses a non-empty dir — never `rm -rf` here), `umount`, then
+  `docker compose up -d --force-recreate idea-vault`. The index rebuilds itself from markdown.
+  *(Silent, survives reboots, and looks like data loss when it is not.)*
+- **Deleting `.idea-vault-root`** from the vault root makes an otherwise-empty vault look
+  indistinguishable from a wrong path, so the app stops trusting it (`Suspect` — logged, and health
+  reports it). Keep it; if you version your vault with git, **commit it** — a fresh clone of an
+  intentionally-empty vault is otherwise flagged. A vault that still has idea folders re-adopts and
+  re-writes the marker automatically.
+- **`POST /admin/reindex` answering 409** is the empty-vault guard, not a bug: the vault has no
+  ideas but the index does — almost always an unmounted vault. Check `GET /admin/health` first; if
+  the vault really is empty, `POST /admin/reindex?force=1`.
 - **SQLite WAL**: `index.db-wal`/`-shm` live in the same volume; back up/reset all three together;
   never point two containers at one SQLite file. Losing the volume is recoverable via reindex.
 - **GPU toolkit missing / wrong request mechanism** → `could not select device driver "nvidia"`

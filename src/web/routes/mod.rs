@@ -25,3 +25,23 @@ pub(crate) fn reindex_logged(state: &AppState) {
         Err(e) => tracing::warn!(error = %e, "db mutex poisoned; skipping reindex"),
     }
 }
+
+/// [`reindex_logged`] without the empty-vault guard (ADR-0019).
+///
+/// Only for a caller that has already proven the vault is real *by successfully mutating it*.
+/// Today that is exactly `ideas::delete_idea`: it 404s unless `store::delete_idea` returned true,
+/// so reaching the rebuild proves the idea folder existed and the vault was writable — neither of
+/// which a ghost mount can fake. Deleting the last idea is the one legitimate way to reach
+/// "vault empty, index populated", and the guard must not strand the deleted idea in the list.
+pub(crate) fn reindex_logged_forced(state: &AppState) {
+    match state.db.lock() {
+        Ok(mut conn) => {
+            if let Err(e) =
+                crate::index::reindex::reindex_forced(&mut conn, &state.config.vault_dir)
+            {
+                tracing::warn!(error = %e, "reindex after delete failed; truth intact");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "db mutex poisoned; skipping reindex"),
+    }
+}

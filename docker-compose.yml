@@ -36,7 +36,21 @@ services:
       - "${IDEA_VAULT_HOST_BIND_IP:-127.0.0.1}:${IDEA_VAULT_HOST_PORT:-3000}:3000"
     volumes:
       # SOURCE OF TRUTH: bind mount the user-owned vault directory.
-      - ./vault:/vault
+      #
+      # Long syntax + create_host_path:false on purpose (ADR-0019). The short
+      # `./vault:/vault` form records a legacy bind, and the daemon AUTO-CREATES a
+      # missing source as root:root — so if the vault lives on a filesystem that
+      # mounts later than docker.service (network/iSCSI/LVM), a boot race binds an
+      # empty root-owned "ghost" dir that the real mount then hides. The app sees an
+      # empty vault, reindexes to zero, and looks healthy while serving nothing.
+      # This form records a Mounts entry instead: a missing source is a hard start
+      # failure (loud), and `restart: unless-stopped` retries until the real mount
+      # lands. Never revert to the short form.
+      - type: bind
+        source: ./vault
+        target: /vault
+        bind:
+          create_host_path: false
       # Rebuildable SQLite index: app-managed named volume.
       - idea-index:/data
     depends_on:

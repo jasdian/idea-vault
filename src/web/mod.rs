@@ -106,6 +106,31 @@ impl IntoResponse for WebError {
             WebError::Vault(crate::vault::VaultError::InvalidSlug(_)) => {
                 (StatusCode::NOT_FOUND, "not found".to_string()).into_response()
             }
+            // Not an internal fault: the request is well-formed, the server disagrees about the
+            // state, and `?force=1` resolves it. 500 would log this as a bug and hide the one
+            // string the owner needs (ADR-0019).
+            WebError::Index(crate::index::IndexError::RefusingEmptyRebuild { indexed, .. }) => (
+                StatusCode::CONFLICT,
+                format!(
+                    "refusing to reindex: this vault contains 0 ideas but the index holds \
+                     {indexed}. Usually the vault is not mounted where the app expects — check \
+                     GET /admin/health. If the vault really is empty, retry with ?force=1."
+                ),
+            )
+                .into_response(),
+            // The shape a wrong/root-owned vault takes at the write path: every read works and
+            // every write is EACCES. Point at the health surface instead of a mystery 500.
+            WebError::Vault(crate::vault::VaultError::Io(ref e))
+                if e.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                tracing::error!(error = %e, "vault write denied; vault likely misconfigured");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the vault is not writable — check GET /admin/health and the vault mount"
+                        .to_string(),
+                )
+                    .into_response()
+            }
             other => {
                 tracing::error!(error = %other, "web handler error");
                 (
