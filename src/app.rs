@@ -30,6 +30,9 @@ pub struct AppState {
     /// Persistent MCP server registry (`mcp` module doc). The same `Arc` is handed to the LLM
     /// backend via `with_mcp`, so a registry edit here is live on the next model turn.
     pub mcp: Arc<crate::mcp::McpRegistry>,
+    /// Persistent named-source registry (`sources` module doc). Live like `mcp`: a Sources-page
+    /// edit is visible to the very next model turn with no restart.
+    pub sources: Arc<crate::sources::SourceRegistry>,
 }
 
 /// Build the full axum router (D17 route map) with the tracing middleware layer (D16).

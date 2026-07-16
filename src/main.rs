@@ -13,7 +13,7 @@ use idea_vault::ai::claude_code::ClaudeCodeConfig;
 use idea_vault::ai::{LlmBackend, OllamaClient};
 use idea_vault::app::{build_router, AppState};
 use idea_vault::config::{ClaudeSettings, Config, LlmBackendKind};
-use idea_vault::{import, index, vault};
+use idea_vault::{import, index, sources, vault};
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
 
@@ -105,6 +105,14 @@ async fn main() -> anyhow::Result<()> {
     // The MCP registry (app config, not vault truth — see the `mcp` module doc) is loaded first
     // and shared with the backend so enabled servers' tools join the very next turn.
     let mcp = Arc::new(idea_vault::mcp::McpRegistry::load(&config.mcp_config_path));
+    // Named-source registry (app config, not vault truth — see the `sources` module doc), loaded
+    // beside the MCP registry so registered sources are resolvable on the very next turn.
+    let sources = Arc::new(sources::SourceRegistry::load(
+        config.sources_config_path.clone(),
+        config.vault_dir.join(sources::OVERRIDE_FILENAME),
+        config.sources_dir.clone(),
+        config.sources_applied.clone(),
+    ));
     let llm = build_llm(&config)?.with_mcp(mcp.clone());
     tracing::info!(backend = %backend_label(&config), model = %llm.model(), "llm backend selected");
     {
@@ -132,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         skills,
         jobs: idea_vault::web::jobs::new_registry(),
         mcp,
+        sources,
     };
 
     // 7. Router + serve.

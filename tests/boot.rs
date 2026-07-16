@@ -46,12 +46,23 @@ fn test_state() -> AppState {
         claude_ctx_tokens: 0,
         web_access: false,
         mcp_config_path: tmp.path().join(".mcp-servers.json"),
+        // Beside the vault (like the MCP registry), NOT inside it — the registry writes its
+        // override + .gitignore next to its config file.
+        sources_config_path: tmp.path().join(".sources.json"),
+        sources_dir: None,
+        sources_applied: None,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
     let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
         .expect("build ollama client");
     let mcp = Arc::new(idea_vault::mcp::McpRegistry::load(&config.mcp_config_path));
+    let sources = Arc::new(idea_vault::sources::SourceRegistry::load(
+        config.sources_config_path.clone(),
+        tmp.path().join(idea_vault::sources::OVERRIDE_FILENAME),
+        None,
+        None,
+    ));
 
     // Keep the tempdir alive for the process lifetime.
     std::mem::forget(tmp);
@@ -64,6 +75,7 @@ fn test_state() -> AppState {
         skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
         jobs: idea_vault::web::jobs::new_registry(),
         mcp,
+        sources,
     }
 }
 
@@ -106,6 +118,53 @@ async fn health_reports_unreachable() {
     let body = body_string(resp).await;
     assert!(body.contains("unreachable"));
     assert!(body.contains("\"vault\":\"ok\""), "usable vault: {body}");
+    // The advisory sources object is always present, even with nothing registered.
+    assert!(body.contains("\"sources\""), "sources field: {body}");
+    assert!(body.contains("\"total\":0"), "empty registry: {body}");
+}
+
+/// Sources are advisory the same way the LLM is: a missing or not-yet-applied source degrades the
+/// turns that attach it, never the app — so the counts report honestly but the status code never
+/// moves off 200.
+#[tokio::test]
+async fn health_counts_sources_without_moving_the_status_code() {
+    let state = test_state();
+    // Bare mode probes host paths directly: one listable source, one long gone.
+    let real = tempfile::tempdir().expect("tempdir");
+    state
+        .sources
+        .add(idea_vault::sources::SourceConfig {
+            name: "real".to_string(),
+            host_path: real.path().to_path_buf(),
+        })
+        .unwrap();
+    state
+        .sources
+        .add(idea_vault::sources::SourceConfig {
+            name: "gone".to_string(),
+            host_path: std::path::PathBuf::from("/nonexistent/idea-vault-health-test"),
+        })
+        .unwrap();
+
+    let resp = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a broken source must never fail the probe"
+    );
+    let body = body_string(resp).await;
+    assert!(body.contains("\"total\":2"), "body: {body}");
+    assert!(body.contains("\"mounted\":1"), "body: {body}");
+    assert!(body.contains("\"missing\":1"), "body: {body}");
+    assert!(body.contains("\"needs_reup\":0"), "body: {body}");
 }
 
 /// ADR-0019, the direct regression test for "the Docker healthcheck stayed green for two days

@@ -60,6 +60,21 @@ pub struct Config {
     /// `vault::walk::walk_ideas` only admits directories containing an `idea.md`, so this file
     /// can never leak into a reindex. App config, NOT vault truth (see `mcp`'s module doc).
     pub mcp_config_path: PathBuf,
+    /// Where the named-source registry JSON lives (`sources::SourceRegistry`). Defaults to
+    /// `<vault_dir>/.sources.json` for the same reasons as [`Config::mcp_config_path`]: the vault
+    /// bind mount is the one host-persistent path in a containerized run, and the dotfile is
+    /// invisible to the idea walker by construction. App config, NOT vault truth (see `sources`'
+    /// module doc).
+    pub sources_config_path: PathBuf,
+    /// `IDEA_VAULT_SOURCES_DIR`: the in-container mount root the generated compose override
+    /// bind-mounts each named source under (`/mnt/sources` in compose). `None` — unset, or set
+    /// but empty after trim — is bare `cargo run` mode: host paths are read directly.
+    pub sources_dir: Option<PathBuf>,
+    /// `IDEA_VAULT_SOURCES_APPLIED`: the sources fingerprint the generated compose override baked
+    /// into the container env at `up` time. Never owner-set — only the override writes it.
+    /// `Some("")` (set but empty) means the override was layered with zero sources; `None` means
+    /// it was never layered at all — the two must stay distinguishable, so no emptiness filter.
+    pub sources_applied: Option<String>,
 }
 
 /// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
@@ -104,6 +119,9 @@ const DEFAULT_WEB_ACCESS: bool = true;
 /// Default MCP registry filename, joined onto the vault dir (a dotfile so idea listings and any
 /// `.md`-oriented scan skip it; the walker's is-a-directory check makes that structural too).
 const MCP_CONFIG_FILENAME: &str = ".mcp-servers.json";
+/// Default named-source registry filename, joined onto the vault dir (same dotfile rationale as
+/// [`MCP_CONFIG_FILENAME`]).
+const SOURCES_CONFIG_FILENAME: &str = ".sources.json";
 /// Clamp band for a nonzero context-window override (tokens): below 1k is useless, above 2M is
 /// beyond any supported model (the claude 1M window fits comfortably).
 pub const CTX_TOKENS_MIN: usize = 1_024;
@@ -208,6 +226,22 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| vault_dir.join(MCP_CONFIG_FILENAME));
 
+        // Named-source registry file: same vault-dotfile rationale as the MCP registry above.
+        let sources_config_path = lookup("IDEA_VAULT_SOURCES_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| vault_dir.join(SOURCES_CONFIG_FILENAME));
+
+        // Sources mount root: Some only in a containerized run (compose sets /mnt/sources). A
+        // set-but-blank value stays bare mode, so an empty `.env` line cannot flip modes.
+        let sources_dir = lookup("IDEA_VAULT_SOURCES_DIR")
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
+
+        // Applied-sources fingerprint: set-but-EMPTY is meaningful (`Some("")` = the generated
+        // override was layered with zero sources) and distinct from unset (`None` = never
+        // layered), so — unlike sources_dir above — no emptiness filter here.
+        let sources_applied = lookup("IDEA_VAULT_SOURCES_APPLIED");
+
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
                 .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
@@ -244,6 +278,9 @@ impl Config {
             claude_ctx_tokens,
             web_access,
             mcp_config_path,
+            sources_config_path,
+            sources_dir,
+            sources_applied,
         }
     }
 }
@@ -380,6 +417,79 @@ mod tests {
             "/data/mcp.json",
         )])));
         assert_eq!(cfg.mcp_config_path, PathBuf::from("/data/mcp.json"));
+    }
+
+    #[test]
+    fn sources_config_defaults_into_the_vault_and_overrides() {
+        // Default: a dotfile inside the (possibly overridden) vault dir.
+        let cfg = Config::from_lookup(lookup_from(HashMap::new()));
+        assert_eq!(
+            cfg.sources_config_path,
+            PathBuf::from("./vault/.sources.json")
+        );
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_VAULT_DIR",
+            "/vault",
+        )])));
+        assert_eq!(
+            cfg.sources_config_path,
+            PathBuf::from("/vault/.sources.json")
+        );
+
+        // Explicit override wins over the vault-relative default.
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_SOURCES_CONFIG",
+            "/data/sources.json",
+        )])));
+        assert_eq!(cfg.sources_config_path, PathBuf::from("/data/sources.json"));
+    }
+
+    #[test]
+    fn sources_dir_unset_or_blank_is_bare_mode() {
+        // Unset (bare `cargo run`): host paths are read directly.
+        let cfg = Config::from_lookup(lookup_from(HashMap::new()));
+        assert_eq!(cfg.sources_dir, None);
+
+        // Set (compose): the in-container mount root.
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_SOURCES_DIR",
+            "/mnt/sources",
+        )])));
+        assert_eq!(cfg.sources_dir, Some(PathBuf::from("/mnt/sources")));
+
+        // Set-but-blank (an empty `.env` line) must NOT count as container mode.
+        for blank in ["", "   "] {
+            let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+                "IDEA_VAULT_SOURCES_DIR",
+                blank,
+            )])));
+            assert_eq!(cfg.sources_dir, None, "blank {blank:?} must stay bare mode");
+        }
+    }
+
+    #[test]
+    fn sources_applied_distinguishes_empty_from_unset() {
+        // Unset: the override was never layered.
+        let cfg = Config::from_lookup(lookup_from(HashMap::new()));
+        assert_eq!(cfg.sources_applied, None);
+
+        // Set-but-EMPTY: the override was layered with ZERO sources — must stay Some(""), never
+        // collapse to None (that would make "applied nothing" unreadable as "never applied").
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_SOURCES_APPLIED",
+            "",
+        )])));
+        assert_eq!(cfg.sources_applied, Some(String::new()));
+
+        // Set to a real fingerprint: passed through verbatim.
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_SOURCES_APPLIED",
+            "docs=/home/owner/docs",
+        )])));
+        assert_eq!(
+            cfg.sources_applied.as_deref(),
+            Some("docs=/home/owner/docs")
+        );
     }
 
     #[test]

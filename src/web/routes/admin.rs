@@ -16,6 +16,7 @@ use serde_json::json;
 
 use crate::ai::AiHealth;
 use crate::app::AppState;
+use crate::sources::SourceStatus;
 use crate::vault::VaultHealth;
 use crate::web::WebError;
 
@@ -42,6 +43,36 @@ pub async fn health(State(state): State<AppState>) -> Response {
     // made by hand (and every test that mkdir's a tempdir) legitimately has no marker yet.
     let marked = vault_dir.join(crate::vault::VAULT_MARKER).is_file();
 
+    // Advisory too — a broken or not-yet-applied source degrades the turns that attach it, never
+    // the app, so sources report counts but never move the status code. Warn per bad source so
+    // the log names it even when only the Docker healthcheck is watching. `Mounted { entries: 0 }`
+    // (the ghost-bind signal) still counts as mounted here: surfacing that nuance is the Sources
+    // page's job, not the healthcheck's.
+    let mut mounted = 0usize;
+    let mut needs_reup = 0usize;
+    let mut missing = 0usize;
+    for (cfg, source_status) in state.sources.statuses() {
+        match source_status {
+            SourceStatus::Mounted { .. } => mounted += 1,
+            SourceStatus::NeedsReup => {
+                tracing::warn!(
+                    source = %cfg.name,
+                    status = "needs-reup",
+                    "source not applied to the running container; re-run docker compose up -d"
+                );
+                needs_reup += 1;
+            }
+            SourceStatus::Missing => {
+                tracing::warn!(
+                    source = %cfg.name,
+                    status = "missing",
+                    "source directory is not listable"
+                );
+                missing += 1;
+            }
+        }
+    }
+
     let (status, overall) = if vault == "ok" {
         (StatusCode::OK, "ok")
     } else {
@@ -57,6 +88,12 @@ pub async fn health(State(state): State<AppState>) -> Response {
             "llm": llm,
             "vault": vault,
             "vault_marked": marked,
+            "sources": {
+                "total": mounted + needs_reup + missing,
+                "mounted": mounted,
+                "needs_reup": needs_reup,
+                "missing": missing,
+            },
         })),
     )
         .into_response()

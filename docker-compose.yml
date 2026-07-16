@@ -26,6 +26,9 @@ services:
       # Initial Ollama context-window override in tokens; 0 = auto (docs/adr/0014). Forwarded
       # from .env so the containerized run honors it; still retunable live via /settings.
       IDEA_VAULT_OLLAMA_CTX_TOKENS: "${IDEA_VAULT_OLLAMA_CTX_TOKENS:-0}"
+      # Named-sources mount root (ADR-0021): the generated vault/.docker-compose.sources.yml
+      # override bind-mounts each registered source read-only under this dir.
+      IDEA_VAULT_SOURCES_DIR: "/mnt/sources"
       RUST_LOG: "${RUST_LOG:-info}"
     ports:
       # Loopback by default: open http://localhost:<IDEA_VAULT_HOST_PORT> on the host,

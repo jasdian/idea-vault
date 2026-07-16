@@ -74,7 +74,9 @@ WORKDIR /app
 # is the claude-code state home (docker-compose.claude.yml mounts a named
 # volume there and sets HOME=/claude); without the chown a fresh claude-state
 # volume is root-owned and the non-root `user:` cannot write CLI state.
-RUN mkdir -p /data /vault /claude && chown -R ${APP_UID}:${APP_GID} /data /vault /claude
+# /mnt/sources (ADR-0021): the named-sources mountpoint exists deterministically
+# even with zero sources layered.
+RUN mkdir -p /data /vault /claude /mnt/sources && chown -R ${APP_UID}:${APP_GID} /data /vault /claude /mnt/sources
 
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/idea-vault /usr/local/bin/idea-vault
 # If you do NOT embed static assets with rust-embed, ship them instead:

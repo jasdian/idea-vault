@@ -40,12 +40,23 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         claude_ctx_tokens: 0,
         web_access: false,
         mcp_config_path: tmp.path().join(".mcp-servers.json"),
+        // Beside the vault (like the MCP registry), NOT inside it: the registry writes its
+        // override + .gitignore next to its config file, and tests assert on-disk vault truth.
+        sources_config_path: tmp.path().join(".sources.json"),
+        sources_dir: None,
+        sources_applied: None,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
     let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
         .expect("build ollama client");
     let mcp = Arc::new(idea_vault::mcp::McpRegistry::load(&config.mcp_config_path));
+    let sources = Arc::new(idea_vault::sources::SourceRegistry::load(
+        config.sources_config_path.clone(),
+        tmp.path().join(idea_vault::sources::OVERRIDE_FILENAME),
+        None,
+        None,
+    ));
 
     std::mem::forget(tmp);
 
@@ -58,6 +69,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
             skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
             jobs: idea_vault::web::jobs::new_registry(),
             mcp,
+            sources,
         },
         vault_dir,
     )
