@@ -2,12 +2,14 @@
 
 > How idea-vault is hosted **locally, entirely in containers**, with or without a GPU. Home of
 > **D26** (deployment topology), **D27** (multi-stage image build), **D28** (CPU vs GPU composition),
-> **D29** (claude-code container topology).
+> **D29** (claude-code container topology), **D31** (reference-source topology).
 > Decisions: [ADR-0008](./adr/0008-containerized-local-deployment.md),
 > [ADR-0013](./adr/0013-containerized-claude-code.md) (claude-code in containers),
 > [ADR-0017](./adr/0017-web-access-tools.md) (`IDEA_VAULT_WEB_ACCESS`, `IDEA_VAULT_SEARCH_URL` —
 > outbound internet needed when web access is on),
-> [ADR-0018](./adr/0018-mcp-servers.md) (`IDEA_VAULT_MCP_CONFIG`, the owner's MCP server registry).
+> [ADR-0018](./adr/0018-mcp-servers.md) (`IDEA_VAULT_MCP_CONFIG`, the owner's MCP server registry),
+> [ADR-0021](./adr/0021-reference-sources.md) (named reference sources + the generated compose
+> override the owner applies).
 > Patterns adapted
 > from sibling repos: `mcp-server` (single-Rust-service multi-stage build), `cosmic-mmo` (compose
 > topology, loopback publishing, profile-gated one-shot, json-file logging), `zomboid-seasons`
@@ -31,6 +33,8 @@ flowchart TB
     subgraph host["Host machine"]
         BROWSER["Browser → http://localhost:3000"]
         VAULTDIR[("./vault  (bind mount — user owns, git/back up)")]
+        SRCDIRS[("reference source dirs\n(host, ADR-0021)")]
+        SRCOVR["vault/.docker-compose.sources.yml\n(generated override — see D31)"]
         CLI["host `ollama` CLI (optional)"]
 
         subgraph net["Compose network: idea-vault"]
@@ -47,6 +51,8 @@ flowchart TB
     CLI -.->|"127.0.0.1:11434 (manage only)"| OLLAMA
     APP -->|"http://ollama:11434 (service DNS)"| OLLAMA
     APP <--> VAULTDIR
+    APP -->|"regenerates on every /sources edit"| SRCOVR
+    SRCDIRS -.->|"ro binds /mnt/sources/&lt;name&gt;\n(owner applies the override: up -d)"| APP
     APP <--> IDXVOL
     OLLAMA <--> MODELVOL
     PULL -->|"pull model"| OLLAMA
@@ -59,6 +65,8 @@ Why these choices (see [03-data-model](./03-data-model.md) truth/derived split):
 |------|-------|-----|
 | `vault/` (markdown, **truth**) | **host bind mount** `./vault` → `/vault`, long syntax + `create_host_path: false` | user-owned, irreplaceable, git-versioned; must survive `docker volume rm` and app removal. The source **must pre-exist**: the short syntax lets the daemon auto-create it `root:root`, which silently binds a ghost when the vault's filesystem mounts later than Docker ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)) |
 | `.mcp-servers.json` (app config, **not** vault truth) | rides the same **host bind mount** as `vault/` by default | `IDEA_VAULT_MCP_CONFIG` defaults to `<vault>/.mcp-servers.json` purely because the vault bind mount is the one host-persistent path available; it is invisible to reindex ([03-data-model](./03-data-model.md), [ADR-0018](./adr/0018-mcp-servers.md)) |
+| `.sources.json` + `.docker-compose.sources.yml` (app config, **not** vault truth) | ride the same **host bind mount** as `vault/` | the reference-source registry and its **generated** compose override ([ADR-0021](./adr/0021-reference-sources.md)) — same rationale as `.mcp-servers.json`, invisible to reindex; losing them costs a re-add of source paths, never ideas. Both are gitignored via `vault/.gitignore`, **which the app maintains** (host paths are machine-identifying and must not leak into a published ideas repo) |
+| reference source dirs (owner's own material, read-only) | **host bind mounts** `<host_path>` → `/mnt/sources/<name>`, long syntax + `create_host_path: false`, declared by the generated override | never-invent, same as the vault bind ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)); `read_only: true` because they are reference, not workspace — the foil may grep/read, never write ([ADR-0021](./adr/0021-reference-sources.md), D31) |
 | `index.db` (**derived**) | named volume `idea-index:/data` | rebuildable via reindex ([ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md)); app-managed, keep out of the user's tree; WAL sidecars live here too |
 | Ollama models | named volume `ollama-models:/root/.ollama` | multi-GB, re-pullable; pull once, persist across restarts |
 | `claude` CLI binary (claude-code override only) | **host bind mount** `${IDEA_VAULT_CLAUDE_HOST_BIN:-~/.local/bin/claude}:/opt/claude/claude:ro` | host-owned, host-managed version; ro so the container never rewrites it; dereferenced at container **start** — restart to pick up a host update ([ADR-0013](./adr/0013-containerized-claude-code.md)) |
@@ -88,6 +96,9 @@ Containerization requires the app to stop assuming `localhost`. `config.rs`
 | `IDEA_VAULT_WEB_ACCESS` | `true` | not set — falls back to `true` | initial web-access toggle ([ADR-0017](./adr/0017-web-access-tools.md)): lets either backend crawl the internet — Ollama via the `ai::web` tool-calling loop, claude-code via its own WebSearch/WebFetch tools; off (`false`/`0`) disallows them on both. Retunable live via `/settings`. **The container needs outbound internet reachability when this is on** — a previously-unneeded posture, since the app otherwise only reaches the `ollama` service on the compose network. |
 | `IDEA_VAULT_SEARCH_URL` | `https://html.duckduckgo.com/html/` | not set — falls back to the default | Ollama-path search endpoint used by `ai::web::web_search` ([ADR-0017](./adr/0017-web-access-tools.md)); override to point at a self-hosted SearXNG instance (or any HTML search endpoint accepting `?q=`) instead of DuckDuckGo. Read per call, no restart needed. Not used on the claude-code path (the CLI's own WebSearch is unaffected by it). |
 | `IDEA_VAULT_MCP_CONFIG` | `<vault>/.mcp-servers.json` | `${IDEA_VAULT_MCP_CONFIG}` (unset ⇒ same vault-relative default, so it rides the `vault/` bind mount) | path to the owner's MCP server registry file (`crate::mcp::McpRegistry`, [ADR-0018](./adr/0018-mcp-servers.md)) — **app config, not vault truth**, but defaulted inside the vault dir purely because that's the one host-persistent bind mount; managed live from `/mcp` with no restart. Only override this if you want the registry to live outside the vault bind mount (e.g. on its own volume). |
+| `IDEA_VAULT_SOURCES_CONFIG` | `<vault>/.sources.json` | unset ⇒ same vault-relative default, so it rides the `vault/` bind mount | path to the reference-source registry JSON (`sources::SourceRegistry`, [ADR-0021](./adr/0021-reference-sources.md)) — **app config, not vault truth**, defaulted inside the vault dir for the same reason as `IDEA_VAULT_MCP_CONFIG`; managed live from `/sources` with no restart. Only override to move it (and the generated override beside it) elsewhere. |
+| `IDEA_VAULT_SOURCES_DIR` | *(unset — bare mode)* | **fixed to `/mnt/sources` by the base file** — do not set it yourself | the in-container mount root the generated sources override binds each source under (`/mnt/sources/<name>`). Unset (or blank) is **bare `cargo run` mode**: registry host paths are read directly off the filesystem and the override, though still generated, is inert ([ADR-0021](./adr/0021-reference-sources.md)). Being set is also the app's container-mode signal for source status probing. |
+| `IDEA_VAULT_SOURCES_APPLIED` | *(never owner-set)* | **baked into the container env by the generated override at `up` time** — like the compose-interpolation vars, never something you write yourself | the sources fingerprint (`name=path` pairs, sorted, `;`-joined) the running container was started with; the app compares it against the live registry to render the **NeedsReup** pill. Set-but-empty means "override layered, zero sources"; absent means "override never layered" — the two are deliberately distinguishable ([ADR-0021](./adr/0021-reference-sources.md)). |
 | `IDEA_VAULT_CLAUDE_BIN` | `claude` | **fixed to `/opt/claude/claude`** by the claude override — do not set it yourself in a containerized run | path to the `claude` CLI. Native-only otherwise. |
 | `IDEA_VAULT_CLAUDE_HOST_BIN` | *(native: unused)* | `~/.local/bin/claude` (default) — host path the claude override bind-mounts ro into the container | claude-code-in-containers only ([ADR-0013](./adr/0013-containerized-claude-code.md)); compose-interpolation var, not read by `config.rs`. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | *(native: unused — the CLI's own login state applies)* | **required** by the claude override (`:?` guard — `up`/`config` fails fast when unset) | long-lived token from a one-time host `claude setup-token`; inherited by the spawned CLI from the app's env ([ADR-0013](./adr/0013-containerized-claude-code.md)). |
@@ -152,6 +163,11 @@ flowchart TB
 
 Switching modes is just re-running `up -d` with or without the second `-f`. The `ollama-models`
 volume is shared, so **no re-pull and no app rebuild** when moving between CPU and GPU.
+
+> Pinning the file list with `COMPOSE_FILE` in `.env` instead of `-f` flags? Keep the generated
+> sources override **last** — `docker-compose.yml:docker-compose.gpu.yml:docker-compose.claude.yml:vault/.docker-compose.sources.yml`
+> (base : gpu : claude : sources) — later files win merges, and nothing may shadow the sources
+> override's `IDEA_VAULT_SOURCES_APPLIED` env ([ADR-0021](./adr/0021-reference-sources.md), D31).
 
 ### With GPU — host prerequisites
 
@@ -249,6 +265,62 @@ Pitfalls specific to this override (beyond the general pitfalls list below):
 - **Ollama still starts.** The override changes only the `idea-vault` service's environment/mounts;
   `ollama` keeps running so the Settings page can live-switch back to the local model with no
   restart ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)).
+
+## Reference sources in containers
+
+The owner registers **named reference sources** — a `name` mapped to an absolute host directory —
+on the `/sources` page ([ADR-0021](./adr/0021-reference-sources.md)); an idea opts in via
+frontmatter `sources: [name]`, and attached sources reach the model as deterministic
+`source_list`/`source_grep`/`source_read` tool leaves (Ollama) or `--add-dir` roots (claude-code).
+In a bare `cargo run` the host paths are read directly and nothing below applies
+(`IDEA_VAULT_SOURCES_DIR` unset = bare mode). In containers a host path means nothing until a bind
+mount exists, so every registry mutation regenerates a compose override —
+`vault/.docker-compose.sources.yml` — that **the owner applies**; the app never runs docker
+(ADR-0020) and the `restart: "no"` manual bring-up posture is unchanged.
+
+### D31 — Reference-source topology
+
+```mermaid
+flowchart TB
+    PAGE["/sources page\n(add / edit path / remove — name immutable)"]
+    REG[("vault/.sources.json\n(registry — app config riding the vault mount)")]
+    OVR["vault/.docker-compose.sources.yml\nGENERATED override: one ro bind per source\n+ IDEA_VAULT_SOURCES_APPLIED = fingerprint"]
+    UP(["owner: docker compose up -d\n(the app never runs docker — ADR-0020)"])
+    DIRS[("host reference dirs\n(absolute paths, owner's notes/repos)")]
+    MOUNTS["/mnt/sources/&lt;name&gt;\nread_only: true, create_host_path: false"]
+    RESOLVE["app: resolve + probe\nMounted{entries} / NeedsReup / Missing\n(entries=0 = ghost-bind warning)"]
+    OLLAMA["Ollama tool loop:\nsource_list / source_grep / source_read\n(deterministic leaves — DRT)"]
+    CLAUDE["claude-code:\n--add-dir per resolved root\n+ system-prompt note"]
+
+    PAGE --> REG
+    REG -->|"every mutation regenerates"| OVR
+    OVR --> UP
+    DIRS --> UP
+    UP -->|"binds"| MOUNTS
+    MOUNTS --> RESOLVE
+    RESOLVE -->|"idea frontmatter sources: [name]\n→ per-turn scoped backend"| OLLAMA
+    RESOLVE --> CLAUDE
+```
+
+One-time setup: point `COMPOSE_FILE` at the generated override in `.env` (colon-separated, base
+first, sources **last** — see the ordering note under D28), then apply each registry change by
+re-running the plain up:
+
+```bash
+# .env — one-time
+COMPOSE_FILE=docker-compose.yml:vault/.docker-compose.sources.yml
+
+# after every add / edit / remove on /sources
+docker compose up -d
+```
+
+Until the re-`up`, the affected source shows a **NeedsReup** pill: the registry's fingerprint
+differs from the `IDEA_VAULT_SOURCES_APPLIED` value the override baked into the container env at
+`up` time (or the override was never layered at all). `Mounted {entries: 0}` renders as a warning,
+not a green light — an empty-but-listable mount is the ADR-0020 ghost-bind signature. And because
+every generated bind carries `create_host_path: false`, a vanished host dir fails the **whole**
+`up` (see the pitfalls below) — the **Missing** pill is the pre-warning to fix or remove the
+source before re-upping.
 
 ## Operating the stack
 
@@ -357,6 +429,19 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
 - **claude-code override — rebuild before first volume creation**, **restart to pick up a host CLI
   update**, and **probe-green-but-auth-broken**: see [claude-code in containers](#claude-code-in-containers)
   above for the full detail and recovery steps ([ADR-0013](./adr/0013-containerized-claude-code.md)).
+- **`COMPOSE_FILE` points at `vault/.docker-compose.sources.yml` before the app has ever written
+  it** — every compose command (`up`, `down`, `logs`, …) fails with file-not-found, a
+  chicken-and-egg: the app writes that file, but the pinned `up` can no longer run. Boot the stack
+  once **without** the sources entry (or add your first source on a bare run) before pinning: the
+  app regenerates the override at every boot, **even with zero sources**, precisely so a
+  `COMPOSE_FILE` that lists it keeps working from then on
+  ([ADR-0021](./adr/0021-reference-sources.md)).
+- **A deleted/renamed source host dir fails the *whole* `up`** — every generated bind carries
+  `create_host_path: false` (never-invent, [ADR-0019](./adr/0019-vault-mount-verified-not-created.md)/[ADR-0020](./adr/0020-boot-order-and-ghost-binds.md)
+  lineage), so one missing source is a hard start failure for the app container, not a degraded
+  source. Deliberate: a silently-invented empty dir is exactly the ghost class ADR-0019 exists to
+  prevent, and the Sources page's **Missing** pill pre-warns before you ever re-`up`. Recovery:
+  fix the path (or remove the source on `/sources`), then `docker compose up -d` again.
 
 ## Files
 
@@ -367,6 +452,7 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
 | [`docker-compose.yml`](../docker-compose.yml) | base stack (app + ollama + ollama-pull), CPU |
 | [`docker-compose.gpu.yml`](../docker-compose.gpu.yml) | nvidia override for `ollama` (D28) |
 | [`docker-compose.claude.yml`](../docker-compose.claude.yml) | claude-code backend override for `idea-vault` — bind-mounts the host CLI + `claude-state` volume (D29, [ADR-0013](./adr/0013-containerized-claude-code.md)) |
+| `vault/.docker-compose.sources.yml` (generated, not in the repo) | reference-source override — ro binds + applied fingerprint, regenerated by the app on every `/sources` edit, applied by the owner (D31, [ADR-0021](./adr/0021-reference-sources.md)) |
 | [`.env.example`](../.env.example) | uid/gid, model, log level |
 
 > These build once the crate is scaffolded ([02-module-reference](./02-module-reference.md)); today
@@ -379,4 +465,5 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
 - [ADR-0013](./adr/0013-containerized-claude-code.md) — claude-code in containers + rejected alternatives.
 - [ADR-0014](./adr/0014-dynamic-context-budget.md) — dynamic context budget (`/api/show`, `num_ctx`, per-backend overrides).
 - [ADR-0018](./adr/0018-mcp-servers.md) — the MCP server registry, its config-only vs. wire-client module split, and why `.mcp-servers.json` rides the vault bind mount without being vault truth.
+- [ADR-0021](./adr/0021-reference-sources.md) — reference sources: the registry, the generated override the owner applies, and the deterministic tool leaves (D31).
 - [05-ai-integration](./05-ai-integration.md) — D20 degradation the first-run relies on; the Ollama client contract (`/api/show`, `num_ctx`).

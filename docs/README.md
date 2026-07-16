@@ -13,7 +13,7 @@ applied to interrogating one idea.
 ## How to read the diagrams
 
 Every diagram is authored in a `mermaid` fenced code block and **renders inline on GitHub** — no build
-step. Each has a stable ID (**D1**–**D30**) catalogued in [08-diagrams](./08-diagrams.md). To render
+step. Each has a stable ID (**D1**–**D31**) catalogued in [08-diagrams](./08-diagrams.md). To render
 locally, use any Mermaid-aware markdown previewer.
 
 ## Reading order
@@ -35,7 +35,7 @@ New here? Read top to bottom:
    [swarm](./06-concepts/swarm.md) (D14, D21, D30).
 9. [07-flows](./07-flows.md) — index of runtime flows (authors D10).
 10. [09-web-ui](./09-web-ui.md) — routes, middleware, templates (D16, D17).
-11. [12-deployment](./12-deployment.md) — containerized local hosting, with/without GPU (D26–D28).
+11. [12-deployment](./12-deployment.md) — containerized local hosting, with/without GPU (D26–D29, D31).
 12. [08-diagrams](./08-diagrams.md) — the full diagram registry.
 13. [10-testing-strategy](./10-testing-strategy.md) — invariants and how they're tested.
 
@@ -60,11 +60,11 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [06-concepts/swarm](./06-concepts/swarm.md) | Bounded fan-out/converge, budgets, knowledge extraction | D14, D21, D30 |
 | [07-flows](./07-flows.md) | Runtime flow index | D10 |
 | [09-web-ui](./09-web-ui.md) | Routes, middleware, templates, HTMX (background-job polling) | D16, D17 |
-| [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers | D26, D27, D28, D29 |
-| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D30) | (catalog) |
+| [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers, reference sources | D26, D27, D28, D29, D31 |
+| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D31) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0020 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0021 | — |
 
 ## Locked decisions (at a glance)
 
@@ -82,6 +82,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Knowledge extraction:** per-lens findings persisted as `artifacts/*.md` truth files alongside a converged synthesis, a deliberate divergence from the swarm's discard-intermediates rule ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)).
 - **Web access:** one live `web_access` setting (default on) lets either backend crawl the internet — a bounded `ai::web` tool-calling loop on Ollama, allow/deny of the CLI's own WebSearch/WebFetch on claude-code; off restores a fully offline run ([ADR-0017](./adr/0017-web-access-tools.md)).
 - **MCP servers:** an owner-managed registry of MCP Streamable-HTTP endpoints (`crate::mcp`, persisted app config at `<vault>/.mcp-servers.json`, not vault truth) is bridged to either backend by `ai::backend` alone, keeping the `mcp`/`ai::mcp` split one-way and acyclic; managed live from the `/mcp` page, with probes run inline rather than as background jobs ([ADR-0018](./adr/0018-mcp-servers.md)).
+- **Reference sources:** an owner-managed registry of named read-only source dirs (`crate::sources`, app config at `<vault>/.sources.json`, no enabled flag — per-idea frontmatter `sources: [name]` is the opt-in) generates a compose override (`<vault>/.docker-compose.sources.yml`, ro binds at `/mnt/sources/<name>`) that the **owner** applies with `docker compose up -d` — the app never runs docker; attached sources reach the model per turn as deterministic `source_list`/`source_grep`/`source_read` leaves (Ollama) or `--add-dir` roots (claude-code), never as model-authored paths ([ADR-0021](./adr/0021-reference-sources.md)).
 
 ## Beyond these docs
 

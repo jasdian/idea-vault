@@ -127,6 +127,7 @@ cargo build --release     # single-binary release build
 cargo test                # run tests
 cargo test <name>         # run a single test by name substring
 cargo fmt && cargo clippy # format + lint before finishing a change
+bash scripts/gate.sh      # the fixed-order shipping gate: intent → invariant greps → build → tests → fmt → clippy -D warnings
 ```
 
 Ollama must be running locally (`ollama serve`, model pulled) for AI features to work; the app
@@ -172,6 +173,15 @@ path, default `~/.local/bin/claude`) and `CLAUDE_CODE_OAUTH_TOKEN` (from a one-t
 `claude setup-token`) in `.env` — see [docs/12-deployment.md](docs/12-deployment.md) for the
 run commands and pitfalls (rebuild-before-first-volume-creation, restart-for-CLI-update,
 probe-green-but-auth-broken).
+
+**Reference sources** ([ADR-0021](docs/adr/0021-reference-sources.md)): register named read-only
+source dirs on `/sources`; the app regenerates `vault/.docker-compose.sources.yml` (ro binds at
+`/mnt/sources/<name>`) but **never self-ups** — add the one-time
+`COMPOSE_FILE=docker-compose.yml:vault/.docker-compose.sources.yml` line to `.env` (sources entry
+last when combined with other overrides) and apply each registry change yourself with
+`docker compose up -d`. Sources are attached per-idea via frontmatter `sources: [name]` and reach
+the model as deterministic `source_*` tools (Ollama) / `--add-dir` (claude-code) — never as
+model-authored paths.
 
 ## Conventions
 
