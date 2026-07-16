@@ -12,7 +12,7 @@ use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::{build_discussion, respond_with_transcript, state_badge_oob};
-use crate::web::routes::reindex_logged;
+use crate::web::routes::{reindex_logged, scoped_llm};
 
 use crate::web::WebError;
 use askama::Template as _;
@@ -212,13 +212,15 @@ async fn run_skill_work(
     skill: concepts::skills::Skill,
 ) -> Result<(), String> {
     let progress = progress_sink(state, slug);
+    // Scoped once per job (ADR-0021): the skill turn sees the idea's attached sources.
+    let llm = scoped_llm(state, slug);
     let out = concepts::skills::invoke(
-        &state.llm,
+        &llm,
         &state.ai_semaphore,
         &state.config.vault_dir,
         slug,
         &skill,
-        state.llm.context_budget(),
+        llm.context_budget(),
         &progress,
     )
     .await
@@ -338,14 +340,16 @@ pub async fn run_workflow(
 }
 
 async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(), String> {
+    // Scoped once per job (ADR-0021): every step turn sees the idea's attached sources.
+    let llm = scoped_llm(state, slug);
     let outcome = concepts::workflows::run_workflow(
-        &state.llm,
+        &llm,
         &state.ai_semaphore,
         &state.skills,
         &state.config.vault_dir,
         slug,
         name,
-        state.llm.context_budget(),
+        llm.context_budget(),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -358,14 +362,17 @@ async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(
 
 async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Result<(), String> {
     let progress = progress_sink(state, slug);
+    // One scoped clone, shared across the whole fan-out (ADR-0021): every angle's agent turn
+    // carries the same resolved sources — resolved once, not once per subagent.
+    let llm = scoped_llm(state, slug);
     let outcome = concepts::swarm::swarm(
-        &state.llm,
+        &llm,
         &state.ai_semaphore,
         &state.skills,
         &state.config.vault_dir,
         slug,
         angles,
-        state.llm.context_budget(),
+        llm.context_budget(),
         &progress,
     )
     .await

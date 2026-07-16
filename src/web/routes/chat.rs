@@ -19,7 +19,7 @@ use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::respond_with_transcript;
-use crate::web::routes::reindex_logged;
+use crate::web::routes::{reindex_logged, scoped_llm};
 use crate::web::WebError;
 
 /// The rigorous-foil persona for free chat (CLAUDE.md: steelman, then stress-test).
@@ -108,7 +108,10 @@ pub async fn chat(
 /// human-readable message on failure for the indicator to surface.
 async fn run_chat(state: &AppState, slug: &str) -> Result<(), String> {
     let vault_dir = &state.config.vault_dir;
-    let context = memory::load::load_context(vault_dir, slug, state.llm.context_budget())
+    // One scoped view for the whole turn (ADR-0021): the budget the context is assembled
+    // against and the backend that answers must agree on the sources riding the window.
+    let llm = scoped_llm(state, slug);
+    let context = memory::load::load_context(vault_dir, slug, llm.context_budget())
         .map_err(|e| e.to_string())?;
     let prompt = format!("{FOIL_INSTRUCTION}\n\n{}", context.text);
 
@@ -118,14 +121,12 @@ async fn run_chat(state: &AppState, slug: &str) -> Result<(), String> {
             .acquire()
             .await
             .map_err(|_| "the AI queue is shutting down".to_string())?;
-        state
-            .llm
-            .chat(vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-            }])
-            .await
-            .map_err(|e| e.to_string())?
+        llm.chat(vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }])
+        .await
+        .map_err(|e| e.to_string())?
     };
 
     let reply = reply.trim();

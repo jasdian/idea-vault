@@ -12,7 +12,7 @@ use crate::domain::{slug as domain_slug, ArtifactKind};
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::memory::{guard_discussion_state, progress_sink};
-use crate::web::routes::reindex_logged;
+use crate::web::routes::{reindex_logged, scoped_llm};
 use crate::web::templates::{
     render_markdown, ArtifactEntry, ArtifactExport, ArtifactPage, ArtifactsPanel, ExportSection,
 };
@@ -57,14 +57,17 @@ pub async fn run_extract(
 
 async fn run_extract_work(state: &AppState, slug: &str, want_html: bool) -> Result<(), String> {
     let progress = progress_sink(state, slug);
+    // One scoped clone shared by every lens turn (ADR-0021): extraction reads the discussion,
+    // and the discussion may lean on the idea's attached sources.
+    let llm = scoped_llm(state, slug);
     let outcome = knowledge::extract_knowledge(
-        &state.llm,
+        &llm,
         &state.ai_semaphore,
         &state.skills,
         &state.config.vault_dir,
         slug,
         knowledge::LENSES.iter().map(|l| l.to_string()).collect(),
-        state.llm.context_budget(),
+        llm.context_budget(),
         &progress,
     )
     .await

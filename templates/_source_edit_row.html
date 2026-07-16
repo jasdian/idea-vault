@@ -1,0 +1,22 @@
+{# One source's edit-mode row: host path only. The name is immutable (mount target + tool
+   routing key — SourceRegistry::update_path's contract), so it renders as fixed text. #}
+<li id="src-row-{{ name }}" class="mcp__row mcp__row--edit">
+  <form class="mcp__edit-form" hx-post="/sources/{{ name }}/update" hx-target="#sources" hx-swap="outerHTML"
+        hx-on::after-request="if(!event.detail.successful) alert(event.detail.xhr.responseText)">
+    <div class="mcp__row-line1">
+      <code class="mcp__name">{{ name }}</code>
+      <span class="field__hint">name is fixed — it is the tool name and the mount folder</span>
+    </div>
+    <label class="field">
+      <span class="field__label">host path</span>
+      <input type="text" name="host_path" value="{{ path }}" required />
+      <span class="field__hint">absolute path on the host machine — mounted read-only; the app
+        never writes into it</span>
+    </label>
+    <div class="mcp__row-actions">
+      <button type="submit" class="btn btn--ghost">save</button>
+      <button type="button" class="chip" hx-get="/sources/{{ name }}/view"
+              hx-target="#src-row-{{ name }}" hx-swap="outerHTML">cancel</button>
+    </div>
+  </form>
+</li>

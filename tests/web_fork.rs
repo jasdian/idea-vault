@@ -18,7 +18,7 @@ fn seed(vault: &std::path::Path) {
                 slug: "forky".into(),
                 state: IdeaState::InDiscussion,
                 tags: vec!["risk".into()],
-                sources: vec![],
+                sources: vec!["refs".into()],
                 created: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
                 updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
             },
@@ -73,6 +73,10 @@ async fn forking_copies_full_context_into_a_new_idea_and_leaves_the_original() {
     assert_eq!(fork.frontmatter.title, "Forky (fork)");
     assert_eq!(fork.frontmatter.state, IdeaState::InDiscussion);
     assert_eq!(fork.body, "The best statement so far.\n");
+    // The attach list rides along (ADR-0021): the conversation the fork carries was grounded
+    // in those sources, so the fork must keep reading them — same reasoning as tags.
+    assert_eq!(fork.frontmatter.tags, vec!["risk".to_string()]);
+    assert_eq!(fork.frontmatter.sources, vec!["refs".to_string()]);
     let convo = store::read_conversation(&vault, "forky-fork").unwrap();
     assert!(convo.contains("main line question") && convo.contains("a reply"));
     assert_eq!(

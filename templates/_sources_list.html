@@ -1,0 +1,53 @@
+{# The swappable #sources panel: the saved-vs-applied state up top (banner or quiet note), then
+   the registered-source rows, then the add form. The app never runs docker (ADR-0020) — the
+   banner tells the owner exactly what THEY run; the two command blocks carry class="copyable"
+   so base.html's copy-button enhancement picks them up. #}
+<section class="mcp src" id="sources">
+  {% if apply.bare_mode %}
+  <p class="src__note">bare mode — no sources mount configured; registered paths are read directly
+    from disk. changes take effect immediately — nothing to re-up.</p>
+  {% else if apply.pending > 0 %}
+  <div class="src__banner">
+    <p>mount plan changed — {{ apply.pending }} of {{ apply.total }} sources not mounted yet.</p>
+    <p>this app never runs docker (ADR-0020). from the repo root, you run:</p>
+    <pre class="copyable">docker compose up -d</pre>
+    {% if apply.show_compose_setup %}
+    <p>first use — the generated override must join your compose stack. add to COMPOSE_FILE in .env:</p>
+    <pre class="copyable">{{ apply.override_path }}</pre>
+    {% endif %}
+  </div>
+  {% else if apply.total > 0 %}
+  <p class="src__note">all sources mounted — read-only under /mnt/sources/ inside the container.</p>
+  {% endif %}
+
+  {% if sources.is_empty() %}
+  <p class="mcp__empty">no sources registered yet — add one below. each becomes a read-only lookup
+    the foil can consult per idea.</p>
+  {% else %}
+  <ul class="mcp__list">
+    {% for source in sources %}
+    {% include "_source_row.html" %}
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <form class="mcp__add" hx-post="/sources/add" hx-target="#sources" hx-swap="outerHTML"
+        hx-on::after-request="if(!event.detail.successful) alert(event.detail.xhr.responseText)">
+    <fieldset class="settings__group">
+      <legend>add a source</legend>
+      <label class="field">
+        <span class="field__label">name</span>
+        <input type="text" name="name" placeholder="rf-docs" pattern="[a-z0-9-]+" required />
+        <span class="field__hint">lowercase letters, digits, '-' only — becomes the lookup tool
+          name and the mount folder /mnt/sources/&lt;name&gt;</span>
+      </label>
+      <label class="field">
+        <span class="field__label">host path</span>
+        <input type="text" name="host_path" placeholder="/home/you/reference/docs" required />
+        <span class="field__hint">absolute path on the host machine — mounted read-only; the app
+          never writes into it</span>
+      </label>
+      <button type="submit" class="btn">Add source</button>
+    </fieldset>
+  </form>
+</section>

@@ -49,6 +49,9 @@ pub struct IdeaPage {
     pub artifacts_html: String,
     /// The tag row (`_idea_tags.html`), pre-rendered so the tags editor can swap just it.
     pub tags_html: String,
+    /// The attached-sources row (`_idea_sources.html`), pre-rendered so the attach editor can
+    /// swap just it — same split as `tags_html`.
+    pub sources_html: String,
 }
 
 /// Partial: the idea-page title block (`templates/_idea_title.html`) — the `h1` plus its inline
@@ -333,6 +336,116 @@ pub struct McpStatus {
     /// probe failure — it is a display convenience, not a health claim (see the registry field
     /// doc). Empty means "never successfully probed this process lifetime".
     pub tools: Vec<crate::mcp::ToolSummary>,
+}
+
+/// The Sources page shell (`templates/sources.html`); the list is pre-rendered so a mutation can
+/// swap just the `#sources` panel — same split as `McpPage`/`McpList`.
+#[derive(Template, WebTemplate)]
+#[template(path = "sources.html")]
+pub struct SourcesPage {
+    pub list_html: String,
+}
+
+/// Partial: the swappable Sources panel (`templates/_sources_list.html`) — the apply-state banner
+/// or quiet note, the registered-source rows, and the add form. Returned by `GET /sources`
+/// (embedded) and by every mutating `/sources/*` route (add/update/delete) so the panel reflects
+/// the registry without a full reload.
+#[derive(Template, WebTemplate)]
+#[template(path = "_sources_list.html")]
+pub struct SourcesList {
+    pub sources: Vec<SourceRow>,
+    pub apply: ApplyState,
+}
+
+/// One registered source row: the immutable name, the middle-truncated path (full path in the
+/// `title` attribute), and the live status pill — probed fresh on every render, never cached
+/// (`routes::sources::status_view` maps `SourceStatus` to this text/kind/hint vocabulary).
+pub struct SourceRow {
+    pub name: String,
+    /// `truncate_path_middle`'d for the row; `path_full` carries the whole thing in `title`.
+    pub path_display: String,
+    pub path_full: String,
+    /// The pill text ("mounted (3 entries)", "needs re-up", "readable", …).
+    pub status_text: String,
+    /// The pill's CSS modifier: `ok` / `stale` (the ADR-0020 ghost-bind warning) / `warn` /
+    /// `danger`.
+    pub status_kind: &'static str,
+    /// The quiet explanation line under a non-ok row; empty (not rendered) when ok.
+    pub status_hint: String,
+}
+
+/// The saved-vs-applied gap the panel head renders (ADR-0020: the app never runs docker, so the
+/// gap between "registered" and "mounted" is the owner's to close — the banner tells them how).
+pub struct ApplyState {
+    /// How many sources are `NeedsReup` — `> 0` (in container mode) shows the re-up banner.
+    pub pending: usize,
+    pub total: usize,
+    /// The copyable `COMPOSE_FILE=…` `.env` line, derived server-side from the actual vault dir
+    /// (`routes::sources::compose_file_line`) so the template never assembles a path.
+    pub override_path: String,
+    /// No sources mount configured (`IDEA_VAULT_SOURCES_DIR` unset) — statuses read the host
+    /// paths directly and there is nothing to re-up.
+    pub bare_mode: bool,
+    /// Container mode with the override never layered (`IDEA_VAULT_SOURCES_APPLIED` absent) —
+    /// show the one-time COMPOSE_FILE setup instruction alongside the re-up command.
+    pub show_compose_setup: bool,
+}
+
+/// Partial: a single source's view-mode `<li>` (`templates/_source_row.html`). `{% include %}`-d
+/// by `_sources_list.html` for every row in the loop — the field name (`source`) matches the
+/// loop binding, the same include-scope trick as `McpRow`, which is what lets the edit form's
+/// cancel action (`GET /sources/{name}/view`) render exactly one row standalone.
+#[derive(Template, WebTemplate)]
+#[template(path = "_source_row.html")]
+pub struct SourceRowView {
+    pub source: SourceRow,
+}
+
+/// Partial: one source's edit-mode `<li>` (`templates/_source_edit_row.html`), swapped in by
+/// `GET /sources/{name}/edit` over the same `#src-row-<name>` id the view row uses, and posted
+/// by `POST /sources/{name}/update`. Host path only — the name is immutable (it is the mount
+/// target and the tool routing key, see `SourceRegistry::update_path`).
+#[derive(Template, WebTemplate)]
+#[template(path = "_source_edit_row.html")]
+pub struct SourceEditRow {
+    pub name: String,
+    pub path: String,
+}
+
+/// Partial: the idea's attached-sources row (`templates/_idea_sources.html`) — chips plus the
+/// checkbox editor — swapped whole by `POST /idea/{slug}/sources`. The sibling of [`IdeaTags`].
+#[derive(Template, WebTemplate)]
+#[template(path = "_idea_sources.html")]
+pub struct IdeaSources {
+    pub slug: String,
+    /// One chip per attached name, in frontmatter order (including names no longer in the
+    /// registry, flagged — frontmatter is truth).
+    pub chips: Vec<SourceChip>,
+    /// One checkbox per registered source, plus checked extras for attached-but-unregistered
+    /// names. Empty means "registry empty and nothing attached" — the editor shows the
+    /// register-one-first line instead of a form.
+    pub options: Vec<SourceOption>,
+}
+
+/// One attached-source chip. `flag` is the degraded-state suffix ("needs re-up" / "missing");
+/// empty means healthy — no suffix span rendered.
+pub struct SourceChip {
+    pub name: String,
+    /// The hover explanation — standard for registered sources, the re-add remedy for names
+    /// missing from the registry.
+    pub title: String,
+    pub flag: String,
+    /// CSS tint for the flag: `warn` / `danger` (unused when `flag` is empty).
+    pub flag_kind: &'static str,
+}
+
+/// One row of the attach editor: a checkbox for a registered source (or a checked extra for an
+/// attached-but-unregistered name), with a quiet status hint when the source is degraded.
+pub struct SourceOption {
+    pub name: String,
+    pub attached: bool,
+    /// Non-empty when there is something to say ("needs re-up", "not in the registry", …).
+    pub hint: String,
 }
 
 /// One search hit, pre-rendered for `_search_results.html` from `index::queries::SearchHit` by

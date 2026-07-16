@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="crumb" href="/">← all ideas</a>
+<h1 class="title">Sources</h1>
+<p class="settings__intro">Named, read-only reference material the foil can consult. A name here
+  becomes a deterministic lookup tool: the model names a source and a query; the app resolves the
+  path and runs the read. The model never sees or authors filesystem paths.</p>
+{{ list_html|safe }}
+{% endblock %}

@@ -1,0 +1,32 @@
+{# The idea's attached-sources row: quiet chips + a <details> checkbox editor (the tag row's
+   skeleton, _idea_tags.html). Swapped whole via #idea-sources-row by POST /idea/{slug}/sources.
+   Chips link to the Sources page; a degraded attachment carries its flag inline so the owner
+   sees at a glance that the next turn will run without it. #}
+<div class="tags-row" id="idea-sources-row">
+  {% for chip in chips %}
+  <a class="srcchip" href="/sources" title="{{ chip.title }}">{{ chip.name }}{% if !chip.flag.is_empty() %}<span class="srcchip__flag srcchip__flag--{{ chip.flag_kind }}"> · {{ chip.flag }}</span>{% endif %}</a>
+  {% endfor %}
+  <details class="rename-toggle">
+    <summary class="rename-toggle__summary"
+             title="Attach read-only reference sources to this idea">sources</summary>
+    {% if options.is_empty() %}
+    <p class="field__hint">no sources registered yet — register one under <a href="/sources">sources ↗</a></p>
+    {% else %}
+    {# hx-on: a non-2xx (busy idea, unregistered name) is otherwise silently dropped by htmx. #}
+    <form class="src-attach" hx-post="/idea/{{ slug }}/sources"
+          hx-target="#idea-sources-row" hx-swap="outerHTML"
+          hx-on::after-request="if(!event.detail.successful) alert(event.detail.xhr.responseText)">
+      {% for opt in options %}
+      <label class="src-attach__opt">
+        <input type="checkbox" name="sources" value="{{ opt.name }}"{% if opt.attached %} checked{% endif %} />
+        <code>{{ opt.name }}</code>
+        {% if !opt.hint.is_empty() %}<span class="field__hint">{{ opt.hint }}</span>{% endif %}
+      </label>
+      {% endfor %}
+      <button type="submit" class="btn btn--ghost">save</button>
+    </form>
+    <p class="field__hint">checked sources join the foil's reach on the next message — it looks
+      things up by name; it never writes, and never sees the path</p>
+    {% endif %}
+  </details>
+</div>

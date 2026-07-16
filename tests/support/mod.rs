@@ -1,7 +1,8 @@
 //! Scriptable mock Ollama server (docs/10-testing-strategy.md): a real localhost HTTP listener
-//! implementing `/api/tags` and streaming `/api/chat`, scriptable to return tokens, stall
-//! (timeout tests), or cut the connection early. This is the seam that keeps the whole suite
-//! offline and deterministic — AI paths are never tested against a live model.
+//! implementing `/api/tags` and `/api/chat` (streaming NDJSON, or a single JSON object for a
+//! `"stream": false` tool-loop round), scriptable to return tokens, stall (timeout tests), or
+//! cut the connection early. This is the seam that keeps the whole suite offline and
+//! deterministic — AI paths are never tested against a live model.
 #![allow(dead_code)] // compiled once per test binary; not every binary uses every helper
 
 pub mod web;
@@ -252,6 +253,42 @@ async fn handle(
         let _guard = InFlightGuard(in_flight.clone());
 
         let script = scripts.next();
+
+        // A `"stream": false` request is a tool-loop round (`OllamaClient::chat_tools`,
+        // ADR-0017/0021): the client parses the response body as ONE JSON object, so a Tokens
+        // script answers as a single non-streaming completion (tokens concatenated — the same
+        // text a streaming consumer would assemble). Stall/Eof keep their raw-socket behavior:
+        // they script transport failures, which look the same to both paths.
+        let wants_stream =
+            serde_json::from_str::<serde_json::Value>(String::from_utf8_lossy(&body).as_ref())
+                .ok()
+                .and_then(|v| v.get("stream").and_then(serde_json::Value::as_bool))
+                .unwrap_or(true);
+        if !wants_stream {
+            let tokens = match &script {
+                ChatScript::Tokens(tokens) => Some(tokens.clone()),
+                ChatScript::TokensAfterDelay { tokens, delay_ms } => {
+                    tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+                    Some(tokens.clone())
+                }
+                ChatScript::StallAfter(_) | ChatScript::EofAfter(_) => None,
+            };
+            if let Some(tokens) = tokens {
+                let payload = serde_json::json!({
+                    "message": {"role": "assistant", "content": tokens.concat()},
+                    "done": true,
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                sock.write_all(resp.as_bytes()).await?;
+                return Ok(());
+            }
+        }
+
         sock.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n",
         )

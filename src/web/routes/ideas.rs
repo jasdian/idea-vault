@@ -1,7 +1,7 @@
 //! Ideas route group (docs/09-web-ui.md D17): the idea list (R1), a single idea view (R2),
 //! creation (R3), and full-text search (R8).
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawForm, State};
 use axum::Form;
 use chrono::Utc;
 use serde::Deserialize;
@@ -310,14 +310,17 @@ pub(crate) fn respond_with_transcript(
     let conversation = store::read_conversation(&state.config.vault_dir, slug)?;
     let pending = crate::web::jobs::peek(&state.jobs, slug);
     let busy = matches!(pending, crate::web::jobs::Pending::Running { .. });
+    // The idea's scoped view (ADR-0021): the meter must count the source-schema bytes the next
+    // turn will actually carry, not the shared instance's source-free figure.
+    let llm = crate::web::routes::scoped_llm(state, slug);
     let mut html = transcript_inner(
         &state.config.vault_dir,
         slug,
-        &state.llm.model(),
+        &llm.model(),
         &conversation,
         pending,
-        state.llm.context_budget().max_bytes,
-        state.llm.tool_context_bytes(),
+        llm.context_budget().max_bytes,
+        llm.tool_context_bytes(),
     )?;
 
     let idea = store::read_idea(&state.config.vault_dir, slug)?;
@@ -334,7 +337,7 @@ pub(crate) fn respond_with_transcript(
         skill_names,
         can_store,
         busy,
-        state.llm.settings().backend,
+        llm.settings().backend,
         true,
     )?);
     // Third OOB fragment: the artifacts panel, so a finished extraction (or any transcript
@@ -432,14 +435,16 @@ pub async fn history_page(
     let vault_dir = &state.config.vault_dir;
     let idea = store::read_idea(vault_dir, &slug)?; // 404 if missing
     let conversation = store::read_conversation(vault_dir, &slug)?;
+    // Scoped for the meter (ADR-0021), like the idea page and the poll partial.
+    let llm = crate::web::routes::scoped_llm(&state, &slug);
     let transcript_html = transcript_inner(
         vault_dir,
         &slug,
-        &state.llm.model(),
+        &llm.model(),
         &conversation,
         crate::web::jobs::Pending::Idle,
-        state.llm.context_budget().max_bytes,
-        state.llm.tool_context_bytes(),
+        llm.context_budget().max_bytes,
+        llm.tool_context_bytes(),
     )?;
     Ok(crate::web::templates::HistoryPage {
         title: idea.frontmatter.title.clone(),
@@ -476,7 +481,9 @@ pub async fn fork_idea(
             // It carries a conversation forward, so it opens mid-discussion, not as a blank draft.
             state: IdeaState::InDiscussion,
             tags: src.frontmatter.tags.clone(),
-            sources: Vec::new(),
+            // The conversation it carries was grounded in the source idea's attached reference
+            // sources (ADR-0021) — the fork must keep reading them, same reasoning as tags.
+            sources: src.frontmatter.sources.clone(),
             created: now,
             updated: now,
         },
@@ -662,23 +669,32 @@ pub async fn idea_page(
     let skill_names = state.skills.move_names();
     // If a background job is running for this idea, this resumes its indicator on the fresh page.
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
+    // Scoped for the meter (ADR-0021) — the probe above stays on the shared instance (health is
+    // a backend property, not a per-idea one).
+    let llm = crate::web::routes::scoped_llm(&state, &slug);
     let panel_html = render_panel(
         vault_dir,
         &idea,
         &conversation,
         health,
-        state.llm.settings().backend,
-        &state.llm.model(),
+        llm.settings().backend,
+        &llm.model(),
         skill_names,
         pending,
-        state.llm.context_budget().max_bytes,
-        state.llm.tool_context_bytes(),
+        llm.context_budget().max_bytes,
+        llm.tool_context_bytes(),
     )?;
     let artifacts_html =
         crate::web::routes::artifacts::render_artifacts_panel(vault_dir, &slug, false)?;
     let tags_html = {
         use askama::Template as _;
         render_idea_tags(&idea.frontmatter.slug, &idea.frontmatter.tags)
+            .render()
+            .map_err(|e| WebError::Internal(format!("template render: {e}")))?
+    };
+    let sources_html = {
+        use askama::Template as _;
+        render_idea_sources(&state, &idea.frontmatter.slug, &idea.frontmatter.sources)
             .render()
             .map_err(|e| WebError::Internal(format!("template render: {e}")))?
     };
@@ -691,6 +707,7 @@ pub async fn idea_page(
         panel_html,
         artifacts_html,
         tags_html,
+        sources_html,
     })
 }
 
@@ -822,6 +839,144 @@ pub async fn set_tags(
 
     crate::web::routes::reindex_logged(&state);
     Ok(render_idea_tags(&slug, &tags))
+}
+
+/// Render the idea's attached-sources row (`_idea_sources.html`) — shared by the full page and
+/// the editor swap, like [`render_idea_tags`]. Statuses come fresh off the registry so a chip's
+/// degraded flag (and each checkbox's hint) reflects what the very next turn would resolve.
+pub(crate) fn render_idea_sources(
+    state: &AppState,
+    slug: &str,
+    attached: &[String],
+) -> crate::web::templates::IdeaSources {
+    use crate::sources::SourceStatus;
+    use crate::web::templates::{SourceChip, SourceOption};
+
+    let statuses = state.sources.statuses();
+    // The degraded-flag vocabulary shared by chips and option hints; empty means healthy. The
+    // Mounted-but-empty nuance stays the Sources page's job — a chip only flags "this attachment
+    // will be dropped from the turn" states (`SourceRegistry::resolve_attached`'s warn-drops).
+    let flag_of = |status: &SourceStatus| -> (&'static str, &'static str) {
+        match status {
+            SourceStatus::Mounted { .. } => ("", ""),
+            SourceStatus::NeedsReup => ("needs re-up", "warn"),
+            SourceStatus::Missing => ("missing", "danger"),
+        }
+    };
+
+    let chips = attached
+        .iter()
+        .map(
+            |name| match statuses.iter().find(|(cfg, _)| &cfg.name == name) {
+                Some((_, status)) => {
+                    let (flag, flag_kind) = flag_of(status);
+                    SourceChip {
+                        name: name.clone(),
+                        title: "reference source — manage under sources".to_string(),
+                        flag: flag.to_string(),
+                        flag_kind,
+                    }
+                }
+                // Attached but no longer registered: renders as missing with the remedy in the
+                // hover — frontmatter is truth, so the name persists until unchecked.
+                None => SourceChip {
+                    name: name.clone(),
+                    title: "not in the registry — re-add it under sources, or uncheck here"
+                        .to_string(),
+                    flag: "missing".to_string(),
+                    flag_kind: "danger",
+                },
+            },
+        )
+        .collect();
+
+    let mut options: Vec<SourceOption> = statuses
+        .iter()
+        .map(|(cfg, status)| {
+            let (flag, _) = flag_of(status);
+            SourceOption {
+                name: cfg.name.clone(),
+                attached: attached.iter().any(|a| a == &cfg.name),
+                hint: flag.to_string(),
+            }
+        })
+        .collect();
+    // Attached names the registry no longer knows appear as extra checked entries so the owner
+    // can uncheck them here rather than hand-editing frontmatter.
+    for name in attached {
+        if !statuses.iter().any(|(cfg, _)| &cfg.name == name) {
+            options.push(SourceOption {
+                name: name.clone(),
+                attached: true,
+                hint: "not in the registry".to_string(),
+            });
+        }
+    }
+
+    crate::web::templates::IdeaSources {
+        slug: slug.to_string(),
+        chips,
+        options,
+    }
+}
+
+/// `POST /idea/{slug}/sources` — replace the idea's attached-source set from the editor's
+/// checkboxes (replace semantics, like [`set_tags`]: the editor shows the current set checked,
+/// so what the owner saves is what they mean). Names must be slug-alphabet; a newly checked name
+/// must exist in the registry (400 otherwise), but an *already-attached* name the registry no
+/// longer knows may persist — frontmatter is truth, and the owner may re-register the source
+/// later. Like tags, this is a whole-file read-modify-write, so it claims the per-idea job slot
+/// to never interleave with a running job's own write-back.
+pub async fn set_sources(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    RawForm(body): RawForm,
+) -> Result<crate::web::templates::IdeaSources, WebError> {
+    // The editor posts one `sources=<name>` pair per checked box. serde_urlencoded (what
+    // `axum::Form` wraps) cannot collect a repeated key into a `Vec<String>`, so filter the raw
+    // pairs by hand. No percent-decoding: a valid name is slug-alphabet (`[a-z0-9-]`), which
+    // urlencoding never escapes — anything that arrives encoded fails the validation below.
+    let body = String::from_utf8(body.to_vec())
+        .map_err(|_| WebError::BadRequest("form body must be UTF-8".into()))?;
+    let mut submitted: Vec<String> = Vec::new();
+    for (key, value) in body.split('&').filter_map(|pair| pair.split_once('=')) {
+        if key == "sources" && !value.is_empty() && !submitted.iter().any(|s| s == value) {
+            submitted.push(value.to_string());
+        }
+    }
+
+    if !crate::web::jobs::try_claim(&state.jobs, &slug) {
+        return Err(WebError::BadRequest(
+            "a run is in progress for this idea — wait for it to finish (or cancel it) before editing sources"
+                .into(),
+        ));
+    }
+    let result = (|| {
+        let vault_dir = &state.config.vault_dir;
+        let mut idea = store::read_idea(vault_dir, &slug)?; // 404 if missing
+        for name in &submitted {
+            if !domain_slug::is_valid(name) {
+                return Err(WebError::BadRequest(format!(
+                    "invalid source name '{name}': use lowercase letters, digits and '-' only"
+                )));
+            }
+            let already_attached = idea.frontmatter.sources.iter().any(|s| s == name);
+            if !already_attached && state.sources.get(name).is_none() {
+                return Err(WebError::BadRequest(format!(
+                    "no source named '{name}' — register it on the sources page first"
+                )));
+            }
+        }
+        idea.frontmatter.sources = submitted.clone();
+        idea.frontmatter.updated = Utc::now();
+        store::write_idea(vault_dir, &idea)?;
+        Ok::<_, WebError>(())
+    })();
+    crate::web::jobs::mark_done(&state.jobs, &slug);
+    result?;
+
+    crate::web::routes::reindex_logged(&state);
+    Ok(render_idea_sources(&state, &slug, &submitted))
 }
 
 /// Form body for R3 (the `list.html` new-idea form posts `title`; a seed body is optional).

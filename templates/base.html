@@ -107,9 +107,11 @@
       })();
 
       // Progressive enhancement: give every code block (e.g. a generated build prompt) a Copy
-      // button. Delegated + idempotent, and re-run after each HTMX swap so polled-in blocks get one.
+      // button. Delegated + idempotent, and re-run after each HTMX swap so polled-in blocks get
+      // one. pre.copyable covers server-built command blocks outside transcripts (the Sources
+      // page's re-up banner).
       function addCopyButtons() {
-        document.querySelectorAll(".turn__body pre").forEach(function (pre) {
+        document.querySelectorAll(".turn__body pre, pre.copyable").forEach(function (pre) {
           if (pre.querySelector(".copy-btn")) return;
           var btn = document.createElement("button");
           btn.type = "button";
@@ -185,6 +187,7 @@
         <div class="rail__nav">
           <a class="rail__link" href="/" data-match="/">Ideas</a>
           <a class="rail__link" href="/mcp" data-match="/mcp">MCP</a>
+          <a class="rail__link" href="/sources" data-match="/sources">Sources</a>
           <a class="rail__link" href="/settings" data-match="/settings">Settings</a>
         </div>
 

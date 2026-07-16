@@ -770,3 +770,62 @@ body.palette-open { overflow: hidden; }
   .commit { margin: 0; }
   .commit .btn--commit { width: 100%; }
 }
+
+/* ---- sources: named read-only reference mounts (ADR-0021) --------------
+   Rows reuse the .mcp card family; only the sources-specific machinery lives here. Status pills
+   share the mcp chip metrics but carry the four-way saved-vs-applied vocabulary; the banner is
+   the .foil-notice recipe re-tinted warn (the app never runs docker — the copy is a to-do for
+   the OWNER, hence louder than a note but never an alarm). */
+.src__status {
+  font-family: var(--mono); font-size: .7rem; color: var(--faint); flex: 0 1 auto;
+  padding: .12rem .5rem; border-radius: 5px; border: 1px solid var(--rule-strong);
+  overflow-wrap: anywhere; max-width: 100%;
+}
+.src__status--ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); background: var(--ok-soft); }
+/* stale = mounted-but-empty, the ADR-0020 ghost-bind signal — warn-tinted, never green. */
+.src__status--stale, .src__status--warn {
+  color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: var(--warn-soft);
+}
+.src__status--danger {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.src__banner {
+  margin: 0 0 .25rem; padding: .7rem .85rem; border-radius: var(--radius);
+  font-family: var(--mono); font-size: .8rem; color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px dashed color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.src__banner p { margin: .2rem 0; }
+.src__banner pre {
+  position: relative; margin: .45rem 0; padding: .5rem .65rem; border-radius: 6px;
+  font-size: .8rem; overflow-x: auto;
+  background: color-mix(in srgb, var(--ink) 5%, var(--paper)); border: 1px solid var(--rule);
+}
+.src__banner pre:hover .copy-btn, .src__banner .copy-btn:focus { opacity: 1; }
+.src__note { font-family: var(--mono); font-size: .74rem; color: var(--muted); margin: 0 0 .25rem; }
+.src__path {
+  font-family: var(--mono); font-size: .78rem; color: var(--muted);
+  flex: 1 1 auto; min-width: 6rem; overflow-wrap: anywhere;
+}
+.src__hint { font-size: .78rem; color: var(--faint); font-style: italic; margin: 0; }
+
+/* Attached-source chips on the idea page: tagchip metrics, but dashed + muted — a reference is
+   quieter than a tag, and the '§' marks it as material, not taxonomy. */
+.srcchip {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em; text-decoration: none;
+  color: var(--muted); background: transparent; border-radius: 999px;
+  padding: .1rem .55rem; border: 1px dashed var(--rule-strong);
+}
+.srcchip::before { content: "§ "; color: var(--faint); }
+a.srcchip:hover { border-color: var(--accent); color: var(--accent); }
+.srcchip__flag--warn { color: var(--warn); }
+.srcchip__flag--danger { color: var(--danger); }
+
+/* The <details> attach editor: one checkbox per registered source. */
+.src-attach { display: flex; flex-direction: column; align-items: flex-start; gap: .35rem; margin: .5rem 0 .3rem; }
+.src-attach__opt {
+  font-family: var(--mono); font-size: .78rem; color: var(--ink);
+  display: inline-flex; align-items: baseline; gap: .4rem; cursor: pointer;
+}
+.src-attach__opt input { accent-color: var(--accent); margin: 0; }

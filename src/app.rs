@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::web::routes::{admin, artifacts, chat, compact, ideas, mcp, memory, settings};
+use crate::web::routes::{admin, artifacts, chat, compact, ideas, mcp, memory, settings, sources};
 
 /// Cloneable shared state injected into handlers (docs/01-architecture.md "Cross-cutting concerns").
 #[derive(Clone)]
@@ -46,6 +46,8 @@ pub fn build_router(state: AppState) -> Router {
         // Rename (title only — not a D9 transition; legal in every state, slug never changes).
         .route("/idea/{slug}/rename", post(ideas::rename_idea))
         .route("/idea/{slug}/tags", post(ideas::set_tags))
+        // Per-idea attached reference sources (ADR-0021; frontmatter `sources:` is truth).
+        .route("/idea/{slug}/sources", post(ideas::set_sources))
         .route("/idea/{slug}/store", post(memory::store_idea))
         .route("/idea/{slug}/reopen", post(memory::reopen_idea))
         .route("/idea/{slug}/skill/{name}", post(memory::run_skill))
@@ -94,6 +96,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/mcp/{name}/edit", get(mcp::edit_server_form))
         .route("/mcp/{name}/view", get(mcp::view_server_row))
         .route("/mcp/{name}/update", post(mcp::update_server))
+        // Named reference sources (owner-registered read-only lookups, `crate::sources`).
+        .route("/sources", get(sources::sources_page))
+        .route("/sources/add", post(sources::add_source))
+        .route("/sources/{name}/edit", get(sources::edit_source_form))
+        .route("/sources/{name}/view", get(sources::view_source_row))
+        .route("/sources/{name}/update", post(sources::update_source))
+        .route("/sources/{name}/delete", post(sources::delete_source))
         // Admin.
         .route("/admin/health", get(admin::health))
         .route("/admin/reindex", post(admin::reindex))

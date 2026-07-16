@@ -1,0 +1,23 @@
+{# One source's view-mode row. The status pill is probed fresh on every render (no cached probe
+   to go stale); the hint line appears only when the pill is not green. Delete warns about the
+   two blast radii: attached ideas degrade, and unmounting still needs the owner's re-up. #}
+<li id="src-row-{{ source.name }}" class="mcp__row">
+  <div class="mcp__row-line1">
+    <code class="mcp__name">{{ source.name }}</code>
+    <span class="src__status src__status--{{ source.status_kind }}">{{ source.status_text }}</span>
+  </div>
+  <div class="mcp__row-line2">
+    <span class="src__path" title="{{ source.path_full }}">{{ source.path_display }}</span>
+  </div>
+  {% if !source.status_hint.is_empty() %}
+  <p class="src__hint">{{ source.status_hint }}</p>
+  {% endif %}
+  <div class="mcp__row-actions">
+    <button type="button" class="chip" hx-get="/sources/{{ source.name }}/edit"
+            hx-target="#src-row-{{ source.name }}" hx-swap="outerHTML">edit</button>
+    <form hx-post="/sources/{{ source.name }}/delete" hx-target="#sources" hx-swap="outerHTML"
+          hx-confirm="Remove source '{{ source.name }}'? Ideas that attached it will show it as missing; the directory itself is untouched. Unmounting still needs your 'docker compose up -d'.">
+      <button type="submit" class="chip chip--danger" title="Remove this source" aria-label="Remove this source">delete</button>
+    </form>
+  </div>
+</li>
