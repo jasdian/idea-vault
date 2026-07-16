@@ -323,14 +323,16 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
   misdirected onto the underlay by a past ghosted run (this host had 1.8 GB of exactly that). If a
   `rmdir` fails with "Directory not empty", **stop and look** — you found data, not a ghost.
 - **Docker does not retry a failed mount, so there is no self-heal** — the container goes `exited`
-  with `RestartCount=0` and stays there even after the filesystem appears; `restart: unless-stopped`
-  covers container *exits*, not *start failures* ([ADR-0020](./adr/0020-boot-order-and-ghost-binds.md),
-  measured). On a host where `vault/` mounts later than `docker.service`, install
-  [`deploy/idea-vault-boot.nix`](../deploy/idea-vault-boot.nix) — a systemd unit with
-  `RequiresMountsFor=<vaultDir>` that force-recreates `idea-vault` once the filesystem lands. It
-  gates **only idea-vault**, never `docker.service`, so unrelated containers stay independent of the
-  volume. Check your exposure with `systemctl show docker.service home-john-dump.mount -p
-  ActiveEnterTimestamp`: if the mount timestamp is later, you are racing on every boot.
+  with `RestartCount=0` and stays there even after the filesystem appears; a `restart` policy covers
+  container *exits*, not *start failures* ([ADR-0020](./adr/0020-boot-order-and-ghost-binds.md),
+  measured). **The fix is not to win the race but to skip it: `restart: "no"` on every service**, so
+  the daemon never auto-starts a container into the pre-mount window. Bring each stack up by hand
+  from its folder once the volume is confirmed mounted (`findmnt <vaultDir>`). Check your exposure
+  with `systemctl show docker.service home-john-dump.mount -p ActiveEnterTimestamp`: if the mount
+  timestamp is later than docker's, an auto-starting container *would* race on every boot — which is
+  exactly why nothing here auto-starts. *(If you ever need boot-time auto-start on a host that must
+  come back unattended, ADR-0020's alternatives describe the one-service systemd unit that does it
+  safely — it was written and removed here because a dev host has no such requirement.)*
 - **Deleting `.idea-vault-root`** from the vault root makes an otherwise-empty vault look
   indistinguishable from a wrong path, so the app stops trusting it (`Suspect` — logged, and health
   reports it). Keep it; if you version your vault with git, **commit it** — a fresh clone of an

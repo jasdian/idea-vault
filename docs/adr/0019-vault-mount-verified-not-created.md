@@ -55,8 +55,9 @@ word of a vault that might not be ours.** Four independent guards, at four layer
    >   filesystem lands"*. It does not. The restart policy covers container **exits**, not start
    >   failures; a failed mount stays `exited` with `RestartCount=0` forever.
    >
-   > Boot ordering is owned by `deploy/idea-vault-boot.nix`. Guards 2–4 below are unaffected — they
-   > fired correctly on 2026-07-16 and preserved the index.
+   > The boot race is sidestepped by setting `restart: "no"` (ADR-0020): nothing auto-starts, so no
+   > ghost is ever bound during the pre-mount window. Guards 2–4 below are unaffected — they fired
+   > correctly on 2026-07-16 and preserved the index.
 2. **A vault-root marker** (`.idea-vault-root`). `ensure_vault_dir` returns a `VaultInit` telling the
    caller which of four cases it found. The load-bearing case is **`Suspect`** — directory exists,
    no marker, no ideas — where the marker is deliberately **not written**, because writing it would
@@ -117,11 +118,13 @@ does not restart on *unhealthy*, only on *exit* — which is exactly what makes 
   serving an empty vault, and refuses to destroy the index on its word.
 
   > **Amended by [ADR-0020](./0020-boot-order-and-ghost-binds.md).** This bullet originally claimed
-  > the container "self-heals on the next restart-policy retry once the filesystem lands" and that
-  > "no host-level change is required". Both are false: Docker never retries a failed mount, so
-  > there is no self-heal, and a *targeted* systemd unit (`deploy/idea-vault-boot.nix`) is required.
-  > Only the rejection of ordering **`docker.service` itself** survives — see the alternative below,
-  > which remains correct. Gating one service is not gating the daemon.
+  > the container "self-heals on the next restart-policy retry once the filesystem lands". That is
+  > false: Docker never retries a failed mount. On this dev host the boot race is instead sidestepped
+  > by `restart: "no"` — nothing auto-starts, so no ghost is bound before the mount lands, and
+  > bring-up is a deliberate manual `docker compose up` after the filesystem is confirmed. The
+  > "no host change required" conclusion happens to survive (the host never starts the container),
+  > but for a different reason than this bullet gave. Ordering **`docker.service` itself** remains
+  > rejected, as below.
 
 ## Alternatives considered
 

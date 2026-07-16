@@ -10,7 +10,7 @@ services:
         APP_GID: ${IDEA_VAULT_GID:-1000}
     image: idea-vault:latest
     container_name: idea-vault
-    restart: unless-stopped
+    restart: "no"
     # Run as the host user so the bind-mounted ./vault (owned by that user)
     # and the named index volume (chowned to this uid in the image) are both
     # writable. Defaults to 1000; override in .env if `id -u` differs.
@@ -51,11 +51,12 @@ services:
       #   - It only refuses to CREATE a source; it will happily BIND a stale ghost
       #     that a previous short-syntax run already left on the underlying
       #     filesystem. An empty dir answers "does the source exist?" with yes.
-      #   - A failed mount is NOT retried. `restart: unless-stopped` covers container
-      #     EXITS, not start failures: the container goes to `exited` with
-      #     RestartCount=0 and stays there even after the filesystem appears.
-      # Boot ordering is therefore owned by a systemd unit that waits for the mount
-      # (deploy/idea-vault-boot.nix), not by the restart policy.
+      #   - A failed mount is NOT retried. A `restart` policy covers container EXITS,
+      #     not start failures: the container goes to `exited` with RestartCount=0 and
+      #     stays there even after the filesystem appears.
+      # The boot race is sidestepped entirely by `restart: "no"` below (ADR-0020): the
+      # daemon never auto-starts this container, so nothing binds during the window
+      # before the late iSCSI mount lands. Bring it up by hand once the mount is up.
       - type: bind
         source: ./vault
         target: /vault
@@ -81,7 +82,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: idea-vault-ollama
-    restart: unless-stopped
+    restart: "no"
     ports:
       # Loopback-only so the host `ollama` CLI can pull/manage models. Intentionally
       # NOT tied to IDEA_VAULT_HOST_BIND_IP: Ollama has no auth, so it stays

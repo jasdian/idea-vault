@@ -1,4 +1,4 @@
-# ADR-0020 — Boot order belongs to systemd; `create_host_path:false` is not a boot-race guard
+# ADR-0020 — Skip the boot race (nothing auto-starts); `create_host_path:false` is not a boot-race guard
 
 - **Status:** Accepted
 - **Date:** 2026-07-16
@@ -73,41 +73,64 @@ only the first half.
 
 ## Decision
 
-**Boot ordering is a boot-ordering problem. It is owned by systemd, scoped to this one service.**
+**Don't win the boot race — refuse to enter it. Nothing auto-starts; the developer brings each
+stack up by hand, from its own folder, when they sit down to work.**
 
-1. **A targeted systemd unit** (`deploy/idea-vault-boot.nix`) with `RequiresMountsFor=<vaultDir>`,
-   `After=docker.service`, running `docker compose up -d --force-recreate idea-vault`.
-   - `RequiresMountsFor` is what actually waits for the filesystem.
-   - `--force-recreate` is load-bearing: by the time the unit runs, the daemon's restart policy has
-     already started the container, possibly on a ghost. A plain `up -d` sees unchanged config and
-     does nothing. Recreating is the only way to redo a mount.
-   - `ExecStartPre=test -f <vaultDir>/.idea-vault-root` applies ADR-0019's verify-don't-assume
-     principle to boot: `RequiresMountsFor` proves *something* is mounted, the marker proves it is
-     **ours**. A ghost is empty by construction and can never carry it.
-2. **Stale ghosts are deleted, not tolerated.** Removing them is what lets guard 1 finally fire as
-   ADR-0019 intended. The runbook is in [docs/12-deployment.md](../12-deployment.md); it uses a
-   *non-recursive* bind to reach the shadowed underlay and `rmdir` — never `rm -rf` — so it is
-   physically incapable of touching a non-empty directory.
-3. **`create_host_path: false` stays**, with its scope stated honestly: it stops the daemon
-   *inventing* a source. It is a correctness guard against short-syntax regressions, **not** a
-   boot-race guard. It was never sufficient alone.
+The race only exists because the daemon restarts containers at boot, *before* the late iSCSI mount
+lands. Remove the auto-start and the window in which a ghost can be bound never opens. This is a
+local development host, not a production server — there is no uptime requirement that a boot-time
+auto-start serves, so surrendering it costs nothing and removes an entire failure class.
+
+1. **`restart: "no"` on every service** in `idea-vault/docker-compose.yml` and the three fastxe
+   `docker-compose.local.yml` files (18 directives). The daemon never starts these containers on its
+   own — not at boot, not on crash. A dev container that dies stays dead and visible, rather than
+   silently retrying (which is how `routefusion` reached 52 restarts unnoticed).
+2. **Bring-up is explicit, from the folder, with the right file.** Each stack is started by a human
+   who has confirmed the vault filesystem is mounted:
+   ```bash
+   cd git-moje/idea-vault && docker compose up -d                      # .env pins yml:gpu:claude
+   cd fast-xe/api-mono     && docker compose -f docker-compose.local.yml -f docker-compose.override.yml up -d
+   cd fast-xe/backend-mono && docker compose -f docker-compose.local.yml up -d
+   cd fast-xe/ui-mono      && docker compose -f docker-compose.local.yml up -d
+   ```
+   No stack is stitched from a temp file that outlived its session (a `~/.claude/jobs/.../tmp/*.yml`
+   was baked into the live `fastxe-v2-local` project identity before this change).
+3. **Stale ghosts are still deleted, not tolerated.** `restart: "no"` prevents *new* ghost binds; it
+   does not remove the ones already on the underlay from past short-syntax runs. Those are cleared
+   with the [docs/12-deployment.md](../12-deployment.md) runbook — a *non-recursive* bind to reach
+   the shadowed underlay, then `rmdir` (never `rm -rf`; its refusal on non-empty dirs is the safety
+   property that keeps it away from the 1.8 GB of real cgc data misdirected onto the underlay).
+4. **`create_host_path: false` stays**, scope stated honestly: it stops the daemon *inventing* a
+   source. A correctness guard against short-syntax regressions — never, on its own, a boot-race
+   guard.
+
+A `deploy/idea-vault-boot.nix` unit was written first (systemd `RequiresMountsFor` + force-recreate)
+and then **removed**: it solves auto-start-onto-a-ghost, but manual bring-up means there is no
+auto-start to protect. See the alternatives below for why the simpler decision won.
 
 ## Consequences
 
-- **ADR-0019's central reversal is itself reversed, narrowly and on evidence.** ADR-0019 rejected all
-  host-level ordering because `RequiresMountsFor` on `docker.service` "gates the entire Docker daemon
-  on one network-backed volume" — that reasoning is still correct and that option is still rejected.
-  What was wrong was concluding *therefore no host change at all*, which only followed from the
-  false self-heal premise. A unit ordering **one service** has none of the blast radius of a unit
-  ordering **the daemon**. The fastxe stack, cloudbeaver and ollama remain unaffected by the NAS.
-- **The app-layer guards are now the second line, not the only line** — and they are why this
-  incident cost nothing. The unit prevents the ghost bind; the guards ensure that if it ever happens
-  anyway, the failure is loud and non-destructive. Keep both. Neither subsumes the other: the unit
-  protects the mount, the guards protect the data from *any* wrong path (typo'd
-  `IDEA_VAULT_VAULT_DIR`, wrong `--project-directory`), which no amount of boot ordering addresses.
-- **Recovery is `docker compose up -d --force-recreate idea-vault`.** Not `restart` — a restart
-  reuses the existing mount namespace and keeps the ghost. This is also why the unit force-recreates.
-- **A ghosted container is now diagnosable in one command**, and the device number is the tell:
+- **No host-level change is needed after all — but for a different reason than ADR-0019 gave.**
+  ADR-0019 claimed "no host change required" on the back of a false self-heal. The claim happens to
+  hold, because the *host* never starts these containers: they start only when a human runs
+  `docker compose up`, by which point they have confirmed the mount. Both the daemon-gating unit
+  (rejected in ADR-0019, correctly) and the one-service unit (this ADR's first draft) are
+  unnecessary once nothing auto-starts.
+- **The cost is explicit: containers do not come back after a reboot until you start them.** On a
+  development host this is acceptable and arguably desirable — you get a clean slate and start only
+  what you are working on. It would be the wrong call on a server; this decision is scoped to a
+  local dev host and should not be copied to one that must survive reboots unattended.
+- **Crash-restart is also surrendered**, deliberately. `restart: "no"` means a crashing dev
+  container stays down and visible instead of masking a broken build behind an infinite retry — the
+  `routefusion` 52-restart loop is the anti-pattern this removes.
+- **The app-layer guards remain the safety net, and they are why the incident cost nothing.** They
+  are independent of boot policy: they catch *any* wrong vault path — a typo'd `IDEA_VAULT_VAULT_DIR`,
+  a wrong `--project-directory`, a hand-run `up` before the mount landed — none of which auto-start
+  removal addresses. Keep them exactly as ADR-0019 shipped them.
+- **Recovery from a ghost is still `up -d --force-recreate <svc>`**, not `restart` — a restart reuses
+  the existing mount namespace and keeps the ghost. Relevant whenever a container was started by hand
+  before the mount was ready.
+- **A ghosted container is diagnosable in one command**, and the device number is the tell:
   ```
   pid=$(docker inspect <c> --format '{{.State.Pid}}')
   awk '$5=="/vault" {print $3, $4}' /proc/$pid/mountinfo    # want 254:0 + a volume-relative root
@@ -120,18 +143,26 @@ only the first half.
 
 ## Alternatives considered
 
-- **`RequiresMountsFor` on `docker.service`** — rejected again, unchanged from ADR-0019: it gates
-  every unrelated container on the NAS. This module exists precisely to get the ordering without that
-  blast radius.
-- **Marker-file tripwire instead of the unit** — bind `./vault/.idea-vault-root` as a second mount
-  with `create_host_path:false`. An empty ghost dir cannot contain that file, so the mount fails hard
-  during the race even with a stale ghost present, with no host change. Sound, and it closes the
-  guard-1 hole at its root. Rejected as the *primary* fix only because it inherits finding 2 — the
-  container fails and then stays down until someone runs `up -d`. Worth revisiting as
-  defence-in-depth if the ghosts are ever tolerated rather than deleted.
-- **Set `restart: no` and let systemd own the lifecycle entirely** — removes the need for
-  `--force-recreate`, since the daemon would never pre-start onto a ghost. Rejected: it also
-  surrenders crash-restart during normal operation, which is worth more than one recreate per boot.
+- **A targeted systemd unit** (`deploy/idea-vault-boot.nix`, written and then removed) —
+  `RequiresMountsFor=<vaultDir>`, `After=docker.service`, `up -d --force-recreate idea-vault`. It
+  keeps auto-start *and* orders it behind the mount, gating one service rather than the daemon (so
+  none of ADR-0019's daemon-gating blast radius). Genuinely correct, and the right answer **if
+  boot-time auto-start is a requirement**. Rejected here because on this dev host it is not: once
+  `restart: "no"` removes auto-start, the unit orders something that no longer happens. Preserved in
+  git history (and this bullet) so it can be resurrected verbatim if idea-vault ever moves to a host
+  that must come back unattended.
+- **`RequiresMountsFor` on `docker.service`** — rejected, unchanged from ADR-0019: it gates every
+  unrelated container on the NAS. Both the one-service unit above and this decision avoid that.
+- **Marker-file tripwire** — bind `./vault/.idea-vault-root` as a second mount with
+  `create_host_path:false`. An empty ghost dir cannot contain that file, so the mount fails hard even
+  with a stale ghost present. Sound defence-in-depth that closes the guard-1 hole at its root; it
+  became moot here because with no auto-start there is no unattended `up` to protect. Worth adding if
+  auto-start ever returns.
+- **`restart: on-failure`** — auto-restart on crash but (believed) not at boot. Rejected on two
+  counts: its boot behaviour was *not measured* (and this whole ADR exists because an unmeasured
+  restart-policy claim was wrong), and it reintroduces the silent crash-loop that hid
+  `routefusion`'s 52 restarts. `"no"` is the only value that guarantees the requirement without a
+  measurement leap.
 - **A watchdog container that re-ups stacks when the mount appears** — no host change, but needs the
   docker socket (root-equivalent) and reimplements systemd's dependency graph badly.
 
