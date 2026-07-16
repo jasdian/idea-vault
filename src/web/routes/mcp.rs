@@ -286,7 +286,7 @@ async fn probe(server: &McpServerConfig) -> Result<(Vec<crate::ai::mcp::McpTool>
     let mut session = client.connect().await?;
     let tools = session.list_tools().await?;
     let one = [(server.name.clone(), tools.clone())];
-    let def_bytes = crate::ai::backend::merged_tool_definitions(None, &one)
+    let def_bytes = crate::ai::backend::merged_tool_definitions(None, None, &one)
         .to_string()
         .len();
     Ok((tools, def_bytes))

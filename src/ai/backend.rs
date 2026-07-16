@@ -27,6 +27,7 @@ use crate::ai::ollama::{ChatMessage, ChatOptions, OllamaClient, TokenStream};
 use crate::ai::{AiError, AiHealth};
 use crate::config::LlmBackendKind;
 use crate::mcp::{McpRegistry, McpServerConfig};
+use crate::sources::ResolvedSource;
 
 /// Assumed Ollama context window (tokens) until `/api/show` answers — equal to the crate's
 /// pre-dynamic-budget fixed 16 KiB byte budget (`ContextBudget::for_model_tokens(8192)`), so a
@@ -126,6 +127,12 @@ pub struct LlmBackend {
     /// URL is a natural miss. Kills the per-turn initialize+tools/list handshake under swarm
     /// fan-out; a 60s-stale tool list is harmless (calls still hit the live server).
     mcp_tools_cache: McpToolsCache,
+    /// This turn's attached reference sources (ADR-0021) — always empty on the shared `AppState`
+    /// instance. The web job layer resolves an idea's frontmatter attach list through the
+    /// source registry and builds a per-job scoped clone via
+    /// [`with_turn_sources`](Self::with_turn_sources), so `ai` never reads app state (D4).
+    /// `Arc` keeps the clone cheap; the shared instance is immutable-by-construction.
+    turn_sources: Arc<Vec<ResolvedSource>>,
 }
 
 /// Per-server cached tool list: fetch instant (TTL anchor) + the tools, keyed `name@url`.
@@ -143,7 +150,19 @@ impl LlmBackend {
             ollama_ctx_cache: Arc::new(RwLock::new(HashMap::new())),
             mcp: None,
             mcp_tools_cache: Arc::new(RwLock::new(HashMap::new())),
+            turn_sources: Arc::new(Vec::new()),
         }
+    }
+
+    /// A per-turn scoped view of the backend: same settings/caches/registries (shared `Arc`s),
+    /// plus this idea's resolved reference sources (ADR-0021). Built once per background job by
+    /// the web layer; attaching/detaching a source in the UI is live on the very next turn
+    /// because nothing persists past the clone. Turns with no idea in scope (probe, compaction,
+    /// store-time extraction) run on the shared instance and stay source-free by construction.
+    pub fn with_turn_sources(&self, sources: Vec<ResolvedSource>) -> Self {
+        let mut scoped = self.clone();
+        scoped.turn_sources = Arc::new(sources);
+        scoped
     }
 
     /// Attach the MCP server registry (main.rs; shares the `AppState` `Arc` so registry edits are
@@ -254,6 +273,15 @@ impl LlmBackend {
                 cfg.allowed_tools.push(prefix);
             }
         }
+        // Per-idea reference sources (ADR-0021): each resolved root becomes an `--add-dir` so
+        // the CLI may read it. Only *resolved* sources reach here (the registry drops unmounted
+        // roots at resolve time), so `--add-dir` never points at a nonexistent path. The
+        // env-derived base `add_dirs` stay untouched underneath — the global fallback.
+        for src in self.turn_sources.iter() {
+            if !cfg.add_dirs.contains(&src.root) {
+                cfg.add_dirs.push(src.root.clone());
+            }
+        }
         let mut hints: Vec<String> = Vec::new();
         if !s.claude_effort.trim().is_empty() {
             hints.push(format!(
@@ -275,6 +303,21 @@ impl LlmBackend {
             );
         } else {
             cfg.disallowed_tools = vec!["WebSearch".to_string(), "WebFetch".to_string()];
+        }
+        // The Ollama path's equivalent is the `with_sources_note` prompt prefix — never both.
+        if !self.turn_sources.is_empty() {
+            let lines = self
+                .turn_sources
+                .iter()
+                .map(|s| format!("- {} -> {}", s.name, s.root.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            hints.push(format!(
+                "Attached reference sources for THIS idea (read-only reference material the \
+                 owner registered):\n{lines}\nGrep/Read those directories when it helps \
+                 interrogate the idea, and cite the source name and file path for anything you \
+                 use. Never modify them — they are reference, not workspace."
+            ));
         }
         if !hints.is_empty() {
             let hint = hints.join("\n\n");
@@ -361,6 +404,11 @@ impl LlmBackend {
         if s.backend == LlmBackendKind::Ollama && s.web_access {
             bytes += crate::ai::web::tool_definitions().to_string().len();
         }
+        if s.backend == LlmBackendKind::Ollama && !self.turn_sources.is_empty() {
+            bytes += crate::ai::sources::tool_definitions(&self.turn_sources)
+                .to_string()
+                .len();
+        }
         if let Some(mcp) = &self.mcp {
             bytes += mcp.enabled_tools_bytes();
         }
@@ -408,6 +456,34 @@ impl LlmBackend {
             .insert(model, probe);
     }
 
+    /// Prepend the deterministic sources note to the first user message on the Ollama path —
+    /// the model cannot call tools it does not know exist (ADR-0021). claude-code gets the
+    /// equivalent via the system-prompt hint in [`claude_config`](Self::claude_config), never
+    /// both. ~200 bytes, the same un-budgeted class as the chat `FOIL_INSTRUCTION`; callers
+    /// apply it BEFORE [`ollama_options`](Self::ollama_options) so the `num_ctx` floor covers
+    /// it. A no-op on unscoped turns.
+    fn with_sources_note(&self, mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+        if self.turn_sources.is_empty() {
+            return messages;
+        }
+        let names = self
+            .turn_sources
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let note = format!(
+            "Attached reference sources for this idea: {names}. They are the owner's read-only \
+             reference material — query them with the source_list, source_grep and source_read \
+             tools when prior notes/docs would sharpen the interrogation, and cite the source \
+             name and file path for anything you use."
+        );
+        if let Some(first) = messages.first_mut() {
+            first.content = format!("{note}\n\n{}", first.content);
+        }
+        messages
+    }
+
     /// Per-call Ollama options from the dispatch's own settings snapshot. `num_ctx` is ALWAYS
     /// sent — even the fallback 8192 beats Ollama's ~4k server default (which silently truncated
     /// our 16 KiB prompts) — and is floored at the window the already-assembled `messages` imply
@@ -438,9 +514,11 @@ impl LlmBackend {
                 // at the fallback budget; the next turn assembles at the real window. Accepted —
                 // one conservative turn, never an over-budget one.
                 self.refresh_ollama_ctx().await;
+                // Sources note BEFORE ollama_options, so the num_ctx floor counts it.
+                let messages = self.with_sources_note(messages);
                 let options = self.ollama_options(&s, &messages);
                 let mcp_servers = self.enabled_mcp_servers();
-                if s.web_access || !mcp_servers.is_empty() {
+                if s.web_access || !mcp_servers.is_empty() || !self.turn_sources.is_empty() {
                     self.ollama_chat_with_tools(options, messages, s.web_access, &mcp_servers)
                         .await
                 } else {
@@ -451,9 +529,11 @@ impl LlmBackend {
         }
     }
 
-    /// The Ollama tool loop (ADR-0017 web tools + MCP): offer `web_search`/`fetch_url` (when web
-    /// access is on) and every enabled MCP server's tools (mangled `mcp__<server>__<tool>`) on a
-    /// non-streaming `/api/chat`, execute whatever the model calls, feed results back as
+    /// The Ollama tool loop (ADR-0017 web tools + MCP + ADR-0021 reference sources): offer
+    /// `web_search`/`fetch_url` (when web access is on), the deterministic `source_*` leaves
+    /// (when this turn has attached sources) and every enabled MCP server's tools (mangled
+    /// `mcp__<server>__<tool>`) on a non-streaming `/api/chat`, execute whatever the model
+    /// calls, feed results back as
     /// `role: "tool"` messages, and repeat — bounded by [`MAX_TOOL_ROUNDS`] rounds and
     /// [`MAX_CALLS_PER_ROUND`] executions per round, then one forced tool-free call so the turn
     /// always ends in prose.
@@ -524,15 +604,17 @@ impl LlmBackend {
         if let Some(registry) = &self.mcp {
             for (name, tools) in &mcp_tools {
                 let one = [(name.clone(), tools.clone())];
-                let bytes = merged_tool_definitions(None, &one).to_string().len();
+                let bytes = merged_tool_definitions(None, None, &one).to_string().len();
                 registry.note_tools_bytes(name, bytes);
             }
         }
 
         let web_defs = web_access.then(crate::ai::web::tool_definitions);
-        let tools = merged_tool_definitions(web_defs.as_ref(), &mcp_tools);
+        let source_defs = (!self.turn_sources.is_empty())
+            .then(|| crate::ai::sources::tool_definitions(&self.turn_sources));
+        let tools = merged_tool_definitions(web_defs.as_ref(), source_defs.as_ref(), &mcp_tools);
         if tools.as_array().is_none_or(Vec::is_empty) {
-            // Web off and every MCP server degraded away: nothing to offer — plain call.
+            // Web off, no sources attached, every MCP server degraded away: nothing to offer.
             return self.ollama.chat_with(options, messages).await;
         }
 
@@ -584,8 +666,9 @@ impl LlmBackend {
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
                 tracing::info!(tool = name, args = %args, "tool call (ollama loop)");
-                // `mcp__<server>__<tool>` routes to that server's live session; everything else
-                // is a built-in web tool. Both failure paths are content, never turn failures.
+                // `mcp__<server>__<tool>` routes to that server's live session; `source_*` is a
+                // deterministic reference-source leaf (ADR-0021); everything else is a built-in
+                // web tool. Every failure path is content, never a turn failure.
                 let result = match split_mcp_tool_name(name) {
                     Some((server, tool)) => {
                         // Lazily open this server's session on its first call (cache-hit turns
@@ -613,6 +696,11 @@ impl LlmBackend {
                             // The model invented a server, or that server is unreachable.
                             None => format!("mcp server '{server}' is not available"),
                         }
+                    }
+                    // A hallucinated `source_*` call on an unscoped turn still answers as
+                    // content ("no reference sources are attached to this idea").
+                    None if name.starts_with("source_") => {
+                        crate::ai::sources::execute_tool(name, &args, &self.turn_sources).await
                     }
                     None => crate::ai::web::execute_tool(name, &args).await,
                 };
@@ -649,19 +737,26 @@ impl LlmBackend {
     }
 }
 
-/// Merge the web tool definitions (already Ollama-shaped, or `None` when web access is off) with
-/// every listed MCP server's tools, mangled `mcp__<server>__<tool>` so the executor can route a
-/// call back to its server. Pure — the per-turn connect/list I/O happens in the caller, so this
-/// merge (the part that must be exactly right for the model to call anything) is unit-testable
-/// without a network. A tool with no `inputSchema` gets an empty object schema: Ollama rejects a
-/// function definition whose `parameters` is `null`.
+/// Merge the web tool definitions (already Ollama-shaped, or `None` when web access is off) and
+/// the reference-source tool definitions (`None` on an unscoped turn, ADR-0021) with every
+/// listed MCP server's tools, mangled `mcp__<server>__<tool>` so the executor can route a call
+/// back to its server. Merge order: web, sources, MCP. Pure — the per-turn connect/list I/O
+/// happens in the caller, so this merge (the part that must be exactly right for the model to
+/// call anything) is unit-testable without a network. A tool with no `inputSchema` gets an empty
+/// object schema: Ollama rejects a function definition whose `parameters` is `null`.
 pub(crate) fn merged_tool_definitions(
     web_defs: Option<&serde_json::Value>,
+    source_defs: Option<&serde_json::Value>,
     mcp_tools: &[(String, Vec<McpTool>)],
 ) -> serde_json::Value {
     let mut defs: Vec<serde_json::Value> = web_defs
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
+    defs.extend(
+        source_defs
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default(),
+    );
     for (server, tools) in mcp_tools {
         for tool in tools {
             let parameters = if tool.input_schema.is_null() {
@@ -879,7 +974,7 @@ mod tests {
             .collect();
 
         let web_defs = crate::ai::web::tool_definitions();
-        let merged = merged_tool_definitions(Some(&web_defs), &listed);
+        let merged = merged_tool_definitions(Some(&web_defs), None, &listed);
         let names: Vec<&str> = merged
             .as_array()
             .unwrap()
@@ -908,10 +1003,130 @@ mod tests {
         );
 
         // With web access off, only the MCP tools remain.
-        let mcp_only = merged_tool_definitions(None, &listed);
+        let mcp_only = merged_tool_definitions(None, None, &listed);
         assert_eq!(mcp_only.as_array().unwrap().len(), 2);
-        // With neither, the merge is empty (the loop then degrades to a plain call).
-        assert_eq!(merged_tool_definitions(None, &[]), serde_json::json!([]));
+        // With none of the three, the merge is empty (the loop degrades to a plain call).
+        assert_eq!(
+            merged_tool_definitions(None, None, &[]),
+            serde_json::json!([])
+        );
+    }
+
+    fn turn_sources_fixture() -> Vec<ResolvedSource> {
+        vec![ResolvedSource {
+            name: "rf-docs".to_string(),
+            root: std::path::PathBuf::from("/mnt/sources/rf-docs"),
+        }]
+    }
+
+    #[test]
+    fn merge_order_is_web_then_sources_then_mcp() {
+        let web_defs = crate::ai::web::tool_definitions();
+        let source_defs = crate::ai::sources::tool_definitions(&turn_sources_fixture());
+        let listed = vec![(
+            "tracker".to_string(),
+            vec![McpTool {
+                name: "list_issues".to_string(),
+                description: String::new(),
+                input_schema: serde_json::Value::Null,
+            }],
+        )];
+        let merged = merged_tool_definitions(Some(&web_defs), Some(&source_defs), &listed);
+        let names: Vec<&str> = merged
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d.pointer("/function/name").unwrap().as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "web_search",
+                "fetch_url",
+                "source_list",
+                "source_grep",
+                "source_read",
+                "mcp__tracker__list_issues",
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_clone_carries_sources_and_leaves_the_shared_instance_untouched() {
+        let shared = test_backend();
+        assert!(shared.turn_sources.is_empty());
+
+        let scoped = shared.with_turn_sources(turn_sources_fixture());
+        assert_eq!(scoped.turn_sources.len(), 1);
+        assert_eq!(scoped.turn_sources[0].name, "rf-docs");
+        // The shared instance stays source-free — every unscoped turn is unchanged.
+        assert!(shared.turn_sources.is_empty());
+
+        // The settings lock is genuinely shared: a Settings edit through the scoped clone is
+        // live on the shared instance too (the existing live-tuning contract survives scoping).
+        let mut s = scoped.settings();
+        s.temperature = 1.3;
+        scoped.set_settings(s);
+        assert_eq!(shared.settings().temperature, 1.3);
+    }
+
+    #[test]
+    fn claude_config_gains_add_dirs_and_hint_only_when_scoped() {
+        let b = test_backend();
+        let mut s = b.settings();
+        s.backend = LlmBackendKind::ClaudeCode;
+        b.set_settings(s);
+
+        // Unscoped: no source dirs, no sources hint.
+        let cfg = b.claude_config();
+        assert!(cfg.add_dirs.is_empty());
+        assert!(!cfg.system_prompt.unwrap_or_default().contains("rf-docs"));
+
+        // Scoped: the resolved root rides --add-dir and the hint names the source. Duplicate
+        // roots are not pushed twice.
+        let scoped = b.with_turn_sources(turn_sources_fixture());
+        let cfg = scoped.claude_config();
+        assert_eq!(
+            cfg.add_dirs,
+            [std::path::PathBuf::from("/mnt/sources/rf-docs")]
+        );
+        let prompt = cfg.system_prompt.expect("sources hint rendered");
+        assert!(prompt.contains("rf-docs -> /mnt/sources/rf-docs"));
+        assert!(prompt.contains("Never modify them"));
+    }
+
+    #[test]
+    fn sources_note_prepends_only_on_scoped_turns() {
+        let messages = || {
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: "the prompt".to_string(),
+            }]
+        };
+        let b = test_backend();
+        assert_eq!(
+            b.with_sources_note(messages())[0].content,
+            "the prompt",
+            "unscoped turns are byte-identical to today"
+        );
+
+        let scoped = b.with_turn_sources(turn_sources_fixture());
+        let noted = scoped.with_sources_note(messages());
+        assert!(noted[0]
+            .content
+            .starts_with("Attached reference sources for this idea: rf-docs."));
+        assert!(noted[0].content.ends_with("the prompt"));
+    }
+
+    #[test]
+    fn tool_context_bytes_counts_source_schemas_on_scoped_ollama_turns() {
+        let b = test_backend();
+        let unscoped = b.tool_context_bytes();
+        let scoped = b.with_turn_sources(turn_sources_fixture());
+        let expected = crate::ai::sources::tool_definitions(&scoped.turn_sources)
+            .to_string()
+            .len();
+        assert_eq!(scoped.tool_context_bytes(), unscoped + expected);
     }
 
     #[test]
