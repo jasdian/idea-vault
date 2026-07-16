@@ -356,6 +356,7 @@ mod tests {
                 slug: slug.into(),
                 state,
                 tags: tags.iter().map(|t| t.to_string()).collect(),
+                sources: vec![],
                 created: dt(10),
                 updated: dt(11),
             },

@@ -21,6 +21,11 @@ pub struct IdeaFrontmatter {
     pub state: IdeaState,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The idea's attached reference-source names — keys into the named-source registry.
+    /// Frontmatter is the canonical home for this list (SQLite must stay rebuildable from disk).
+    /// Empty is skipped on emit so an idea with no sources serializes byte-identically to before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
 }
@@ -247,6 +252,7 @@ Body text here.\n";
             slug: "t".into(),
             state: IdeaState::Draft,
             tags: vec![],
+            sources: vec![],
             created: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             updated: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         };
@@ -387,5 +393,42 @@ updated: 2026-01-01T00:00:00Z\n\
 body\n";
         let (fm, _) = parse_idea(input).unwrap();
         assert_eq!(fm.tags, Vec::<String>::new());
+    }
+
+    #[test]
+    fn idea_sources_default_to_empty_and_emit_omits_the_key() {
+        // Pre-sources ideas (like the doc example) must parse with an empty list and
+        // re-serialize byte-identically — no `sources:` key materializing on rewrite.
+        let (fm, body) = parse_idea(DOC_EXAMPLE).unwrap();
+        assert_eq!(fm.sources, Vec::<String>::new());
+        let emitted = emit_idea(&fm, &body).unwrap();
+        assert!(
+            !emitted.contains("sources"),
+            "empty sources must not serialize a key:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn idea_sources_roundtrip_preserves_names_and_order() {
+        let input = "---\n\
+title: X\n\
+slug: x\n\
+state: in_discussion\n\
+tags: [markets]\n\
+sources: [rf-docs, td-notes]\n\
+created: 2026-01-01T00:00:00Z\n\
+updated: 2026-01-01T00:00:00Z\n\
+---\n\
+body\n";
+        let (fm, body) = parse_idea(input).unwrap();
+        assert_eq!(
+            fm.sources,
+            vec!["rf-docs".to_string(), "td-notes".to_string()]
+        );
+        let emitted = emit_idea(&fm, &body).unwrap();
+        let (fm2, body2) = parse_idea(&emitted).unwrap();
+        assert_eq!(fm, fm2);
+        assert_eq!(body, body2);
+        assert_eq!(fm2.sources, vec!["rf-docs", "td-notes"]);
     }
 }

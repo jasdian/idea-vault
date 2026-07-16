@@ -129,6 +129,7 @@ fn import_one(
             slug: slug.clone(),
             state: IdeaState::Draft,
             tags,
+            sources: Vec::new(),
             created,
             updated: modified,
         },

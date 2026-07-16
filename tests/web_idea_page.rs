@@ -19,6 +19,7 @@ fn seed(vault: &std::path::Path, state: IdeaState, body: &str) {
                 slug: "sharp-idea".into(),
                 state,
                 tags: vec![],
+                sources: vec![],
                 created: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
                 updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
             },

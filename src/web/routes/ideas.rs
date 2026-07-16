@@ -476,6 +476,7 @@ pub async fn fork_idea(
             // It carries a conversation forward, so it opens mid-discussion, not as a blank draft.
             state: IdeaState::InDiscussion,
             tags: src.frontmatter.tags.clone(),
+            sources: Vec::new(),
             created: now,
             updated: now,
         },
@@ -858,6 +859,7 @@ pub async fn create_idea(
             slug: String::new(),
             state: IdeaState::Draft,
             tags: Vec::new(),
+            sources: Vec::new(),
             created: now,
             updated: now,
         },

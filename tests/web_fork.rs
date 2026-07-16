@@ -18,6 +18,7 @@ fn seed(vault: &std::path::Path) {
                 slug: "forky".into(),
                 state: IdeaState::InDiscussion,
                 tags: vec!["risk".into()],
+                sources: vec![],
                 created: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
                 updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
             },
