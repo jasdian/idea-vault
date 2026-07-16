@@ -40,7 +40,10 @@ pub fn slugify(title: &str) -> String {
 /// True if `slug` has the canonical shape `slugify` produces: non-empty, only `[a-z0-9-]`.
 /// This is the filesystem-boundary check — a slug is used verbatim as a vault path component,
 /// so anything outside this charset (separators, `..`, unicode) must be rejected before any
-/// path join (docs/03-data-model.md D22: slug == folder name).
+/// path join (docs/03-data-model.md D22: slug == folder name). The same predicate is also the
+/// crate's registry-name validator (`mcp` server names, `sources` source names — both call it),
+/// because those names are spliced into model-facing tool names and container mount targets
+/// with exactly the same "safe as a single path/name component" contract.
 pub fn is_valid(slug: &str) -> bool {
     !slug.is_empty()
         && slug
@@ -125,6 +128,10 @@ mod tests {
         assert!(!is_valid("a\\b"));
         assert!(!is_valid("Idea"));
         assert!(!is_valid("café"));
+        // Registry-name duty (mcp/sources): underscores and spaces stay out of the alphabet —
+        // an `_` would collide with the `__` separators in model-facing tool names.
+        assert!(!is_valid("a_b"));
+        assert!(!is_valid("a b"));
     }
 
     #[test]

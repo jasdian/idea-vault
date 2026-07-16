@@ -70,13 +70,10 @@ pub struct ToolSummary {
 
 /// Validate a server name: non-empty `[a-z0-9-]`. Kept strict because the name is spliced into
 /// model-facing tool names — an `_` would collide with the `__` separators, spaces/uppercase
-/// would break the claude CLI's `mcp__<name>` allow-prefix convention.
-pub fn is_valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
+/// would break the claude CLI's `mcp__<name>` allow-prefix convention. The predicate itself is
+/// [`crate::domain::slug::is_valid`] — the crate-wide registry-name/slug alphabet, shared with
+/// `sources` — re-exported here so this module's public surface is unchanged by the lift.
+pub use crate::domain::slug::is_valid as is_valid_name;
 
 /// The registry: an in-memory server list mirrored to `path` after every mutation. `Arc`'d into
 /// `AppState` and (optionally) into `ai::LlmBackend`, so a Settings-page edit is visible to the
