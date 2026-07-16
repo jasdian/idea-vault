@@ -43,9 +43,19 @@ services:
       # mounts later than docker.service (network/iSCSI/LVM), a boot race binds an
       # empty root-owned "ghost" dir that the real mount then hides. The app sees an
       # empty vault, reindexes to zero, and looks healthy while serving nothing.
-      # This form records a Mounts entry instead: a missing source is a hard start
-      # failure (loud), and `restart: unless-stopped` retries until the real mount
-      # lands. Never revert to the short form.
+      # This form records a Mounts entry instead, so the daemon never INVENTS a
+      # source. Never revert to the short form.
+      #
+      # But this guard is NOT sufficient on its own, and two things it was once
+      # claimed to do, it does not do (ADR-0020, measured 2026-07-16):
+      #   - It only refuses to CREATE a source; it will happily BIND a stale ghost
+      #     that a previous short-syntax run already left on the underlying
+      #     filesystem. An empty dir answers "does the source exist?" with yes.
+      #   - A failed mount is NOT retried. `restart: unless-stopped` covers container
+      #     EXITS, not start failures: the container goes to `exited` with
+      #     RestartCount=0 and stays there even after the filesystem appears.
+      # Boot ordering is therefore owned by a systemd unit that waits for the mount
+      # (deploy/idea-vault-boot.nix), not by the restart policy.
       - type: bind
         source: ./vault
         target: /vault

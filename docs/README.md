@@ -64,7 +64,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D30) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0019 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0020 | — |
 
 ## Locked decisions (at a glance)
 

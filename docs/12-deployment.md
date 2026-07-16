@@ -296,14 +296,41 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
   `reindex complete ideas=0 facts=0 links=0`, writes fail with
   `vault error: io error: Permission denied (os error 13)`, and the healthcheck stays **green**.
   Confirm with `docker exec <c> stat /vault` vs `stat vault` on the host — a **different device or
-  inode** is the ghost. This is why the base file binds `vault/` with long syntax +
-  `create_host_path: false` ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)): a missing
-  source becomes a loud start failure that `restart: unless-stopped` retries until the real mount
-  lands. **Recovery:** `docker compose stop idea-vault`, then reveal the shadowed underlay with a
-  *non-recursive* bind (`sudo mount --bind /home /mnt/x`, which does not carry submounts), `rmdir`
-  the empty ghost chain (`rmdir` refuses a non-empty dir — never `rm -rf` here), `umount`, then
-  `docker compose up -d --force-recreate idea-vault`. The index rebuilds itself from markdown.
+  inode** is the ghost. Compare against `stat -c %D` on the real path — do **not** hardcode a device
+  number in a sweep script; it changes across reboots (`8:34` on 2026-07-15 was `8:2` on 2026-07-16).
+  This is why the base file binds `vault/` with long syntax + `create_host_path: false`
+  ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)) — but **that guard alone does not stop
+  this**, see the next two bullets. **Recovery:** `docker compose up -d --force-recreate idea-vault`
+  once the filesystem is up (`restart` is *not* enough — it reuses the existing mount namespace and
+  keeps the ghost). The index rebuilds itself from markdown.
   *(Silent, survives reboots, and looks like data loss when it is not.)*
+- **`create_host_path: false` refuses to *create* a ghost — it will happily *bind* an existing one**
+  ([ADR-0020](./adr/0020-boot-order-and-ghost-binds.md)). An empty ghost directory answers "does the
+  source exist?" with **yes**, so once one exists on the underlay it defeats the guard on **every
+  subsequent boot**, permanently, until deleted. A leftover ghost is not harmless debris; it is the
+  trap re-arming itself. **Removing them is what makes the guard work.** Reveal the shadowed underlay
+  with a *non-recursive* bind — an ordinary `mount --bind` would carry the real filesystem along and
+  show you the wrong thing:
+  ```bash
+  sudo mount --bind /home /mnt/underlay          # non-recursive: does NOT carry submounts
+  find /mnt/underlay/john/dump -maxdepth 7       # inspect first — expect empty dirs only
+  rmdir /mnt/underlay/john/dump/git-repos/git-moje/idea-vault/vault
+  rmdir -p --ignore-fail-on-non-empty /mnt/underlay/john/dump/git-repos/git-moje/idea-vault
+  sudo umount /mnt/underlay
+  ```
+  **`rmdir`, never `rm -rf`.** `rmdir` refuses a non-empty directory, and that refusal *is* the
+  safety property: it makes the procedure physically incapable of destroying real data that was
+  misdirected onto the underlay by a past ghosted run (this host had 1.8 GB of exactly that). If a
+  `rmdir` fails with "Directory not empty", **stop and look** — you found data, not a ghost.
+- **Docker does not retry a failed mount, so there is no self-heal** — the container goes `exited`
+  with `RestartCount=0` and stays there even after the filesystem appears; `restart: unless-stopped`
+  covers container *exits*, not *start failures* ([ADR-0020](./adr/0020-boot-order-and-ghost-binds.md),
+  measured). On a host where `vault/` mounts later than `docker.service`, install
+  [`deploy/idea-vault-boot.nix`](../deploy/idea-vault-boot.nix) — a systemd unit with
+  `RequiresMountsFor=<vaultDir>` that force-recreates `idea-vault` once the filesystem lands. It
+  gates **only idea-vault**, never `docker.service`, so unrelated containers stay independent of the
+  volume. Check your exposure with `systemctl show docker.service home-john-dump.mount -p
+  ActiveEnterTimestamp`: if the mount timestamp is later, you are racing on every boot.
 - **Deleting `.idea-vault-root`** from the vault root makes an otherwise-empty vault look
   indistinguishable from a wrong path, so the app stops trusting it (`Suspect` — logged, and health
   reports it). Keep it; if you version your vault with git, **commit it** — a fresh clone of an

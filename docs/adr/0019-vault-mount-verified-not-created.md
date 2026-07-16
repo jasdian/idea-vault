@@ -1,6 +1,7 @@
 # ADR-0019 — The vault mount is verified, not created; reindex refuses an empty-vault wipe
 
-- **Status:** Accepted
+- **Status:** Accepted — guards 2–4 validated in production 2026-07-16; **guard 1 and the self-heal
+  claim amended by [ADR-0020](./0020-boot-order-and-ghost-binds.md)**
 - **Date:** 2026-07-15
 - **Deciders:** owner
 
@@ -42,8 +43,20 @@ word of a vault that might not be ours.** Four independent guards, at four layer
 1. **Compose declares the bind, and the daemon must not invent it.** `docker-compose.yml` uses the
    long syntax with `create_host_path: false`, recording a `Mounts` entry rather than a legacy
    `Binds` entry. A missing source is a hard start failure — which persists to daemon-initiated
-   restarts at boot, not just `compose up`. `restart: unless-stopped` then retries until the real
-   filesystem lands.
+   restarts at boot, not just `compose up`.
+
+   > **Amended by [ADR-0020](./0020-boot-order-and-ghost-binds.md) (measured 2026-07-16).** This
+   > guard is real but narrower than described here, and two claims made in this ADR are false:
+   > - It refuses to **create** a missing source; it will **bind** a stale ghost left by an older
+   >   short-syntax run, because an empty directory answers "does the source exist?" with yes. On
+   >   2026-07-16 this exact bind ghosted with the guard in place. It is a regression guard against
+   >   the short syntax, **not** a boot-race guard.
+   > - The original text continued *"`restart: unless-stopped` then retries until the real
+   >   filesystem lands"*. It does not. The restart policy covers container **exits**, not start
+   >   failures; a failed mount stays `exited` with `RestartCount=0` forever.
+   >
+   > Boot ordering is owned by `deploy/idea-vault-boot.nix`. Guards 2–4 below are unaffected — they
+   > fired correctly on 2026-07-16 and preserved the index.
 2. **A vault-root marker** (`.idea-vault-root`). `ensure_vault_dir` returns a `VaultInit` telling the
    caller which of four cases it found. The load-bearing case is **`Suspect`** — directory exists,
    no marker, no ideas — where the marker is deliberately **not written**, because writing it would
@@ -100,17 +113,26 @@ does not restart on *unhealthy*, only on *exit* — which is exactly what makes 
   idea folders vanished" is *indistinguishable* from a mount fault — that indistinguishability is
   the entire premise. The 409 body names `?force=1` explicitly, because that string is the only
   escape route the owner will find.
-- **Hosts with a late-mounting vault are now loud.** The container fails to start rather than
-  starting wrong, and self-heals on the next restart-policy retry once the filesystem lands. No
-  host-level change (e.g. ordering `docker.service` behind the mount) is required — deliberately, as
-  that would gate every unrelated container on the vault's filesystem being up.
+- **Hosts with a late-mounting vault are now loud.** The container reports the fault instead of
+  serving an empty vault, and refuses to destroy the index on its word.
+
+  > **Amended by [ADR-0020](./0020-boot-order-and-ghost-binds.md).** This bullet originally claimed
+  > the container "self-heals on the next restart-policy retry once the filesystem lands" and that
+  > "no host-level change is required". Both are false: Docker never retries a failed mount, so
+  > there is no self-heal, and a *targeted* systemd unit (`deploy/idea-vault-boot.nix`) is required.
+  > Only the rejection of ordering **`docker.service` itself** survives — see the alternative below,
+  > which remains correct. Gating one service is not gating the daemon.
 
 ## Alternatives considered
 
 - **Order `docker.service` after the vault's mount unit** (`RequiresMountsFor=`). Deterministic and
   fixes the true root cause, but gates the **entire Docker daemon** on one network-backed volume: if
   the NAS is slow or down, no containers start at all. Rejected — the blast radius dwarfs the
-  problem. The loud-fail + restart retry achieves the same end scoped to this one service.
+  problem. *(Still rejected, and for this reason. The original sentence that followed — "the
+  loud-fail + restart retry achieves the same end scoped to this one service" — was false; there is
+  no retry. [ADR-0020](./0020-boot-order-and-ghost-binds.md) gets the ordering by putting
+  `RequiresMountsFor` on a unit for **`idea-vault` alone**, which is what this bullet's reasoning
+  actually argues for.)*
 - **Hard-exit on a suspect vault.** Rejected: crash-loop under `restart: unless-stopped`, and it
   kills the diagnostic surface precisely when it is needed. Guard 3 already refuses the destructive
   act, which is the part that actually needed refusing.
