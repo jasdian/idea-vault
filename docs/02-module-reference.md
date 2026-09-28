@@ -16,6 +16,7 @@ flowchart TB
         MAIN["main.rs — bootstrap (D25)"]
         APP["app.rs — router, AppState, middleware"]
         CFG["config.rs — paths, Ollama URL, limits (IDEA_VAULT_* env, D26)"]
+        IMPORT["import.rs — import_dir: Obsidian/flat-markdown notes → Draft ideas + reindex\n(idea-vault import DIR, ADR-0009)"]
 
         subgraph domain["domain/ (pure, no IO)"]
             D_IDEA["idea.rs — Idea, IdeaState"]
@@ -24,6 +25,8 @@ flowchart TB
             D_FM["frontmatter.rs — parse/emit YAML (incl. parse_skill)"]
             D_SLUG["slug.rs — slug + collisions (D22)"]
             D_SKILL["skill.rs — SkillStage/SkillRole/OutputContract vocabulary (docs/adr/0022)"]
+            D_LINKS["links.rs — extract_links: pure [[slug]] extraction (D23)"]
+            D_COMP["compacted.rs — Compacted: the compacted.md sidecar type (docs/adr/0012)"]
         end
 
         subgraph vault["vault/ (disk = truth)"]
@@ -46,14 +49,17 @@ flowchart TB
             A_WEB["web.rs — keyless web_search/fetch_url + tool defs (ADR-0017)"]
             A_MCP["mcp.rs — MCP Streamable-HTTP wire client (init/session/tools-list/tools-call, ADR-0018)"]
             A_CONTRACT["contract.rs — pure output-contract validate/repair/items/trim_sections (ADR-0023)"]
+            A_SRC["sources.rs — deterministic source_list/source_grep/source_read tool leaves (ADR-0021)"]
         end
 
         MCP["mcp.rs — owner-global MCP server registry: McpServerConfig, McpRegistry\npersisted .mcp-servers.json (ADR-0018)"]
+        SRC["sources.rs — named reference-source registry: SourceRegistry, persisted .sources.json\n+ generated .docker-compose.sources.yml (ADR-0021)"]
 
         subgraph memory["memory/ (feature)"]
             M_EXTRACT["extract.rs — conv → facts on Store (D12)"]
             M_LOAD["load.rs — facts → context on Reopen (D13)"]
             M_BACK["backlinks.rs — [[slug]] resolve (D23)"]
+            M_COMPACT["compact.rs — auto-compact: fold the conversation head into compacted.md,\neffective_window for the load path (docs/adr/0012)"]
         end
 
         subgraph concepts["concepts/ (harness primitives)"]
@@ -96,6 +102,7 @@ flowchart TD
     vault["vault"]
     domain["domain"]
     mcp["mcp"]
+    sources["sources"]
 
     web --> concepts
     web --> memory
@@ -104,6 +111,7 @@ flowchart TD
     web --> vault
     web --> domain
     web --> mcp
+    web --> sources
 
     concepts --> ai
     concepts --> vault
@@ -119,6 +127,7 @@ flowchart TD
 
     ai --> domain
     ai --> mcp
+    ai --> sources
     vault --> domain
 
     classDef top fill:#1f6feb22,stroke:#1f6feb;
@@ -126,6 +135,7 @@ flowchart TD
     class web top;
     class domain base;
     class mcp base;
+    class sources base;
 ```
 
 ### Dependency rules (normative)
@@ -135,7 +145,7 @@ flowchart TD
 | `domain` | (std/serde only) | anything internal |
 | `mcp` | (std/serde only) | anything internal, **especially `ai`** |
 | `vault` | `domain` | `index`, `ai`, `memory`, `concepts`, `web`, `mcp` |
-| `ai` | `domain`, `mcp` | `vault`, `index`, `memory`, `concepts`, `web` |
+| `ai` | `domain`, `mcp`, `sources` | `vault`, `index`, `memory`, `concepts`, `web` |
 | `index` | `vault`, `domain` | `ai`, `memory`, `concepts`, `web`, `mcp` |
 | `memory` | `vault`, `ai`, `index`, `domain` | `concepts`, `web`, `mcp` |
 | `concepts` | `ai`, `vault`, `domain` (read `index` via `memory` where needed) | `web`, `mcp` |
@@ -150,7 +160,12 @@ flowchart TD
 > both, one-way, so combining "which servers are enabled" with "how to call one" never creates a
 > cycle ([ADR-0018](./adr/0018-mcp-servers.md)). `web` also depends on `mcp` directly (not only
 > through `ai`) because `web::routes::mcp` reads/writes the registry itself for the `/mcp`
-> management page.
+> management page. **`sources` mirrors `mcp`** ([ADR-0021](./adr/0021-reference-sources.md)):
+> `crate::sources` holds the owner's named reference sources (`sources::SourceRegistry`) and never
+> imports `ai`. `ai::sources` (the `source_*` tool leaves) and `ai::backend` depend on it only for
+> the resolved-root type `sources::ResolvedSource`. `web` depends on it directly because
+> `web::routes::sources` serves the `/sources` page and `web::routes::scoped_llm` resolves an idea's
+> attached sources for each turn.
 
 ## Module responsibilities
 

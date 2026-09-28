@@ -1,35 +1,25 @@
-# Intent — skill system: skills as markdown, verification layer, spine
+# Intent — doc-sync campaign: bring docs/ back in line with the code at 7b755a7
 
 A living per-gated-change file (td-bot convention): rewritten before each gated change to state,
 in the owner's words, what the change must do. `scripts/gate.sh` step 1 requires it to exist and
 be non-empty; the rest of the gate proves the tree still honors the ADRs.
 
-This change ports the mechanisms of the owner's agent-harness skill system (`the-unknown` /
-`backend-mono`: SKILLBOOK, work-hard, verified-reporting, reflect, librarian, plan-lens) into the
-product's own ideation skills ([ADR-0022](adr/0022-skills-as-markdown-and-the-skill-book.md),
-[ADR-0023](adr/0023-verification-layer.md)).
+This campaign works the twelve leaves the 2026-09-28 `/doc-sync full` run found for
+908a8ad..7b755a7. The docs are the spec, so a leaf changes a doc only where the code already
+shipped the behaviour and the change breaks no confirmed decision. Everything else is either
+routed as a code fix or raised to me.
 
 ## Acceptance criteria
 
-- Every ideation skill is a markdown file with frontmatter (name, description, stage, role,
-  output contract, use_when, avoid_when, hidden) and a prompt body. The built-ins ship compiled
-  into the binary; I can add or override a skill by dropping `<name>.md` into `vault/.skills/`
-  and pressing reload on the `/skills` skill book — no restart. A broken file is listed on the
-  skill book and never stops boot or takes a built-in move away.
-- The skill book shows every move grouped by spine stage (steelman → attack → consequence →
-  converge → capstone) with when to use it and when not to; move chips carry the same guidance.
-- The five placeholder prompts are real prompts, and `steelman` and `market-size` exist.
-- A skill's answer is checked against its output contract; a wrong-shaped answer to a single
-  interactive move gets exactly one retry, and a build prompt persists only its fenced block.
-- Swarms and workflows audit their findings by default: one Auditor call labels each finding
-  CONFIRMED / UNCERTAIN / REFUTED against the discussion; refuted findings stay visible under
-  "Disproven objections"; a near-uniform pass is flagged; a failed audit degrades to "unverified".
-  I can switch the audit off on the Settings page.
-- Storing an idea distils facts from the consolidated statement, shows the model the facts already
-  in memory (ADD / UPDATE-by-appending / NOOP), and only remembers a fact whose supporting quote
-  really occurs in the discussion — the rest go to a quarantined-facts artifact I can read, and
-  the stored view tells me so.
-- The idea page shows which spine stages the discussion has covered, suggests the next move, and
-  warns (never blocks) on wrong turns such as a build prompt before any attack.
-- Workflows are staged: `interrogate`, `steelman-then-attack`, `ready-to-build`.
-- The whole change ships through this gate: `bash scripts/gate.sh` green.
+- Every route the app serves is in D17, every template is in the 09-web-ui template tree, every
+  source file is placed in the D5 layout, and every ADR is linked from docs/README.md. The
+  doc-sync mechanical check reports no drift in those categories.
+- 03-data-model, 05-ai-integration, 06-concepts/swarm and 06-concepts/memory say what the code
+  does now: the `sources` frontmatter field, the empty-vault reindex veto, the vault-root
+  dotfiles, the chat queue, the merged tool loop and per-turn source scoping, the angle cap, and
+  compacted-summary reopen. Each new sentence cites the code by `module::symbol`.
+- The swarm angle picker never offers a selection the server will reject.
+- `.env.example` shows how to turn on the inbound MCP server token, and no code comment still cites
+  the old `restart: unless-stopped` policy.
+- No ADR is rewritten. Anything that contradicts an Accepted ADR comes to me as a question.
+- Every commit ships through this gate: `bash scripts/gate.sh` green.
