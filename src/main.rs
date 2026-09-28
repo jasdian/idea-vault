@@ -51,10 +51,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // 2. Vault dir (source of truth). Boot does not fail on a suspect vault — a hard exit under
-    // `restart: unless-stopped` is a crash loop, and the whole point is to stay up and SAY so:
-    // the reindex guard keeps the existing index intact and /admin/health reports the vault as
-    // unusable, which turns the container red (ADR-0019).
+    // 2. Vault dir (source of truth). Boot does not fail on a suspect vault: under compose's
+    // `restart: "no"` (ADR-0020) a hard exit is a container that just stays dead with the reason
+    // buried in its logs, and the whole point is to stay up and SAY so. The reindex guard keeps
+    // the existing index intact and /admin/health reports the vault as unusable, which turns the
+    // container red (ADR-0019).
     match vault::ensure_vault_dir(&config.vault_dir)
         .with_context(|| format!("ensuring vault dir {}", config.vault_dir.display()))?
     {
