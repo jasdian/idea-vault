@@ -69,6 +69,31 @@ impl SkillRegistry {
                     // second-order-effects prompt template; {context} is filled by ai::budget (D21).
                     prompt: "Assume this idea succeeds as stated. Trace the second-order and knock-on effects, good and bad.\n{context}".to_string(),
                 },
+                // The structured-dissent protocols below come from the same research as the
+                // devils-advocate rewrite: role-played objections bolster the original view, so
+                // each of these forces a concrete artifact (a press release, a rival plan, a
+                // named contradiction) the idea has to survive, rather than a list of worries.
+                Skill {
+                    name: "pr-faq".to_string(),
+                    description: "Work backwards from launch: write the press release and the hardest FAQ, exposing what can't be stated concretely.".to_string(),
+                    // Amazon's working-backwards PR/FAQ. The payoff is section 3: the claims that
+                    // resisted being written concretely are the idea's soft spots.
+                    prompt: "Work backwards from launch day, Amazon PR/FAQ style, for the idea below.\n\n1. **Press release** (under 200 words), dated launch day: a headline; who the customer is; their problem in their own words; the solution and why it beats what they do today; one customer quote. Be concrete enough that a reader could say \"that's not me\" — vague is failure.\n2. **FAQ** — the 6 hardest questions a skeptical customer, investor, or engineer would ask, each with an honest answer. Where the honest answer is \"we don't know yet\", write that and name what would find out.\n3. **What the press release exposed** — the claims you could not write concretely. These are the idea's weakest points.\n{context}".to_string(),
+                },
+                Skill {
+                    name: "dialectical-inquiry".to_string(),
+                    description: "Build the strongest rival plan on the opposite assumptions, then weigh the two head to head.".to_string(),
+                    // Mason's dialectical inquiry: dissent as a competing plan, not objections —
+                    // the owner has to beat a real alternative instead of rebutting critiques.
+                    prompt: "Apply dialectical inquiry to the idea below. Do not list objections — build a rival.\n\n1. **Assumptions** — the 3 to 5 load-bearing assumptions the idea rests on.\n2. **Counter-plan** — negate the most important of those assumptions and build the strongest alternative plan that pursues the same underlying goal on the opposite assumptions. Make it a plan someone could genuinely believe in, not a strawman.\n3. **Head to head** — for each assumption, which plan does the evidence currently favour, and what observation would settle it?\n4. **Synthesis** — what the idea should keep, drop, or steal from the counter-plan.\n{context}".to_string(),
+                },
+                Skill {
+                    name: "triz".to_string(),
+                    description: "Name the idea's core contradiction and resolve it without compromise, using TRIZ principles.".to_string(),
+                    // TRIZ contradiction resolution, reduced to the separation principles a local
+                    // model can apply without the full 40-principle matrix.
+                    prompt: "Apply TRIZ contradiction analysis to the idea below.\n\n1. **Core contradiction** — the central conflict the idea must resolve: improving X makes Y worse, or the idea needs something to be both A and not-A. Name it in one sentence. If there are several, pick the one that most limits the idea.\n2. **Ideal final result** — describe the outcome where the benefit arrives with none of the cost.\n3. **Resolutions** — at least 3 ways to resolve the contradiction WITHOUT a compromise or trade-off, each using a different principle: separate in time, separate in space, separate by condition or scale, use a resource already present, invert the approach, or segment it. Name the principle for each.\n4. **Best bet** — which resolution to try first, and why.\n{context}".to_string(),
+                },
                 Skill {
                     name: "build-prompt".to_string(),
                     description: "Fold the whole discussion into a ready-to-run build prompt for a coding agent.".to_string(),
@@ -123,12 +148,15 @@ impl SkillRegistry {
     /// are knowledge-extraction angles driven by `concepts::knowledge` (docs/adr/0015), not
     /// standalone moves — they are registered (so `run_agent` can resolve them) but excluded
     /// here.
-    pub fn move_names(&self) -> Vec<String> {
+    pub fn moves(&self) -> impl Iterator<Item = &Skill> {
         self.skills
             .iter()
             .filter(|s| !s.name.starts_with("extract-"))
-            .map(|s| s.name.clone())
-            .collect()
+    }
+
+    /// Names of [`Self::moves`], in registration order.
+    pub fn move_names(&self) -> Vec<String> {
+        self.moves().map(|s| s.name.clone()).collect()
     }
 }
 
@@ -258,6 +286,43 @@ mod tests {
         // Still registered — the knowledge orchestrator resolves them like any skill.
         for lens in crate::concepts::knowledge::LENSES {
             assert!(registry.get(lens).is_some(), "unregistered lens: {lens}");
+        }
+    }
+
+    #[test]
+    fn structured_dissent_skills_are_moves_but_not_default_swarm_angles() {
+        let registry = SkillRegistry::builtin();
+        let moves = registry.move_names();
+        for name in ["pr-faq", "dialectical-inquiry", "triz"] {
+            assert!(moves.iter().any(|n| n == name), "missing move: {name}");
+            // Opt-in via the swarm angle picker; the canonical four stay the default.
+            assert!(!crate::concepts::swarm::DEFAULT_ANGLES.contains(&name));
+        }
+    }
+
+    #[test]
+    fn every_skill_has_one_context_slot_and_a_description() {
+        for skill in SkillRegistry::builtin().list() {
+            assert_eq!(
+                skill.prompt.matches("{context}").count(),
+                1,
+                "{} must have exactly one {{context}} slot",
+                skill.name
+            );
+            assert!(
+                !skill.description.is_empty(),
+                "{} has no description",
+                skill.name
+            );
+            // Names are URL path segments (`/idea/:slug/skill/:name`) and transcript labels.
+            assert!(
+                skill
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{} is not a lower-kebab name",
+                skill.name
+            );
         }
     }
 }

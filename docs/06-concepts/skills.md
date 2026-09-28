@@ -79,10 +79,24 @@ sequenceDiagram
 | `devils-advocate` | **Authentic** dissent, not role-play: at most 5 objections the model genuinely holds, each with a confidence and what evidence would change its mind, ending in a pursue / don't / only-if verdict. An *assigned* devil's advocate tends to make the owner rehearse rebuttals and leave more confident in a weak idea ([Nemeth 2001](https://onlinelibrary.wiley.com/doi/abs/10.1002/ejsp.58)); the prompt forbids manufactured objections for that reason. |
 | `constraints` | Map the practical constraints, prerequisites, and precedents bearing on the idea. |
 | `second-order-effects` | Assume the idea works; trace the second-order and knock-on effects. |
+| `pr-faq` | Amazon-style working backwards: a launch-day press release, the 6 hardest FAQ questions answered honestly, then the claims that resisted being written concretely — the idea's soft spots. |
+| `dialectical-inquiry` | Dissent as a rival, not a list of objections: name the load-bearing assumptions, build the strongest counter-plan on their negation, weigh the two head to head, and say what to keep, drop, or steal. |
+| `triz` | Name the idea's core contradiction (improving X worsens Y), describe the ideal final result, and resolve it **without** a trade-off via at least 3 separation/inversion principles. |
 | `build-prompt` | The **capstone move**: fold the entire discussion into a single, ready-to-paste build prompt for a coding agent (e.g. Claude Code) — settled decisions/constraints/disproofs extracted (not transcribed), an ordered plan, explicit fan-out-vs-sequential guidance, and acceptance criteria. |
 
 `premortem`, `cheapest-disproof`, `constraints`, and `second-order-effects` are also the default
 angle set a swarm run uses when the owner doesn't specify angles ([D14](./swarm.md)).
+
+`devils-advocate`, `pr-faq`, `dialectical-inquiry`, and `triz` are the **structured-dissent** moves.
+An assigned devil's advocate that merely role-plays objections tends to *bolster* the owner's
+original view rather than test it ([Nemeth 2001](https://onlinelibrary.wiley.com/doi/abs/10.1002/ejsp.58)),
+so each of these either demands dissent the model actually holds or forces a concrete artifact
+(a press release, a rival plan, a named contradiction) the idea has to survive. They are opt-in
+swarm angles: listed, unchecked, in the swarm picker.
+
+In the UI every move is a chip in the moves row whose hover title is the skill's `description`
+(`SkillRegistry::moves` → `web::templates::MoveChip`); the swarm picker's angle labels carry the
+same title. Adding a skill to `SkillRegistry::builtin` is all it takes to surface it in both.
 
 ### Orchestrator-only lenses (`extract-*`)
 

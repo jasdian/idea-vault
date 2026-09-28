@@ -54,6 +54,48 @@ async fn run_skill_returns_turn_partial_and_appends_it() {
 }
 
 #[tokio::test]
+async fn structured_dissent_skills_render_as_described_chips_and_run() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["Core contradiction named.".into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion);
+
+    // Every new move is a chip whose hover title is its description, and an opt-in (unchecked)
+    // swarm angle.
+    let (status, page) = support::web::get(state.clone(), "/idea/movable").await;
+    assert_eq!(status, StatusCode::OK);
+    for (name, blurb) in [
+        ("pr-faq", "Work backwards from launch"),
+        ("dialectical-inquiry", "Build the strongest rival plan"),
+        (
+            "triz",
+            "core contradiction and resolve it without compromise",
+        ),
+    ] {
+        assert!(
+            page.contains(&format!("hx-post=\"/idea/movable/skill/{name}\"")),
+            "no chip for {name}"
+        );
+        assert!(page.contains(blurb), "no description tooltip for {name}");
+        assert!(
+            page.contains(&format!("value=\"{name}\"> {name}")),
+            "{name} should be an unchecked swarm angle"
+        );
+    }
+
+    let (status, _) = post_form(state.clone(), "/idea/movable/skill/triz", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let body = support::web::poll_until(state, "/idea/movable/pending", "foil · triz").await;
+    assert!(body.contains("Core contradiction named."));
+    let convo = store::read_conversation(&vault_dir, "movable").unwrap();
+    assert!(convo.contains("## assistant (skill: triz)\nCore contradiction named."));
+    assert!(mock.chat_bodies()[0].contains("TRIZ contradiction analysis"));
+}
+
+#[tokio::test]
 async fn run_skill_guards_unknown_stored_and_missing() {
     let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["x".into()])).await;
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);

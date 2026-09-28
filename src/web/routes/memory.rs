@@ -11,7 +11,9 @@ use crate::domain::IdeaState;
 use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
-use crate::web::routes::ideas::{build_discussion, respond_with_transcript, state_badge_oob};
+use crate::web::routes::ideas::{
+    build_discussion, move_chips, respond_with_transcript, state_badge_oob,
+};
 use crate::web::routes::{reindex_logged, scoped_llm};
 
 use crate::web::WebError;
@@ -126,7 +128,7 @@ pub async fn reopen_idea(
 
     let conversation = store::read_conversation(&vault_dir, &slug)?;
     let health = state.llm.probe().await;
-    let skill_names = state.skills.move_names();
+    let moves = move_chips(&state.skills);
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     let queued_items = crate::web::jobs::list_queued(&state.queues, &slug);
     // The reopen form swaps `#discussion` (buttons come back with it); the subhead badge sits
@@ -139,7 +141,7 @@ pub async fn reopen_idea(
         state.llm.settings().backend,
         &state.llm.model(),
         true,
-        skill_names,
+        moves,
         pending,
         queued_items,
         state.llm.context_budget().max_bytes,

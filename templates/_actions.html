@@ -2,9 +2,9 @@
   {% if can_store %}
   <div class="moves">
     <span class="moves__label">moves</span>
-    {% for name in skill_names %}{% if name != "build-prompt" %}
-    <form hx-post="/idea/{{ slug }}/skill/{{ name }}" hx-target="#transcript" hx-swap="innerHTML">
-      <button type="submit" class="chip" title="Run the {{ name }} move">{{ name }}</button>
+    {% for m in moves %}{% if m.name != "build-prompt" %}
+    <form hx-post="/idea/{{ slug }}/skill/{{ m.name }}" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip" title="{{ m.description }}">{{ m.name }}</button>
     </form>
     {% endif %}{% endfor %}
     {# The swarm chip carries an angle picker (#1). The checkboxes have no `name`, so they are not
@@ -19,7 +19,7 @@
         <summary class="swarm-picker__summary" title="Choose which angles this swarm attacks from — uncheck all to fall back to the canonical four">angles ▾</summary>
         <div class="swarm-picker__menu">
           {% for a in swarm_angles %}
-          <label class="swarm-picker__opt"><input type="checkbox" class="swarm-angle" value="{{ a.name }}"{% if a.on %} checked{% endif %}> {{ a.name }}</label>
+          <label class="swarm-picker__opt" title="{{ a.description }}"><input type="checkbox" class="swarm-angle" value="{{ a.name }}"{% if a.on %} checked{% endif %}> {{ a.name }}</label>
           {% endfor %}
         </div>
       </details>

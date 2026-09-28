@@ -199,11 +199,12 @@ pub struct Actions {
     /// Whether Store is a legal D9 transition from the idea's current state
     /// (InDiscussion/Reopened yes; Draft/Stored no — the UI must not offer a guaranteed 400).
     pub can_store: bool,
-    /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
-    pub skill_names: Vec<String>,
+    /// The registry's moves — the "menu of moves" (docs/06-concepts/skills.md), each with its
+    /// description as the chip's hover title.
+    pub moves: Vec<MoveChip>,
     /// The swarm angle picker: every candidate attack angle with its default-checked state, so
     /// the owner can aim a swarm instead of always firing the canonical four (#1). Derived from
-    /// `skill_names` (moves minus the `build-prompt` capstone); `on` marks `swarm::DEFAULT_ANGLES`.
+    /// `moves` (minus the `build-prompt` capstone); `on` marks `swarm::DEFAULT_ANGLES`.
     pub swarm_angles: Vec<SwarmAngle>,
     /// A job is currently running for this idea. Store is a commitment action, so its button
     /// renders `disabled` while busy (a click would only bounce off `try_claim` anyway); the OOB
@@ -225,9 +226,27 @@ pub struct WorkflowChip {
     pub description: String,
 }
 
-/// One checkbox in the swarm angle picker: the angle (a skill name) and whether it starts checked.
+/// One move chip: skill name (the route segment) + description (the hover title), so an
+/// unfamiliar move like `triz` explains itself before the owner spends a model call on it.
+pub struct MoveChip {
+    pub name: String,
+    pub description: String,
+}
+
+impl From<&crate::concepts::skills::Skill> for MoveChip {
+    fn from(skill: &crate::concepts::skills::Skill) -> Self {
+        Self {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+        }
+    }
+}
+
+/// One checkbox in the swarm angle picker: the angle (a skill name), its description (the
+/// hover title), and whether it starts checked.
 pub struct SwarmAngle {
     pub name: String,
+    pub description: String,
     pub on: bool,
 }
 

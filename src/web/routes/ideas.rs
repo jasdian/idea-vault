@@ -284,13 +284,21 @@ fn backend_note(backend: crate::config::LlmBackendKind) -> String {
     format!("Runs serially {via}, so it takes a while.")
 }
 
+/// The move chips for the actions block, straight off the registry (moves only — the
+/// `extract-*` lenses are filtered by `SkillRegistry::moves`).
+pub(crate) fn move_chips(
+    registry: &crate::concepts::skills::SkillRegistry,
+) -> Vec<crate::web::templates::MoveChip> {
+    registry.moves().map(Into::into).collect()
+}
+
 /// Render the `#idea-actions` block (`_actions.html`) — the state-dependent moves/swarm/store
 /// controls. Shared by the full-page `_discussion.html` render (`oob = false`) and the
 /// out-of-band fragment appended to transcript responses (`oob = true`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_actions(
     slug: &str,
-    skill_names: Vec<String>,
+    moves: Vec<crate::web::templates::MoveChip>,
     can_store: bool,
     busy: bool,
     backend: crate::config::LlmBackendKind,
@@ -309,18 +317,19 @@ pub(crate) fn render_actions(
     // attack angle; the canonical `swarm::DEFAULT_ANGLES` start checked. Derived from the moves
     // already threaded in, so no new call-site plumbing — an empty selection falls back to the
     // same defaults server-side (memory::run_swarm), keeping the picker purely additive.
-    let swarm_angles = skill_names
+    let swarm_angles = moves
         .iter()
-        .filter(|n| n.as_str() != "build-prompt")
-        .map(|n| crate::web::templates::SwarmAngle {
-            name: n.clone(),
-            on: crate::concepts::swarm::DEFAULT_ANGLES.contains(&n.as_str()),
+        .filter(|m| m.name != "build-prompt")
+        .map(|m| crate::web::templates::SwarmAngle {
+            name: m.name.clone(),
+            description: m.description.clone(),
+            on: crate::concepts::swarm::DEFAULT_ANGLES.contains(&m.name.as_str()),
         })
         .collect();
     crate::web::templates::Actions {
         slug: slug.to_string(),
         can_store,
-        skill_names,
+        moves,
         swarm_angles,
         busy,
         workflows,
@@ -378,11 +387,11 @@ pub(crate) fn respond_with_transcript(
         idea.frontmatter.state,
         IdeaState::InDiscussion | IdeaState::Reopened
     );
-    let skill_names = state.skills.move_names();
+    let moves = move_chips(&state.skills);
     html.push_str(&state_badge_oob(idea.frontmatter.state));
     html.push_str(&render_actions(
         slug,
-        skill_names,
+        moves,
         can_store,
         busy,
         llm.settings().backend,
@@ -665,7 +674,7 @@ pub(crate) fn build_discussion(
     backend: crate::config::LlmBackendKind,
     model: &str,
     can_store: bool,
-    skill_names: Vec<String>,
+    moves: Vec<crate::web::templates::MoveChip>,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -687,7 +696,7 @@ pub(crate) fn build_discussion(
         budget_bytes,
         tools_bytes,
     )?;
-    let actions_html = render_actions(slug, skill_names, can_store, busy, backend, false)?;
+    let actions_html = render_actions(slug, moves, can_store, busy, backend, false)?;
     let queue_html = render_queue_panel(slug, queued_items, false)?;
 
     Ok(crate::web::templates::Discussion {
@@ -712,7 +721,7 @@ fn render_panel(
     health: crate::ai::AiHealth,
     backend: crate::config::LlmBackendKind,
     model: &str,
-    skill_names: Vec<String>,
+    moves: Vec<crate::web::templates::MoveChip>,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -738,7 +747,7 @@ fn render_panel(
         backend,
         model,
         can_store,
-        skill_names,
+        moves,
         pending,
         queued_items,
         budget_bytes,
@@ -765,7 +774,7 @@ pub async fn idea_page(
     // most that per page view.
     let health = state.llm.probe().await;
 
-    let skill_names = state.skills.move_names();
+    let moves = move_chips(&state.skills);
     // If a background job is running for this idea, this resumes its indicator on the fresh page.
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     // Scoped for the meter (ADR-0021) — the probe above stays on the shared instance (health is
@@ -781,7 +790,7 @@ pub async fn idea_page(
         health,
         llm.settings().backend,
         &llm.model(),
-        skill_names,
+        moves,
         pending,
         queued_items,
         llm.context_budget().max_bytes,
