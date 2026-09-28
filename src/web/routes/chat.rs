@@ -86,9 +86,10 @@ pub async fn chat(
 }
 
 /// Persist a user turn on an **already-claimed** slot and spawn the detached reply job. Shared by
-/// the direct send path and the queue drainer. On a persist failure it releases the slot (so the
-/// idea isn't wedged busy) and returns the error.
-fn spawn_chat_turn(
+/// the direct send path, the queue drainer, and the inbound MCP `chat` tool
+/// (`web::mcp_server::tasks`, ADR-0024). On a persist failure it releases the slot (so the idea
+/// isn't wedged busy) and returns the error.
+pub(crate) fn spawn_chat_turn(
     state: &AppState,
     slug: &str,
     mut idea: Idea,

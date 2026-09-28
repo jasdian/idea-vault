@@ -1163,16 +1163,17 @@ pub struct CreateIdeaForm {
     pub body: String,
 }
 
-/// R3 — `POST /ideas` — create a new Draft idea (D10) and return its list row partial.
-///
-/// D10 sequence: validate title non-empty → slugify + collision-check against the vault (D22)
-/// → write `idea.md` (state=draft) + empty `conversation.md` (truth first) → index upsert →
-/// the `_idea_row.html` partial the list form swaps in.
-pub async fn create_idea(
-    State(state): State<AppState>,
-    Form(form): Form<CreateIdeaForm>,
-) -> Result<IdeaRow, WebError> {
-    let title = form.title.trim();
+/// D10 sequence, with no HTTP-specific rendering: validate title non-empty → slugify +
+/// collision-check against the vault (D22) → write `idea.md` (state=draft) + empty
+/// `conversation.md` (truth first) → index upsert. Shared by the `POST /ideas` handler and the
+/// inbound MCP `create_idea` tool (`web::mcp_server::tools`, ADR-0024). Returns the created idea
+/// (with its final, disambiguated slug).
+pub(crate) fn create_idea_core(
+    state: &AppState,
+    title: &str,
+    body: &str,
+) -> Result<Idea, WebError> {
+    let title = title.trim();
     if title.is_empty() {
         return Err(WebError::BadRequest("title must not be empty".into()));
     }
@@ -1193,10 +1194,10 @@ pub async fn create_idea(
             created: now,
             updated: now,
         },
-        body: if form.body.trim().is_empty() {
+        body: if body.trim().is_empty() {
             String::new()
         } else {
-            format!("{}\n", form.body.trim())
+            format!("{}\n", body.trim())
         },
     };
 
@@ -1211,6 +1212,7 @@ pub async fn create_idea(
             Err(e) => return Err(e.into()),
         }
     };
+    idea.frontmatter.slug = slug.clone();
 
     // Index upsert. Full transactional rebuild is the canonical correct path (ADR-0002); a
     // per-idea incremental upsert is a future optimization once vault sizes warrant it. An
@@ -1226,13 +1228,25 @@ pub async fn create_idea(
         }
     }
 
+    Ok(idea)
+}
+
+/// R3 — `POST /ideas` — create a new Draft idea (D10) and return its list row partial.
+pub async fn create_idea(
+    State(state): State<AppState>,
+    Form(form): Form<CreateIdeaForm>,
+) -> Result<IdeaRow, WebError> {
+    let idea = create_idea_core(&state, &form.title, &form.body)?;
     Ok(IdeaRow {
         idea: queries::IdeaSummary {
-            slug,
-            title: idea.frontmatter.title.clone(),
+            slug: idea.frontmatter.slug,
+            title: idea.frontmatter.title,
             state: idea.frontmatter.state.as_str().to_string(),
-            tags: idea.frontmatter.tags.clone(),
-            updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            tags: idea.frontmatter.tags,
+            updated_at: idea
+                .frontmatter
+                .updated
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         },
     })
 }

@@ -47,6 +47,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         sources_dir: None,
         sources_applied: None,
         skills_dir: vault_dir.join(".skills"),
+        mcp_server_token: None,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
@@ -99,6 +100,19 @@ pub fn default_claude_settings(vault_dir: &std::path::Path) -> idea_vault::confi
 /// Default harness: Ollama refused fast (port 9), concurrency 1.
 pub fn test_state() -> (AppState, PathBuf) {
     test_state_with_ollama("http://127.0.0.1:9", 1)
+}
+
+/// Enable the inbound MCP server (docs/adr/0024) on an already-built `state`, gating `/api/mcp`
+/// with `token`. `mcp_server_token` is `None` by default (feature off) so every other test's
+/// router stays exactly as it was before that feature existed; this is the one opt-in wrapper,
+/// composable with any state builder above (`test_state()`, `test_state_with_ollama(...)`, …).
+pub fn with_mcp_token(state: AppState, token: &str) -> AppState {
+    let mut config = (*state.config).clone();
+    config.mcp_server_token = Some(token.to_string());
+    AppState {
+        config: Arc::new(config),
+        ..state
+    }
 }
 
 /// POST a `application/x-www-form-urlencoded` body to `uri` on a fresh router over `state`.

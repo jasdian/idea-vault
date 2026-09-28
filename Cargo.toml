@@ -10,9 +10,17 @@ license = "MIT"
 # web
 axum = "0.8"
 tokio = { version = "1.52", features = ["full"] }
+tower = "0.5"
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# inbound MCP server (ADR-0024): the official Rust MCP SDK, Streamable HTTP transport.
+# Pin "1" (1.8.x) — "0.1" is a pre-1.0 line with a different API.
+rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
+# http::request::Parts — rmcp's RequestContext carries the inbound Parts; a direct dep unifies
+# the http version (see mcp-server's Cargo.toml for the same rationale).
+http = "1"
 
 # templates — askama_axum is deprecated; askama_web is the maintained axum bridge
 askama = "0.16"

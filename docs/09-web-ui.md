@@ -75,6 +75,9 @@ flowchart LR
         R11["GET /admin/health — LLM backend probe (D20)"]
         R17["GET /static/{*path} — static assets"]
     end
+    subgraph mcp_inbound["Inbound MCP (ADR-0024) — not HTML"]
+        R35["POST /api/mcp — MCP protocol endpoint (rmcp Streamable HTTP, Bearer-gated); JSON-RPC, no template"]
+    end
 
     R1 --> T_LIST["templates/list.html"]
     R2 --> T_IDEA["templates/idea.html"]
@@ -119,7 +122,9 @@ same claim → spawn → poll job shape as R6/R7), `settings` (R13, R13b), `admi
 [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)), `compact` (R21 — the manual "compact
 now" fold, [ADR-0012](./adr/0012-auto-compact.md)/[ADR-0016](./adr/0016-forced-compact-folds-fully.md)),
 `mcp` (R24–R31 — the MCP server management page, [ADR-0018](./adr/0018-mcp-servers.md)), `skills`
-(R33, R34 — the skill book and its live reload, [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)).
+(R33, R34 — the skill book and its live reload, [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)),
+`mcp_server` (R35 — the **inbound** MCP protocol endpoint, [ADR-0024](./adr/0024-mcp-server-inbound.md);
+the mirror image of `mcp`'s outbound registry).
 R23 (`rename_idea`) is deliberately **not** a job route (D11) — it is a synchronous frontmatter
 edit, not an AI call, so it returns its partial directly like R3/R14/R15/R16 rather than going
 through claim → spawn → poll. **R24–R31 are idea-agnostic** — they manage the owner-global MCP
@@ -130,7 +135,11 @@ network: an MCP probe is one bounded HTTP round trip already capped by `ai::mcp`
 timeouts, not a model call that can run for minutes, so the handler awaits it inline
 ([ADR-0018](./adr/0018-mcp-servers.md)). R34 (`reload_skills`) is not a job route either: it re-reads
 a handful of small files under `vault/.skills/` synchronously, no model call, and returns the
-refreshed `#skills` panel directly — the same shape as R23/R32.
+refreshed `#skills` panel directly — the same shape as R23/R32. **R35** is a single mounted protocol
+endpoint, not a page or partial — it carries its own MCP-level `tools/call`/`tasks/*` dispatch
+(`web::mcp_server`), and its two long-running tools (`chat`, `store_idea`) still go through the same
+`web::jobs` claim → spawn → poll machinery every other AI route uses, bridged onto the MCP Tasks
+primitive rather than exposed as HTML ([ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md)).
 
 ## D16 — HTTP request / middleware pipeline
 
@@ -339,7 +348,8 @@ base.html`.
 |-------|----------|
 | Router + AppState + middleware | `app.rs` |
 | Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts,compact,mcp,skills,sources}` |
-| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, workflow R22, store R4, extract R18, compact R21, and the R9b poll endpoint — **not** R31's inline MCP probe, [ADR-0018](./adr/0018-mcp-servers.md)) |
+| Inbound MCP server (R35) | `web::mcp_server::{mod,auth,handler,tools,tasks,prompts}` — `rmcp::ServerHandler` + Bearer `AuthLayer`, [ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md) |
+| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, workflow R22, store R4, extract R18, compact R21, and the R9b poll endpoint — **not** R31's inline MCP probe, [ADR-0018](./adr/0018-mcp-servers.md); also driven by R35's `chat`/`store_idea` MCP tasks via `web::mcp_server::tasks::TaskRegistry`) |
 | Pending chat-message queue | `web::jobs` queue half (`Queues`, `enqueue`/`dequeue`/`remove_queued`/`list_queued`, `MAX_QUEUED`); drained by `web::routes::chat::start_next_queued` from R9b; rendered by `web::routes::ideas::render_queue_panel` |
 | Swarm angle defaults | `concepts::swarm::DEFAULT_ANGLES` (picker pre-check + R7's empty-request fallback) |
 | Skill registry (skill book + move chips + angle picker) | `concepts::skills::LiveSkills` (`AppState.skills`; `load`/`snapshot`/`reload`), `SkillRegistry` (`load`/`visible`), spine coverage `concepts::coverage::coverage` |

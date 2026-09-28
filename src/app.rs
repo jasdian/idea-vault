@@ -42,8 +42,12 @@ pub struct AppState {
 }
 
 /// Build the full axum router (D17 route map) with the tracing middleware layer (D16).
+///
+/// If [`Config::mcp_server_token`] is set, the inbound MCP server (docs/adr/0024) is additionally
+/// mounted at `/api/mcp` — a separate path from the outbound `/mcp*` registry-management UI above,
+/// gated by its own Bearer `AuthLayer` (`web::mcp_server`). Unset: not mounted at all.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         // Full pages (ideas group).
         .route("/", get(ideas::list_page))
         .route("/idea/{slug}", get(ideas::idea_page))
@@ -120,5 +124,10 @@ pub fn build_router(state: AppState) -> Router {
         // Embedded static assets (htmx, css).
         .route("/static/{*path}", get(admin::static_asset))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state.clone());
+
+    match state.config.mcp_server_token.clone() {
+        Some(token) => router.merge(crate::web::mcp_server::router(state, token)),
+        None => router,
+    }
 }

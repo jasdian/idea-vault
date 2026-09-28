@@ -82,6 +82,14 @@ pub struct Config {
     /// `<vault_dir>/.skills` — host-persistent like the other vault dotfiles and invisible to the
     /// idea walker (no `idea.md`). App config, NOT vault truth: it is never indexed.
     pub skills_dir: PathBuf,
+    /// `IDEA_VAULT_MCP_TOKEN`: the Bearer token that gates the **inbound** MCP server at
+    /// `/api/mcp` (docs/adr/0024) — not to be confused with [`Config::mcp_config_path`], which is
+    /// the *outbound* registry of MCP servers idea-vault calls. `None` (unset, or set but blank)
+    /// means the inbound MCP surface is not mounted at all: an unauthenticated tool surface is
+    /// not a safe default, so absence disables the feature rather than falling back to open
+    /// (mirrors the "detect absence, surface a clear state" discipline applied elsewhere, e.g.
+    /// Ollama's own absence).
+    pub mcp_server_token: Option<String>,
 }
 
 /// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
@@ -265,6 +273,9 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| vault_dir.join(SKILLS_DIRNAME));
 
+        // Inbound MCP server gate (docs/adr/0024): unset or blank leaves the feature unmounted.
+        let mcp_server_token = lookup("IDEA_VAULT_MCP_TOKEN").filter(|s| !s.trim().is_empty());
+
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
                 .unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string()),
@@ -306,6 +317,7 @@ impl Config {
             sources_dir,
             sources_applied,
             skills_dir,
+            mcp_server_token,
         }
     }
 }
@@ -644,5 +656,28 @@ mod tests {
         map.insert("IDEA_VAULT_AI_CONCURRENCY", "not-a-number");
         let cfg = Config::from_lookup(lookup_from(map));
         assert_eq!(cfg.ai_concurrency, DEFAULT_AI_CONCURRENCY);
+    }
+
+    #[test]
+    fn mcp_server_token_unset_or_blank_disables_the_inbound_server() {
+        let cfg = Config::from_lookup(lookup_from(HashMap::new()));
+        assert_eq!(cfg.mcp_server_token, None);
+
+        for blank in ["", "   "] {
+            let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+                "IDEA_VAULT_MCP_TOKEN",
+                blank,
+            )])));
+            assert_eq!(
+                cfg.mcp_server_token, None,
+                "blank {blank:?} must stay disabled"
+            );
+        }
+
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_MCP_TOKEN",
+            "s3cr3t",
+        )])));
+        assert_eq!(cfg.mcp_server_token.as_deref(), Some("s3cr3t"));
     }
 }

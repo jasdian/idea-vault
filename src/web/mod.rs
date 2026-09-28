@@ -6,6 +6,7 @@
 //! streams (docs/09-web-ui.md D16/D17).
 
 pub mod jobs;
+pub mod mcp_server;
 pub mod routes;
 pub mod templates;
 

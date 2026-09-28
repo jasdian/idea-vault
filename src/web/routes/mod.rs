@@ -115,6 +115,7 @@ mod tests {
             sources_dir: None,
             sources_applied: None,
             skills_dir: vault_dir.join(".skills"),
+            mcp_server_token: None,
         };
         let ollama =
             crate::ai::OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())

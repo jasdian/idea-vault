@@ -36,8 +36,9 @@ New here? Read top to bottom:
 9. [07-flows](./07-flows.md) — index of runtime flows (authors D10).
 10. [09-web-ui](./09-web-ui.md) — routes, middleware, templates (D16, D17).
 11. [12-deployment](./12-deployment.md) — containerized local hosting, with/without GPU (D26–D29, D31).
-12. [08-diagrams](./08-diagrams.md) — the full diagram registry.
-13. [10-testing-strategy](./10-testing-strategy.md) — invariants and how they're tested.
+12. [13-mcp-server-inbound](./13-mcp-server-inbound.md) — exposing idea-vault itself as an MCP server.
+13. [08-diagrams](./08-diagrams.md) — the full diagram registry.
+14. [10-testing-strategy](./10-testing-strategy.md) — invariants and how they're tested.
 
 For running the stack, the top-level [README](../README.md) has the Docker quickstart.
 
@@ -61,10 +62,11 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [07-flows](./07-flows.md) | Runtime flow index | D10 |
 | [09-web-ui](./09-web-ui.md) | Routes, middleware, templates, HTMX (background-job polling) | D16, D17 |
 | [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers, reference sources | D26, D27, D28, D29, D31 |
+| [13-mcp-server-inbound](./13-mcp-server-inbound.md) | Inbound MCP server (`/api/mcp`), the Task↔Job bridge, and the reusable cookbook | — |
 | [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D32) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0023 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0024 | — |
 
 ## Locked decisions (at a glance)
 
@@ -86,6 +88,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 
 - **Skills as markdown + the skill book:** every ideation move is a markdown file (frontmatter: stage, role, output contract, use_when/avoid_when, hidden; body: the prompt) — built-ins compiled in from `src/concepts/skills/*.md`, owner additions/overrides in `vault/.skills/` (app config, not truth) reloaded live from the `/skills` skill book, which groups moves along the spine (steelman → attack → consequence → converge → capstone); coverage of the spine is derived from transcript headings, never stored ([ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)).
 - **Verification layer:** skill answers are held to an output contract (repair, then at most one retry for a single interactive call); swarms and workflows run a factored audit by default (one Auditor call, CONFIRMED/UNCERTAIN/REFUTED, refuted findings kept as "disproven objections", live toggle); store-time facts must quote the discussion verbatim or go to a quarantined-facts artifact, and UPDATE appends rather than rewrites ([ADR-0023](./adr/0023-verification-layer.md)).
+- **Inbound MCP server:** idea-vault exposes itself as an MCP server at `POST /api/mcp` (`web::mcp_server`, `rmcp` `ServerHandler` over Streamable HTTP), gated by a single Bearer token (`IDEA_VAULT_MCP_TOKEN`, unset = not mounted) — the mirror image of the outbound `crate::mcp` registry above. `chat`/`store_idea` run as MCP Tasks (SEP-1686) bridged onto the existing `web::jobs` background-job machinery rather than a held-open connection ([ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md)).
 
 ## Beyond these docs
 

@@ -53,6 +53,7 @@ fn test_state() -> AppState {
         sources_dir: None,
         sources_applied: None,
         skills_dir: vault_dir.join(".skills"),
+        mcp_server_token: None,
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");

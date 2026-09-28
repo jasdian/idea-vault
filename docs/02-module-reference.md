@@ -68,6 +68,7 @@ flowchart TB
 
         subgraph web["web/ (HTTP surface)"]
             W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources"]
+            W_MCPSRV["mcp_server/ — auth.rs, handler.rs, tools.rs, tasks.rs, prompts.rs: the inbound MCP\nserver at POST /api/mcp (rmcp ServerHandler + Bearer AuthLayer, ADR-0024)"]
             W_JOBS["jobs.rs — background job registry + poll (ADR-0010)"]
             W_TMPL["templates.rs — Askama structs"]
         end

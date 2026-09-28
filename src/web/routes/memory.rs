@@ -7,7 +7,7 @@ use chrono::Utc;
 
 use crate::app::AppState;
 use crate::concepts;
-use crate::domain::IdeaState;
+use crate::domain::{Idea, IdeaState};
 use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
@@ -31,25 +31,7 @@ pub async fn store_idea(
 ) -> Result<axum::response::Html<String>, WebError> {
     let vault_dir = state.config.vault_dir.clone();
     let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
-    match idea.frontmatter.state {
-        IdeaState::Stored => {
-            return Err(WebError::BadRequest("idea is already stored".into()));
-        }
-        IdeaState::Draft => {
-            return Err(WebError::BadRequest(
-                "nothing to store yet — discuss the idea first".into(),
-            ));
-        }
-        IdeaState::InDiscussion => {
-            let conversation = store::read_conversation(&vault_dir, &slug)?;
-            if store::split_turns(&conversation).is_empty() {
-                return Err(WebError::BadRequest(
-                    "store needs at least one discussion turn (D9)".into(),
-                ));
-            }
-        }
-        IdeaState::Reopened => {} // re-store merges memory, no turn guard (D9 table)
-    }
+    guard_can_store(&vault_dir, &slug, &idea)?;
 
     // Busy already: don't queue a second job — just re-show the in-flight state.
     if !jobs::try_claim(&state.jobs, &slug) {
@@ -74,12 +56,40 @@ pub async fn store_idea(
     respond_with_transcript(&state, &slug)
 }
 
+/// The D9 store guard, synchronous and side-effect-free apart from the one read it needs
+/// (`InDiscussion` must have at least one turn). Shared by the HTTP handler and the inbound MCP
+/// `store_idea` tool (`web::mcp_server::tasks`, ADR-0024), so both surfaces reject a bad store
+/// request identically before any job is claimed.
+pub(crate) fn guard_can_store(
+    vault_dir: &std::path::Path,
+    slug: &str,
+    idea: &Idea,
+) -> Result<(), WebError> {
+    match idea.frontmatter.state {
+        IdeaState::Stored => Err(WebError::BadRequest("idea is already stored".into())),
+        IdeaState::Draft => Err(WebError::BadRequest(
+            "nothing to store yet — discuss the idea first".into(),
+        )),
+        IdeaState::InDiscussion => {
+            let conversation = store::read_conversation(vault_dir, slug)?;
+            if store::split_turns(&conversation).is_empty() {
+                return Err(WebError::BadRequest(
+                    "store needs at least one discussion turn (D9)".into(),
+                ));
+            }
+            Ok(())
+        }
+        IdeaState::Reopened => Ok(()), // re-store merges memory, no turn guard (D9 table)
+    }
+}
+
 /// The background half of Store: the extraction pipeline (which acquires the shared permit
 /// itself, scoped to exactly its two AI calls, ADR-0006 — this task must not hold one around
 /// it) followed by the log-not-fail reindex. Truth is only touched after both calls succeed,
 /// so an abort mid-run persists nothing partial. `Ok(Some(_))` is a notice for the owner (facts
-/// quarantined, context truncated) shown under the stored panel.
-async fn run_store_work(state: &AppState, slug: &str) -> Result<Option<String>, String> {
+/// quarantined, context truncated) shown under the stored panel. Shared by the HTTP handler and
+/// the inbound MCP `store_idea` task (`web::mcp_server::tasks`, ADR-0024).
+pub(crate) async fn run_store_work(state: &AppState, slug: &str) -> Result<Option<String>, String> {
     let outcome = memory::extract::extract_and_store(
         &state.llm,
         &state.ai_semaphore,
@@ -122,16 +132,12 @@ fn store_notice(outcome: &memory::extract::StoreOutcome) -> Option<String> {
     (!parts.is_empty()).then(|| format!("Stored — but {}.", parts.join("; and ")))
 }
 
-/// R5 — `POST /idea/{slug}/reopen` — re-enter discussion with memory loaded as context (D13).
-///
-/// Truth-idempotent apart from the state flip: memory context is loaded (index first, bodies
-/// under budget) and the frontmatter flips `stored → reopened`; body and memory are untouched.
-pub async fn reopen_idea(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-) -> Result<axum::response::Html<String>, WebError> {
+/// The guard + state-flip half of Reopen, with no HTML rendering — shared by the HTTP handler and
+/// the inbound MCP `reopen_idea` tool (`web::mcp_server::tools`, ADR-0024). Returns the
+/// now-`Reopened` idea.
+pub(crate) async fn reopen_idea_core(state: &AppState, slug: &str) -> Result<Idea, WebError> {
     let vault_dir = state.config.vault_dir.clone();
-    let mut idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
+    let mut idea = store::read_idea(&vault_dir, slug)?; // 404 if missing
     if idea.frontmatter.state != IdeaState::Stored {
         return Err(WebError::BadRequest(
             "only a stored idea can be reopened".into(),
@@ -140,7 +146,7 @@ pub async fn reopen_idea(
 
     // D13: MEMORY.md always, fact bodies under budget — the next chat turn (D11) reassembles
     // the same context; loading here validates it and surfaces inclusion counts.
-    let loaded = memory::load::load_context(&vault_dir, &slug, state.llm.context_budget())?;
+    let loaded = memory::load::load_context(&vault_dir, slug, state.llm.context_budget())?;
     tracing::info!(
         slug,
         included_memory = loaded.included_memory,
@@ -152,8 +158,21 @@ pub async fn reopen_idea(
     idea.frontmatter.state = IdeaState::Reopened;
     idea.frontmatter.updated = Utc::now();
     store::write_idea(&vault_dir, &idea)?;
-    reindex_logged(&state);
+    reindex_logged(state);
+    Ok(idea)
+}
 
+/// R5 — `POST /idea/{slug}/reopen` — re-enter discussion with memory loaded as context (D13).
+///
+/// Truth-idempotent apart from the state flip: memory context is loaded (index first, bodies
+/// under budget) and the frontmatter flips `stored → reopened`; body and memory are untouched.
+pub async fn reopen_idea(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<axum::response::Html<String>, WebError> {
+    reopen_idea_core(&state, &slug).await?;
+
+    let vault_dir = state.config.vault_dir.clone();
     let conversation = store::read_conversation(&vault_dir, &slug)?;
     let health = state.llm.probe().await;
     let skills = state.skills.snapshot();
