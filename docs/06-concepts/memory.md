@@ -102,6 +102,17 @@ Rules:
 
   An `ADD` whose title slugifies to an existing fact is still skipped as a backstop. Memory only
   grows or consolidates, never silently drops ([D9](../04-state-machine.md) invariant).
+- **Cross-links are made canonical by code:** the model can't know fact slugs, so it references a
+  related fact by title in `[[…]]`. `memory::extract::cross_link` rewrites every reference that
+  matches a known fact (this batch or already on disk) to `[[that-slug]]`, auto-links an
+  unbracketed mention of another fact's exact title (only titles of at least 12 characters), and
+  records the targets in the fact's frontmatter `links`. Unknown references stay verbatim and
+  dangle legally ([D23](#d23--slug-backlink-resolution)).
+- **Tags are suggested, only ever added:** the extraction answer ends with one
+  `TAGS: a, b, c` line. `memory::extract::parse_tags` slugifies it, dedupes it and caps it at
+  `MAX_NEW_TAGS` (5) per store. New tags are merged into the idea's frontmatter `tags:`, never
+  replacing an owner-set tag, until the idea holds `domain::frontmatter::MAX_IDEA_TAGS` (10), the same
+  ceiling the owner's tag editor enforces. Reindex mines them from `idea.md` like any other tag.
 - **Truth first:** markdown written before index upsert ([ADR-0002](../adr/0002-markdown-source-of-truth-sqlite-index.md)).
 - **Nothing partial on failure/cancel:** truth is only touched after both AI calls succeed — an
   aborted or failed job leaves the idea in its prior state, still `InDiscussion`/`Reopened`
@@ -117,25 +128,43 @@ Fires on `Stored→Reopened`. Reassembles context so the AI "remembers", within 
 sequenceDiagram
     autonumber
     participant U as Owner (reopen)
-    participant H as web::routes (reopen)
+    participant H as web::routes::memory (reopen)
     participant Ld as memory::load
     participant V as vault::store
+    participant Cp as memory::compact
     participant Bud as ai::budget
 
     U->>H: POST /idea/:slug/reopen
-    H->>V: read MEMORY.md (index of facts)
-    H->>Ld: load(slug)
-    Ld->>V: read selected memory/*.md (by relevance/recency)
-    Ld->>Bud: assemble context (idea body + facts + recent convo) under budget (D21)
-    Bud-->>Ld: budgeted context block
-    Ld->>V: set state=reopened
-    H-->>U: discussion view; next turn (D11) uses loaded context
+    H->>H: guard: only a Stored idea reopens (else 400)
+    H->>Ld: load_context(slug, budget)
+    Ld->>V: read MEMORY.md (index of facts)
+    Ld->>V: read memory/*.md, newest first (by created)
+    Ld->>V: read_compacted — compacted.md, if any
+    Ld->>Cp: effective_window(turns, compacted)
+    Cp-->>Ld: fingerprint valid → summary + verbatim tail · else → full transcript
+    Ld->>Bud: assemble: idea body → facts → summary (whole or dropped) → recent turns, under budget (D21)
+    Bud-->>Ld: budgeted context block (+ inclusion counts, logged)
+    H->>V: set state=reopened (write_idea), then reindex
+    H-->>U: discussion view + OOB state badge
+    Note over H,Bud: every later turn (D11) re-runs load_context — the same assembly, fresh from disk
 ```
 
 Rules:
 
 - **Index first, bodies selectively:** `MEMORY.md` is always loaded (cheap); full fact bodies are
-  pulled only up to the budget — on small local models this matters ([ADR-0006](../adr/0006-bounded-concurrency-swarm.md)).
+  pulled newest first (by frontmatter `created`; there is no relevance ranking) only up to the
+  budget — on small local models this matters ([ADR-0006](../adr/0006-bounded-concurrency-swarm.md)).
+- **Reopen validates, the turn assembles:** `memory::load::load_context` runs at reopen only to
+  check the context and log what fits. The context the model actually sees is rebuilt by the same
+  function on every chat turn (`chat::run_chat`), so a memory edit or a new fact counts from the
+  next turn on.
+- **A compacted head replaces old turns:** if `compacted.md` exists and its `covered_bytes`
+  fingerprint still matches the transcript prefix, `memory::compact::effective_window` feeds its
+  rolling summary plus the turns after it in place of the full history
+  ([ADR-0012](../adr/0012-auto-compact.md); the budget it fills is ADR-0014's). The summary is atomic:
+  `ai::budget::assemble_context` includes it whole after the idea body and facts, or drops it whole.
+  If the fingerprint doesn't match (a turn inside the folded range was deleted), the full transcript
+  is used instead: the stale summary is ignored, never trusted.
 - **Reopen is truth-idempotent:** it loads context and flips state; it does **not** rewrite body or
   memory (those change only on Store — [D9](../04-state-machine.md)).
 
@@ -162,6 +191,7 @@ flowchart TD
 |-------|----------|
 | Extraction on Store (D12) | `memory::extract` |
 | Reload on Reopen (D13) | `memory::load` |
+| Rolling summary of the head (D13, ADR-0012) | `memory::compact` + `vault::store::read_compacted` |
 | Backlink parse/resolve (D23) | `memory::backlinks` + `index::reindex` |
 | Fact type | `domain::memory::MemoryFact` |
 | On-disk shape | [03-data-model](../03-data-model.md) D7/D8 |
