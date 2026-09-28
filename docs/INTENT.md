@@ -23,3 +23,22 @@ stronger model. I want each role to carry its own call profile.
 - `ai` stays role-agnostic: it never imports `concepts`.
 - ADR-0026 records the decision; ADR-0011 is not rewritten.
 - Every commit ships through this gate: `bash scripts/gate.sh` green.
+
+# Intent — cross-idea retrieval (in flight alongside per-role call profiles)
+
+When I interrogate one idea, the foil sees nothing from the other ideas in the vault. I want the
+vault's own links, tags and shared vocabulary pushed into each idea's context as a small
+"Related ideas" block, without a new store, a vector DB or a model call at reindex/boot. I also
+want an honest experiment that decides whether embeddings are worth building at all.
+
+## Acceptance criteria
+
+- `[[fact]]` and `[[idea#fact]]` links resolve into a queryable fact-to-fact table in `index.db`.
+- Idea-to-idea `edges` (explicit links, exact shared tags, lexical word overlap) are derived from
+  `vault/**` by reindex alone; deleting `index.db` and reindexing reproduces them exactly.
+- Chat context carries an auto-injected "Related ideas" block that never includes the idea itself
+  and only uses budget left over after the idea's own context, which stays byte-identical.
+- Tag near-duplicates (`system-design`/`systems-design`) are surfaced, never silently merged.
+- `vault_search` exists for the offline experiment only and is never exposed to the model.
+- The phase-2 embeddings verdict follows the pre-registered kill criterion and lands in ADR-0027.
+- No `unsafe`; `scripts/check-invariants.sh` stays green.
