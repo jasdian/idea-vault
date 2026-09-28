@@ -1,0 +1,31 @@
+<aside class="related" id="related">
+  <h2>Related ideas</h2>
+  {% if entries.is_empty() && drift.is_empty() %}
+  <p class="related__empty">No related ideas yet — links and shared tags create them.</p>
+  {% endif %}
+  {% if !entries.is_empty() %}
+  <ul>
+    {% for entry in entries %}
+    <li>
+      <a href="/idea/{{ entry.slug }}">{{ entry.title }}</a>
+      <code>{{ entry.slug }}</code>
+      <span class="related__hop">{{ entry.hop_label }}</span>
+      {% if !entry.reasons.is_empty() %}
+      <div class="related__reasons">{% for reason in entry.reasons %}<span>{{ reason }}</span>{% endfor %}</div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if !drift.is_empty() %}
+  <div class="related__drift">
+    <h3>Tag drift</h3>
+    <ul>
+      {% for note in drift %}
+      <li><code>{{ note.own_tag }} ≈ {{ note.other_tag }}</code>{% if !note.carriers.is_empty() %} (used by <code>{{ note.carriers }}</code>){% endif %}</li>
+      {% endfor %}
+    </ul>
+    <p class="related__note">Similar tag names are never merged automatically; retag an idea yourself if they mean the same thing.</p>
+  </div>
+  {% endif %}
+</aside>

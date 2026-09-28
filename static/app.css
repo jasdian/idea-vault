@@ -227,6 +227,24 @@ a.tagchip:hover { border-color: var(--accent); }
 .memory li { font-size: .95rem; margin: .25rem 0; }
 .memory code { font-family: var(--mono); font-size: .82em; color: var(--accent); }
 
+/* Related-ideas panel: same rail as memory, machinery in mono. */
+.related {
+  margin: 1.75rem 0; padding: 0 0 0 1rem; border-left: 2px solid var(--rule-strong);
+}
+.related h2, .related h3 {
+  font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--faint); font-weight: 600; margin: 0 0 .5rem;
+}
+.related h3 { margin-top: .9rem; }
+.related ul { list-style: none; margin: 0; padding: 0; }
+.related li { font-size: .95rem; margin: .4rem 0; }
+.related code { font-family: var(--mono); font-size: .82em; color: var(--accent); }
+.related__hop { font-family: var(--mono); font-size: .72rem; color: var(--faint); margin-left: .4rem; }
+.related__reasons { font-family: var(--mono); font-size: .75rem; color: var(--muted); }
+.related__reasons span + span::before { content: " · "; color: var(--faint); }
+.related__empty, .related__note { font-family: var(--serif); font-size: .85rem; font-style: italic; color: var(--muted); margin: 0; }
+.related__drift li { border-top: 1px solid var(--rule); padding-top: .3rem; }
+
 /* The artifacts panel mirrors the memory panel (docs/adr/0015). */
 .artifacts {
   margin: 1.75rem 0; padding: 0 0 0 1rem; border-left: 2px solid var(--rule-strong);

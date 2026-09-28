@@ -240,3 +240,149 @@ async fn the_spine_strip_shows_coverage_the_next_move_and_wrong_turns() {
     assert!(page.contains("next › premortem"));
     assert!(page.contains("before any attack move ran"));
 }
+
+fn seed_idea(vault: &std::path::Path, slug: &str, title: &str, tags: &[&str], body: &str) {
+    store::write_idea(
+        vault,
+        &Idea {
+            frontmatter: IdeaFrontmatter {
+                title: title.into(),
+                slug: slug.into(),
+                state: IdeaState::InDiscussion,
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                sources: vec![],
+                created: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
+                updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
+            },
+            body: body.into(),
+        },
+    )
+    .unwrap();
+}
+
+fn reindex_state(state: &idea_vault::app::AppState, vault: &std::path::Path) {
+    let mut conn = state.db.lock().unwrap();
+    idea_vault::index::reindex::reindex(&mut conn, vault).unwrap();
+}
+
+fn related_section(page: &str) -> &str {
+    let start = page.find("id=\"related\"").expect("related panel present");
+    let rest = &page[start..];
+    let end = rest
+        .find("<aside class=\"artifacts\"")
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+#[tokio::test]
+async fn idea_page_shows_related_panel() {
+    let (state, vault) = test_state();
+    seed_idea(&vault, "alpha", "Alpha Idea", &[], "Builds on [[beta]].\n");
+    seed_idea(&vault, "beta", "Beta Idea", &[], "Standalone.\n");
+    reindex_state(&state, &vault);
+
+    let (status, body) = get(state, "/idea/alpha").await;
+    assert_eq!(status, StatusCode::OK);
+    let panel = related_section(&body);
+    assert!(panel.contains("href=\"/idea/beta\""));
+    assert!(panel.contains("Beta Idea"));
+    assert!(panel.contains("link:"));
+    assert!(
+        !panel.contains("alpha"),
+        "own slug must be redacted: {panel}"
+    );
+}
+
+#[tokio::test]
+async fn idea_page_related_panel_shows_tag_drift() {
+    let (state, vault) = test_state();
+    seed_idea(&vault, "alpha", "Alpha Idea", &["system-design"], "One.\n");
+    seed_idea(&vault, "beta", "Beta Idea", &["systems-design"], "Two.\n");
+    reindex_state(&state, &vault);
+
+    let (_, body) = get(state, "/idea/alpha").await;
+    let panel = related_section(&body);
+    assert!(panel.contains("Tag drift"));
+    assert!(panel.contains("system-design") && panel.contains("systems-design"));
+    assert!(panel.contains("beta"));
+}
+
+#[tokio::test]
+async fn idea_page_related_panel_empty_state() {
+    let (state, vault) = test_state();
+    seed_idea(&vault, "alpha", "Alpha Idea", &[], "Alone.\n");
+    reindex_state(&state, &vault);
+
+    let (status, body) = get(state, "/idea/alpha").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(related_section(&body)
+        .contains("No related ideas yet — links and shared tags create them."));
+}
+
+#[tokio::test]
+async fn idea_page_related_panel_hides_below_noise_floor() {
+    let (state, vault) = test_state();
+    for i in 0..10 {
+        let tags: &[&str] = if i < 8 { &["common"] } else { &[] };
+        seed_idea(
+            &vault,
+            &format!("idea-{i}"),
+            &format!("Ideanumber {i}"),
+            tags,
+            "Body.\n",
+        );
+    }
+    reindex_state(&state, &vault);
+
+    let (status, body) = get(state, "/idea/idea-0").await;
+    assert_eq!(status, StatusCode::OK);
+    let panel = related_section(&body);
+    assert!(!panel.contains("Ideanumber"), "{panel}");
+    assert!(panel.contains("No related ideas yet"));
+}
+
+#[tokio::test]
+async fn idea_page_related_panel_labels_two_hop_ideas_and_escapes_titles() {
+    let (state, vault) = test_state();
+    seed_idea(&vault, "ay", "Ay", &[], "Links [[bee]].\n");
+    seed_idea(
+        &vault,
+        "bee",
+        "Bee <script>x</script>",
+        &[],
+        "Links [[sea]].\n",
+    );
+    seed_idea(&vault, "sea", "Sea", &[], "Leaf.\n");
+    reindex_state(&state, &vault);
+
+    let (_, page) = get(state, "/idea/ay").await;
+    let panel = related_section(&page);
+    assert!(panel.contains("via bee"), "got {panel}");
+    assert!(panel.contains("/idea/sea"), "got {panel}");
+    assert!(
+        !panel.contains("<script>x</script>"),
+        "title must be escaped: {panel}"
+    );
+}
+
+#[tokio::test]
+async fn idea_page_related_panel_caps_drift_carriers() {
+    let (state, vault) = test_state();
+    seed_idea(&vault, "own", "Own", &["system-design"], "Body.\n");
+    for i in 0..8 {
+        seed_idea(
+            &vault,
+            &format!("carrier-{i}"),
+            "Carrier",
+            &["systems-design"],
+            "Body.\n",
+        );
+    }
+    reindex_state(&state, &vault);
+
+    let (_, page) = get(state, "/idea/own").await;
+    let panel = related_section(&page);
+    assert!(panel.contains("carrier-4"), "got {panel}");
+    assert!(!panel.contains("carrier-5"), "got {panel}");
+    assert!(panel.contains("+3 more"), "got {panel}");
+}

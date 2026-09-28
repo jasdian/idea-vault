@@ -95,10 +95,10 @@ fn recent_fact_titles(conn: &Connection, slug: &str) -> Result<Vec<String>, Inde
         .collect())
 }
 
-// A direct neighbour's pair reason names the queried idea by slug in its `link:` detail; the
-// block must never name it, so that slug becomes a neutral phrase. Tag details are tag names,
-// not idea references, and are left alone.
-fn redact_own(reason: &str, own: &str) -> String {
+/// Replace the queried idea's own slug inside `link:` reasons with a neutral phrase, so a block
+/// or panel about an idea never names that idea. Tag details are tag names, not idea
+/// references, and are left alone.
+pub fn redact_own(reason: &str, own: &str) -> String {
     reason
         .split("; ")
         .map(|part| match part.strip_prefix("link: ") {
@@ -131,7 +131,8 @@ fn replace_slug_token(text: &str, slug: &str) -> String {
     out
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> String {
+/// Collapse whitespace and cut to `max_chars` characters, ending with an ellipsis when cut.
+pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     let text = one_line(text);
     match text.char_indices().nth(max_chars) {
         Some((cut, _)) => format!("{}…", &text[..cut]),

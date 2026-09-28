@@ -875,6 +875,12 @@ pub async fn idea_page(
             .render()
             .map_err(|e| WebError::Internal(format!("template render: {e}")))?
     };
+    let related_html = {
+        use askama::Template as _;
+        build_related_panel(&state, &slug, &idea.frontmatter.tags)
+            .render()
+            .map_err(|e| WebError::Internal(format!("template render: {e}")))?
+    };
     Ok(IdeaPage {
         title: idea.frontmatter.title.clone(),
         slug: idea.frontmatter.slug.clone(),
@@ -885,8 +891,104 @@ pub async fn idea_page(
         artifacts_html,
         tags_html,
         sources_html,
+        related_html,
     })
 }
+
+fn build_related_panel(
+    state: &AppState,
+    slug: &str,
+    own_tags: &[String],
+) -> crate::web::templates::RelatedPanel {
+    use crate::memory::related::{redact_own, truncate_chars, MAX_RELATED, MIN_RELATED_SCORE};
+    use crate::web::templates::{RelatedEntry, RelatedPanel, TagDriftNote};
+
+    let empty = RelatedPanel {
+        entries: Vec::new(),
+        drift: Vec::new(),
+    };
+    let conn = match state.db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(slug = %slug, error = %e, "db mutex poisoned; empty related panel");
+            return empty;
+        }
+    };
+    let related = crate::index::queries::related_ideas(&conn, slug, MAX_RELATED);
+    let drift = crate::index::queries::tag_near_duplicates(&conn);
+    drop(conn);
+    let (related, drift) = match (related, drift) {
+        (Ok(related), Ok(drift)) => (related, drift),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::warn!(slug = %slug, error = %e, "related panel skipped");
+            return empty;
+        }
+    };
+
+    let entries = related
+        .into_iter()
+        .filter(|idea| idea.score >= MIN_RELATED_SCORE)
+        .map(|idea| {
+            let hop_label = if idea.hops == 1 {
+                "linked".to_string()
+            } else {
+                idea.reasons
+                    .first()
+                    .and_then(|r| r.strip_prefix("via "))
+                    .and_then(|r| r.split_whitespace().next())
+                    .map(|mid| format!("via {mid}"))
+                    .unwrap_or_else(|| format!("{} hops", idea.hops))
+            };
+            let reasons = idea
+                .reasons
+                .iter()
+                .take(3)
+                .map(|r| {
+                    let r = if idea.hops == 1 {
+                        redact_own(r, slug)
+                    } else {
+                        r.clone()
+                    };
+                    truncate_chars(&r, 120)
+                })
+                .collect();
+            RelatedEntry {
+                slug: idea.slug,
+                title: idea.title,
+                hop_label,
+                reasons,
+            }
+        })
+        .collect();
+
+    let drift = drift
+        .into_iter()
+        .filter_map(|pair| {
+            let (own_tag, other_tag, others) = if own_tags.contains(&pair.a) {
+                (pair.a, pair.b, pair.b_ideas)
+            } else if own_tags.contains(&pair.b) {
+                (pair.b, pair.a, pair.a_ideas)
+            } else {
+                return None;
+            };
+            let carriers: Vec<String> = others.into_iter().filter(|s| s != slug).collect();
+            let mut shown = carriers[..carriers.len().min(MAX_DRIFT_CARRIERS)].join(", ");
+            if carriers.len() > MAX_DRIFT_CARRIERS {
+                shown.push_str(&format!(" +{} more", carriers.len() - MAX_DRIFT_CARRIERS));
+            }
+            Some(TagDriftNote {
+                own_tag,
+                other_tag,
+                carriers: shown,
+            })
+        })
+        .take(MAX_DRIFT_NOTES)
+        .collect();
+    RelatedPanel { entries, drift }
+}
+
+const MAX_DRIFT_CARRIERS: usize = 5;
+const MAX_DRIFT_NOTES: usize = 5;
 
 /// Form body for `POST /idea/{slug}/rename` — the new title only. The slug is immutable here (see
 /// [`rename_idea`]'s doc); there is no separate field for it.

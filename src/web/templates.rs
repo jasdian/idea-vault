@@ -52,6 +52,31 @@ pub struct IdeaPage {
     /// The attached-sources row (`_idea_sources.html`), pre-rendered so the attach editor can
     /// swap just it — same split as `tags_html`.
     pub sources_html: String,
+    /// The related-ideas panel (`_related.html`), pre-rendered like the other panels.
+    pub related_html: String,
+}
+
+/// One related idea in the idea page's related panel.
+pub struct RelatedEntry {
+    pub slug: String,
+    pub title: String,
+    pub hop_label: String,
+    pub reasons: Vec<String>,
+}
+
+/// A tag this idea carries that looks like drift of another tag in the vault.
+pub struct TagDriftNote {
+    pub own_tag: String,
+    pub other_tag: String,
+    pub carriers: String,
+}
+
+/// Partial: the related-ideas panel (`templates/_related.html`).
+#[derive(Template)]
+#[template(path = "_related.html")]
+pub struct RelatedPanel {
+    pub entries: Vec<RelatedEntry>,
+    pub drift: Vec<TagDriftNote>,
 }
 
 /// Partial: the idea-page title block (`templates/_idea_title.html`) — the `h1` plus its inline
