@@ -8,11 +8,13 @@
 //! `workflows` discard them (only a final synthesis becomes a conversation turn), while
 //! `knowledge` persists each lens's findings as an artifact file (docs/adr/0015).
 
+use std::collections::BTreeMap;
+
 use tokio::sync::Semaphore;
 
 use crate::ai::contract;
 use crate::ai::ollama::ChatMessage;
-use crate::ai::LlmBackend;
+use crate::ai::{LlmBackend, RoleProfile};
 use crate::concepts::skills::SkillRegistry;
 use crate::concepts::ConceptError;
 use crate::domain::SkillRole;
@@ -32,6 +34,34 @@ pub enum AgentRole {
 }
 
 impl AgentRole {
+    /// Every role, in canonical order.
+    pub const ALL: [AgentRole; 6] = [
+        AgentRole::Critic,
+        AgentRole::Researcher,
+        AgentRole::Advocate,
+        AgentRole::Harvester,
+        AgentRole::Synthesizer,
+        AgentRole::Auditor,
+    ];
+
+    /// The role's default call profile (docs/adr/0026): the extractive and judging roles run
+    /// cold, the adversarial and advocating roles hot, the synthesizer in between. A blank claude
+    /// model or effort inherits the global setting.
+    pub fn default_profile(&self) -> RoleProfile {
+        let (temperature, claude_effort) = match self {
+            AgentRole::Harvester => (0.2, "low"),
+            AgentRole::Auditor => (0.2, "high"),
+            AgentRole::Synthesizer => (0.5, "high"),
+            AgentRole::Researcher => (0.7, "medium"),
+            AgentRole::Critic | AgentRole::Advocate => (0.9, ""),
+        };
+        RoleProfile {
+            temperature,
+            claude_model: String::new(),
+            claude_effort: claude_effort.to_string(),
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentRole::Critic => "critic",
@@ -95,6 +125,14 @@ impl From<SkillRole> for AgentRole {
     }
 }
 
+/// The boot-time role profile map, keyed by [`AgentRole::as_str`] (`ai::LlmSettings::role_profiles`).
+pub fn default_role_profiles() -> BTreeMap<String, RoleProfile> {
+    AgentRole::ALL
+        .iter()
+        .map(|r| (r.as_str().to_string(), r.default_profile()))
+        .collect()
+}
+
 /// One bounded unit of work for an agent: a role, an optional skill lens, and a budgeted context
 /// block (docs/06-concepts/agents.md "I/O contract").
 #[derive(Debug, Clone)]
@@ -147,17 +185,17 @@ pub async fn run_agent(
 ) -> Result<AgentResult, ConceptError> {
     let prompt = build_prompt(registry, &task)?;
 
+    let llm = ollama.for_role(task.role.as_str());
     let content = {
         let _permit = ai_semaphore
             .acquire()
             .await
             .map_err(|_| ConceptError::SemaphoreClosed)?;
-        ollama
-            .chat(vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-            }])
-            .await?
+        llm.chat(vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }])
+        .await?
     };
 
     // Repair only, never retry (docs/adr/0023): a retry per fan-out agent would double the
@@ -226,5 +264,44 @@ mod tests {
             build_prompt(&registry, &task).unwrap_err(),
             ConceptError::UnknownSkill(name) if name == "not-a-skill"
         ));
+    }
+
+    #[test]
+    fn all_lists_every_role_variant() {
+        // Exhaustive: a new variant fails to compile here until it is placed in `ALL`.
+        let in_all = |r: AgentRole| AgentRole::ALL.contains(&r);
+        for role in AgentRole::ALL {
+            match role {
+                AgentRole::Critic
+                | AgentRole::Researcher
+                | AgentRole::Advocate
+                | AgentRole::Harvester
+                | AgentRole::Synthesizer
+                | AgentRole::Auditor => assert!(in_all(role)),
+            }
+        }
+        assert_eq!(AgentRole::ALL.len(), 6);
+    }
+
+    #[test]
+    fn default_profiles_stay_within_the_settings_bands() {
+        let profiles = default_role_profiles();
+        for role in AgentRole::ALL {
+            let p = &profiles[role.as_str()];
+            assert!((0.0..=2.0).contains(&p.temperature), "{}", role.as_str());
+            assert!(matches!(
+                p.claude_effort.as_str(),
+                "" | "low" | "medium" | "high"
+            ));
+        }
+    }
+
+    #[test]
+    fn extractive_roles_default_colder_than_adversarial_ones() {
+        let t = |r: AgentRole| r.default_profile().temperature;
+        assert!(t(AgentRole::Harvester) < t(AgentRole::Synthesizer));
+        assert!(t(AgentRole::Auditor) < t(AgentRole::Synthesizer));
+        assert!(t(AgentRole::Synthesizer) < t(AgentRole::Critic));
+        assert!(t(AgentRole::Synthesizer) < t(AgentRole::Advocate));
     }
 }

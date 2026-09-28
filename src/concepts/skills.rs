@@ -10,6 +10,7 @@ use crate::ai::budget::{assemble_context, AssembledContext, ContextBudget, Conte
 use crate::ai::contract;
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
+use crate::concepts::agents::AgentRole;
 use crate::concepts::ConceptError;
 use crate::domain::frontmatter::parse_skill;
 use crate::domain::{slug, OutputContract, SkillRole, SkillStage};
@@ -440,8 +441,9 @@ pub async fn invoke(
     progress(&format!("running {}", skill.name));
     let context = hydrate_context(vault_dir, idea_slug, budget)?;
     let prompt = skill.prompt.replace("{context}", &context.text);
+    let llm = ollama.for_role(AgentRole::from(skill.role).as_str());
     let output = ask_on_contract(
-        ollama,
+        &llm,
         ai_semaphore,
         prompt,
         skill.contract,

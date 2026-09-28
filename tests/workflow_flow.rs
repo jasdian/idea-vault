@@ -326,3 +326,67 @@ async fn ready_to_build_folds_audited_findings_into_a_fenced_build_prompt() {
     ));
     assert!(!convo.contains("Good luck"));
 }
+
+fn sampled_temperatures(mock: &support::MockOllama) -> Vec<f64> {
+    mock.chat_bodies()
+        .iter()
+        .map(|b| {
+            let v: serde_json::Value = serde_json::from_str(b).unwrap();
+            v["options"]["temperature"].as_f64().unwrap()
+        })
+        .collect()
+}
+
+fn ready_to_build_mock_script() -> Vec<ChatScript> {
+    let mut scripts: Vec<ChatScript> = (0..5).map(|i| tokens(&format!("finding {i}"))).collect();
+    scripts.push(tokens("```\nbuild it\n```"));
+    scripts
+}
+
+async fn run_ready_to_build(role_tuning: bool) -> Vec<f64> {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(&["llama3.2"], ready_to_build_mock_script()).await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let mut s = client.settings();
+    s.role_tuning = role_tuning;
+    s.role_profiles = idea_vault::concepts::agents::default_role_profiles();
+    client.set_settings(s);
+    let semaphore = Arc::new(Semaphore::new(1));
+
+    run_workflow(
+        &client,
+        &semaphore,
+        &SkillRegistry::builtin(),
+        tmp.path(),
+        "i",
+        "ready-to-build",
+        ContextBudget::new(4096),
+        false,
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+    sampled_temperatures(&mock)
+}
+
+#[tokio::test]
+async fn role_tuning_samples_harvesters_cold_and_the_synthesizer_warmer() {
+    let temps = run_ready_to_build(true).await;
+    assert_eq!(temps.len(), 6);
+    for t in &temps[..5] {
+        assert!((t - 0.2).abs() < 1e-6, "harvester sampled at {t}");
+    }
+    assert!(
+        (temps[5] - 0.5).abs() < 1e-6,
+        "synthesizer sampled at {}",
+        temps[5]
+    );
+}
+
+#[tokio::test]
+async fn role_tuning_off_samples_every_step_at_the_global_temperature() {
+    let temps = run_ready_to_build(false).await;
+    assert_eq!(temps.len(), 6);
+    assert!(temps.iter().all(|t| (t - 0.7).abs() < 1e-6), "{temps:?}");
+}

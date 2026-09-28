@@ -279,8 +279,8 @@ pub async fn run_workflow(
                     .and_then(|s| registry.get(s))
                     .map_or(OutputContract::Free, |s| s.contract);
                 let prompt = build_prompt(registry, &task)?;
-                match ask_on_contract(ollama, ai_semaphore, prompt, contract, label, progress).await
-                {
+                let llm = ollama.for_role(step.role.as_str());
+                match ask_on_contract(&llm, ai_semaphore, prompt, contract, label, progress).await {
                     Ok(answer) if last => output = answer,
                     Ok(answer) => carried.push(format!("## Prior stage: {label}\n{answer}")),
                     Err(e) if last => return Err(e),

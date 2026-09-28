@@ -247,3 +247,37 @@ async fn build_prompt_persists_only_the_fenced_block() {
     );
     assert!(!convo.contains("Good luck") && !convo.contains("Here is your prompt"));
 }
+
+#[tokio::test]
+async fn a_skill_invocation_samples_at_its_role_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["```\nbuild it\n```".into()]),
+    )
+    .await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let mut s = client.settings();
+    s.role_tuning = true;
+    s.role_profiles = idea_vault::concepts::agents::default_role_profiles();
+    client.set_settings(s);
+    let registry = SkillRegistry::builtin();
+    let skill = registry.get("build-prompt").unwrap();
+
+    skills::invoke(
+        &client,
+        &Semaphore::new(1),
+        tmp.path(),
+        "i",
+        skill,
+        ContextBudget::new(4096),
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+
+    let body: serde_json::Value = serde_json::from_str(&mock.chat_bodies()[0]).unwrap();
+    let t = body["options"]["temperature"].as_f64().unwrap();
+    assert!((t - 0.5).abs() < 1e-6, "synthesizer skill sampled at {t}");
+}
