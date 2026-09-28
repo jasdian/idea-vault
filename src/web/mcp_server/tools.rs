@@ -1,10 +1,17 @@
 //! The MVP tool catalog (docs/adr/0024) and the synchronous half of tool dispatch.
 //!
-//! `chat` and `store_idea` are declared [`TaskSupport::Required`] in [`catalog`] — the `rmcp`
-//! dispatch layer enforces that requirement before `call_sync` is ever reached for them (a plain
-//! `tools/call` for either name gets `-32601 Method not found` from the framework itself), so
-//! `call_sync` only ever actually handles the five synchronous tools. The task-mode path for
-//! `chat`/`store_idea` lives in `tasks.rs`.
+//! `chat` and `store_idea` are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
+//! with `task:{}` takes the Task lifecycle in `tasks.rs` (`enqueue_task` → `tasks/get` →
+//! `tasks/result`), while a plain `tools/call` from a Task-unaware client is routed by
+//! `call_sync` to [`super::tasks::TaskRegistry::call_sync_bounded`] — the same claim/spawn and
+//! the same terminal cache, plus a short bounded wait (docs/adr/0028).
+//!
+//! Until ADR-0028 both tools were [`TaskSupport::Required`]: the `rmcp` dispatch layer rejected a
+//! plain `tools/call` for either with `-32601 Method not found` before `call_sync` was reached, so
+//! `call_sync` only ever handled the five synchronous tools. That constraint was relaxed because a
+//! client without Tasks support (Claude Code's own MCP client among them) could not call them at
+//! all; flipping the two `TaskSupport` values back is the whole revert if the bounded wait ever
+//! proves the wrong trade.
 
 use std::sync::Arc;
 
@@ -17,6 +24,8 @@ use crate::index::{self, queries};
 use crate::vault::store;
 use crate::web::routes::ideas::create_idea_core;
 use crate::web::routes::memory::reopen_idea_core;
+
+use super::tasks::TaskRegistry;
 
 fn to_schema(v: Value) -> Arc<JsonObject> {
     Arc::new(v.as_object().cloned().unwrap_or_default())
@@ -94,8 +103,10 @@ pub(super) fn catalog() -> Vec<Tool> {
         ),
         Tool::new(
             "chat",
-            "Send one discussion turn to the idea's foil and get its reply. Long-running: MUST \
-             be invoked as a task (tools/call with task:{}); poll tasks/get then tasks/result.",
+            "Send one discussion turn to the idea's foil and get its reply. Long-running: prefer \
+             invoking it as a task (tools/call with task:{}) and polling tasks/get then \
+             tasks/result. A plain call waits a few seconds; if the reply is not ready yet it \
+             returns a 'still running' note — call again with the same arguments to collect it.",
             to_schema(json!({
                 "type": "object",
                 "properties": {
@@ -106,12 +117,16 @@ pub(super) fn catalog() -> Vec<Tool> {
                 "additionalProperties": false,
             })),
         )
-        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Required)),
+        // Was `TaskSupport::Required` until ADR-0028: a Task-unaware client could not call the
+        // tool at all (rmcp rejected the plain call with -32601). `Optional` keeps the task path
+        // identical and adds the bounded-wait plain path; revert to `Required` to drop the latter.
+        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
         Tool::new(
             "store_idea",
             "Consolidate the discussion and extract memory, transitioning the idea to Stored. \
-             Long-running: MUST be invoked as a task (tools/call with task:{}); poll tasks/get \
-             then tasks/result.",
+             Long-running: prefer invoking it as a task (tools/call with task:{}) and polling \
+             tasks/get then tasks/result. A plain call waits a few seconds; if not finished yet \
+             it returns a 'still running' note — call again with the same slug to collect it.",
             to_schema(json!({
                 "type": "object",
                 "properties": { "slug": { "type": "string" } },
@@ -119,18 +134,22 @@ pub(super) fn catalog() -> Vec<Tool> {
                 "additionalProperties": false,
             })),
         )
-        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Required)),
+        // Was `TaskSupport::Required` until ADR-0028 — same reasoning as `chat` above.
+        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
     ]
 }
 
-/// Dispatch a plain (non-task) `tools/call`. `chat`/`store_idea` never reach here in practice —
-/// see the module doc — but are still handled defensively for a client that somehow bypasses the
-/// framework's task-support check.
+/// Dispatch a plain (non-task) `tools/call`. The five synchronous tools answer inline;
+/// `chat`/`store_idea` take the bounded-wait path on the shared task registry (module doc).
 pub(super) async fn call_sync(
     state: &AppState,
+    tasks: &TaskRegistry,
     name: &str,
     args: Option<JsonObject>,
 ) -> Result<CallToolResult, McpError> {
+    if matches!(name, "chat" | "store_idea") {
+        return tasks.call_sync_bounded(state, name, args).await;
+    }
     let args = args.map(Value::Object).unwrap_or(Value::Null);
     match name {
         "list_ideas" => list_ideas(state),
@@ -138,12 +157,6 @@ pub(super) async fn call_sync(
         "search" => search(state, &args),
         "create_idea" => create_idea(state, &args),
         "reopen_idea" => reopen_idea(state, &args).await,
-        "chat" | "store_idea" => Err(McpError::invalid_params(
-            format!(
-                "'{name}' is long-running — call it with task:{{}} (see tasks/get, tasks/result)"
-            ),
-            None,
-        )),
         _ => Err(McpError::invalid_params(
             format!("unknown tool '{name}'"),
             None,
@@ -283,7 +296,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_is_stable_and_marks_long_running_tools_as_task_required() {
+    fn catalog_is_stable_and_marks_long_running_tools_as_task_optional() {
         let tools = catalog();
         assert_eq!(tools.len(), 7);
         let mut seen = std::collections::HashSet::new();
@@ -294,12 +307,14 @@ mod tests {
                 t.name
             );
         }
+        // `Required` until ADR-0028 (a Task-unaware client could not call these at all); the
+        // Task path is unchanged, the plain path is the bounded wait in `tasks.rs`.
         for name in ["chat", "store_idea"] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(
                 t.task_support(),
-                TaskSupport::Required,
-                "{name} must require task mode"
+                TaskSupport::Optional,
+                "{name} must be callable both as a task and plainly"
             );
         }
         for name in [

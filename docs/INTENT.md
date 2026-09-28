@@ -42,3 +42,36 @@ want an honest experiment that decides whether embeddings are worth building at 
 - `vault_search` exists for the offline experiment only and is never exposed to the model.
 - The phase-2 embeddings verdict follows the pre-registered kill criterion and lands in ADR-0027.
 - No `unsafe`; `scripts/check-invariants.sh` stays green.
+
+# Intent — optional Tasks support for chat/store_idea (MCP inbound)
+
+I want weaker MCP clients — ones that don't speak the Tasks primitive (SEP-1686), like Claude
+Code's own MCP client — to still be able to call `chat` and `store_idea` over `/api/mcp`, instead
+of being rejected outright. Task-capable clients keep using `task:{}` exactly as today.
+
+## Acceptance criteria
+
+- `chat` and `store_idea` are `TaskSupport::Optional`, not `Required`; a task-mode call
+  (`tools/call` with `task:{}`) behaves exactly as it does today, unchanged.
+- A plain (non-task) `tools/call` for `chat`/`store_idea` no longer errors with "call it with
+  task:{}" — it does real work.
+- No model call is ever awaited unboundedly on the request thread: a plain call waits a short,
+  bounded window for the job to finish, then, if it hasn't, returns without erroring and without
+  cancelling the job — the job keeps running in the background exactly like every other AI turn
+  (ADR-0010), and the caller can call the tool again to pick up the result once it's ready.
+- The bounded-wait branch reuses the same validate/claim/spawn logic `enqueue_task` already uses —
+  no second copy of the business rules — and shares its terminal-state cache, so a task-mode
+  `tasks/get`/`tasks/result` poll and a plain-call retry racing on the same idea can never both
+  read `web::jobs::peek`'s one-shot terminal slot and roll the other over to a false `Idle`.
+- A plain retry for the same idea while its job is still running reattaches to that same in-flight
+  job instead of erroring "already busy" or spawning a second one; once that job's result has been
+  served once, a later plain call for the same idea starts a fresh job rather than replaying the
+  stale cached reply.
+- The code keeps a clear marker of the fact that these two tools were `TaskSupport::Required`
+  before this change, and why, so the constraint can be reasoned about — and reinstated — later;
+  this is not a silent relaxation.
+- ADR-0028 (ADR-0027 is already reserved above for the cross-idea-retrieval embeddings verdict)
+  records this as a scoped, deliberate exception to ADR-0010's "never block the request thread on
+  a model call," and explains how it differs from the "blocking call_tool inline" alternative
+  ADR-0024 already considered and rejected.
+- Every commit ships through this gate: `bash scripts/gate.sh` green.

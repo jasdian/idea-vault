@@ -223,26 +223,338 @@ async fn get_idea_on_a_missing_slug_is_a_tool_error_not_a_protocol_error() {
     );
 }
 
+/// Count `## <role>` turn headings in a conversation file — the on-disk assertion every plain-call
+/// test below needs (markdown-is-truth: the MCP response alone proves nothing durable).
+fn count_turns(conversation: &str, role: &str) -> usize {
+    conversation
+        .lines()
+        .filter(|l| *l == format!("## {role}"))
+        .count()
+}
+
+/// ADR-0028: a Task-unaware client calls `chat` plainly; a fast model finishes inside the bounded
+/// wait and the reply comes back in the `CallToolResult` itself, exactly like a synchronous tool.
 #[tokio::test]
-async fn chat_must_be_invoked_as_a_task() {
-    let (state, _vault) = test_state();
+async fn plain_chat_call_returns_the_reply_when_the_model_finishes_within_the_wait() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["a quick foil reply".into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
     let state = with_mcp_token(state, TOKEN);
     let app = build_router(state);
     let session = handshake(&app).await;
 
-    call_tool(&app, &session, "create_idea", json!({ "title": "Chatty" })).await;
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Plain Chat" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
 
-    // A plain (non-task) tools/call for a Required-task tool never reaches our handler at all —
-    // the rmcp dispatch layer itself rejects it with -32601 before `call_tool` runs.
+    let result = call_tool(
+        &app,
+        &session,
+        "chat",
+        json!({ "slug": slug, "message": "steelman this" }),
+    )
+    .await;
+    assert_ne!(
+        result["isError"], true,
+        "plain chat must not be a tool error: {result}"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("a quick foil reply"),
+        "expected the foil reply in the plain-call result: {result}"
+    );
+
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert_eq!(count_turns(&conversation, "user"), 1, "{conversation}");
+    assert_eq!(count_turns(&conversation, "assistant"), 1, "{conversation}");
+    assert!(conversation.contains("a quick foil reply"));
+}
+
+/// ADR-0028: when the model outlives the bounded wait, the plain call returns a non-error
+/// "still running" note (the job keeps running detached, ADR-0010), and a plain retry with the
+/// same arguments reattaches to that job and serves its result once — no duplicate turn.
+#[tokio::test]
+async fn plain_chat_call_beyond_the_wait_says_still_running_and_a_retry_picks_up_the_result() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::TokensAfterDelay {
+            tokens: vec!["a slow foil reply".into()],
+            delay_ms: 4_500,
+        },
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Slow Chat" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
+    let args = json!({ "slug": slug, "message": "take your time" });
+
+    let first = call_tool(&app, &session, "chat", args.clone()).await;
+    assert_ne!(
+        first["isError"], true,
+        "a still-running job must not be reported as an error: {first}"
+    );
+    let first_text = first["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        first_text.contains("still running"),
+        "expected the still-running note: {first}"
+    );
+    assert!(
+        !first_text.contains("a slow foil reply"),
+        "the reply cannot have arrived yet: {first}"
+    );
+
+    // The retry's own bounded wait outlasts the remaining mock delay, so it sees the result.
+    let mut reply_text = String::new();
+    for _ in 0..10 {
+        let again = call_tool(&app, &session, "chat", args.clone()).await;
+        assert_ne!(again["isError"], true, "{again}");
+        reply_text = again["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if reply_text.contains("a slow foil reply") {
+            break;
+        }
+    }
+    assert!(
+        reply_text.contains("a slow foil reply"),
+        "the retry never surfaced the finished reply: {reply_text}"
+    );
+
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert_eq!(
+        count_turns(&conversation, "user"),
+        1,
+        "the retry must not append a second user turn: {conversation}"
+    );
+    assert_eq!(
+        count_turns(&conversation, "assistant"),
+        1,
+        "exactly one assistant reply must land: {conversation}"
+    );
+    assert_eq!(mock.chat_bodies().len(), 1, "exactly one model call");
+}
+
+/// ADR-0028: the common real-world retry — the job finished *between* the still-running note and
+/// the retry. The retry must reattach to the finished task and serve its cached result, not claim
+/// a second job (which would append a duplicate user turn and fire a second model call).
+#[tokio::test]
+async fn plain_chat_retry_after_the_job_finished_serves_the_result_without_a_second_turn() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::TokensAfterDelay {
+            tokens: vec!["the finished reply".into()],
+            delay_ms: 3_500,
+        },
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Late Retry" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
+    let args = json!({ "slug": slug, "message": "finish without me" });
+
+    let first = call_tool(&app, &session, "chat", args.clone()).await;
+    let first_text = first["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        first_text.contains("still running"),
+        "expected the still-running note: {first}"
+    );
+
+    // Let the job finish (3.5s mock delay vs the 3s wait) before retrying.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    let again = call_tool(&app, &session, "chat", args).await;
+    assert_ne!(again["isError"], true, "{again}");
+    let text = again["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("the finished reply"),
+        "the retry must serve the finished reply, not a note or a fresh call: {again}"
+    );
+
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert_eq!(
+        count_turns(&conversation, "user"),
+        1,
+        "the retry must not append a duplicate user turn: {conversation}"
+    );
+    assert_eq!(count_turns(&conversation, "assistant"), 1, "{conversation}");
+    assert_eq!(mock.chat_bodies().len(), 1, "exactly one model call");
+}
+
+/// ADR-0028: a plain `chat` with a *different* message while the previous one is still running
+/// is a genuinely new operation on a busy idea — an honest "already busy" error, exactly like
+/// task mode; the new message must neither be swallowed nor persisted.
+#[tokio::test]
+async fn plain_chat_with_a_different_message_while_busy_is_an_already_busy_error() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::TokensAfterDelay {
+            tokens: vec!["reply to the first".into()],
+            delay_ms: 3_500,
+        },
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Busy Idea" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
+
+    let first = call_tool(
+        &app,
+        &session,
+        "chat",
+        json!({ "slug": slug, "message": "the first message" }),
+    )
+    .await;
+    assert!(
+        first["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("still running"),
+        "{first}"
+    );
+
     let req = json!({
-        "jsonrpc": "2.0", "id": 9, "method": "tools/call",
-        "params": { "name": "chat", "arguments": { "slug": "chatty", "message": "hi" } }
+        "jsonrpc": "2.0", "id": 80, "method": "tools/call",
+        "params": { "name": "chat", "arguments": { "slug": slug, "message": "a second message" } }
     });
     let (_, _, body) = send(&app, mcp_request(req, Some(&session), Some(TOKEN))).await;
-    assert_eq!(
-        body["error"]["code"], -32601,
-        "expected method-not-found: {body}"
+    let err = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("already busy"),
+        "a new message on a busy idea must be an already-busy error, not a swallowed reply: {body}"
     );
+
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert!(conversation.contains("the first message"), "{conversation}");
+    assert!(
+        !conversation.contains("a second message"),
+        "the rejected message must not be persisted: {conversation}"
+    );
+    assert_eq!(count_turns(&conversation, "user"), 1, "{conversation}");
+}
+
+/// ADR-0028: a plain `chat` retry while a task-mode `chat` for the same idea is still `Working`
+/// reattaches to that in-flight task instead of erroring "already busy" or spawning a second job.
+#[tokio::test]
+async fn plain_chat_retry_reattaches_to_an_in_flight_task_for_the_same_idea() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::TokensAfterDelay {
+            tokens: vec!["the one reply".into()],
+            delay_ms: 1_500,
+        },
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Reattach Me" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 70, "method": "tools/call",
+        "params": { "name": "chat", "arguments": { "slug": slug, "message": "hi" }, "task": {} }
+    });
+    let (status, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "enqueue_task failed: {body}");
+    assert_eq!(body["result"]["task"]["status"], "working");
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Still Working (1.5s mock delay): the plain retry must neither error nor spawn a second job.
+    let req = json!({
+        "jsonrpc": "2.0", "id": 71, "method": "tools/call",
+        "params": { "name": "chat", "arguments": { "slug": slug, "message": "hi" } }
+    });
+    let (status, _, body) = send(&app, mcp_request(req, Some(&session), Some(TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("error").is_none(),
+        "a plain retry on a busy idea must reattach, not error: {body}"
+    );
+    let text = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.contains("the one reply"),
+        "the retry should have waited out the in-flight task: {body}"
+    );
+
+    // The task-mode side still sees the very same task as completed (shared terminal cache).
+    let get = json!({
+        "jsonrpc": "2.0", "id": 72, "method": "tasks/get",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(&app, mcp_request(get, Some(&session), Some(TOKEN))).await;
+    assert_eq!(body["result"]["status"], "completed", "{body}");
+
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert_eq!(count_turns(&conversation, "user"), 1, "{conversation}");
+    assert_eq!(count_turns(&conversation, "assistant"), 1, "{conversation}");
+    assert_eq!(mock.chat_bodies().len(), 1, "exactly one model call");
 }
 
 #[tokio::test]

@@ -50,7 +50,9 @@ impl ServerHandler for IdeaVaultMcpServer {
         .with_instructions(
             "idea-vault: a localhost ideation vault. list_ideas/get_idea/search read the vault; \
              create_idea starts a new Draft. chat and store_idea run a model turn and can take a \
-             while — call them with task:{} and poll tasks/get, then tasks/result once complete.",
+             while — prefer calling them with task:{} and polling tasks/get, then tasks/result \
+             once complete. Called plainly, they wait a few seconds and otherwise answer with a \
+             'still running' note: call again with the same arguments to collect the result.",
         )
     }
 
@@ -73,7 +75,7 @@ impl ServerHandler for IdeaVaultMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        tools::call_sync(&self.state, &request.name, request.arguments).await
+        tools::call_sync(&self.state, &self.tasks, &request.name, request.arguments).await
     }
 
     async fn enqueue_task(

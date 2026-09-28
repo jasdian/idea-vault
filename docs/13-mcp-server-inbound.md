@@ -102,16 +102,32 @@ only ever one caller.
 
 ```rust
 Tool::new("chat", "...", schema)
-    .with_execution(ToolExecution::new().with_task_support(TaskSupport::Required))
+    .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional))
 ```
 
-`TaskSupport::Required` means `rmcp`'s dispatch layer itself rejects a plain (non-task)
-`tools/call` for that name with `-32601 Method not found`, **before `call_tool` ever runs** — so
-`chat`/`store_idea` never actually reach `tools::call_sync` in practice; that function only
-handles them defensively. This is the cheapest possible way to force a client onto the polling
-lifecycle for exactly the tools that need it, with zero manual branching in your own handler code.
-The other three tool-support values are `Forbidden` (the default — synchronous only) and
-`Optional` (client's choice) if you want a tool callable either way.
+`TaskSupport` has three values. `Forbidden` (the default) is synchronous only. `Required` means
+`rmcp`'s dispatch layer itself rejects a plain (non-task) `tools/call` for that name with
+`-32601 Method not found`, **before `call_tool` ever runs** — the cheapest possible way to force a
+client onto the polling lifecycle, with zero branching in your own handler. `Optional` lets the
+client choose: `tools/call` with `task:{}` goes to `enqueue_task`, without it to `call_tool`.
+
+`chat`/`store_idea` were `Required` until [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md)
+and are now `Optional`, because a client that does not implement Tasks (Claude Code's own MCP
+client, for one) could otherwise not call them at all. The two paths a plain call and a task call
+take are:
+
+| Call shape | Handler | Behaviour |
+|---|---|---|
+| `tools/call` + `task:{}` | `enqueue_task` → `TaskRegistry::enqueue` | Unchanged from ADR-0024: claim + spawn, return a task id, client polls `tasks/get`/`tasks/result`. |
+| plain `tools/call` | `call_tool` → `tools::call_sync` → `TaskRegistry::call_sync_bounded` | Same claim + spawn, a real task id is minted, then a **bounded wait** (`SYNC_WAIT_BUDGET`, 3 s, polled every `SYNC_POLL_INTERVAL`, 250 ms). Finished in time → the same result `tasks/result` would give. Not finished → a non-error "still running" note naming the task id; the job keeps running, and a plain retry with the **same arguments** reattaches to that task — waiting if it is still running, or serving its cached result if it finished in the meantime — with no second job and no duplicate turn. A *different* `chat` message while the previous turn is still running is a new operation and fails "already busy", exactly like task mode. |
+
+The wait is deliberately a "did it finish fast?" grace window, not a model timeout — it must stay
+far below any HTTP client's request timeout, which is why it is a module constant in `tasks.rs`
+and not derived from `IDEA_VAULT_OLLAMA_TIMEOUT_SECS`. **Cookbook note:** if you copy this, keep
+the plain path on the *same* registry and terminal cache as the task path (next section); a plain
+path that polls your job system directly is a second reader of one-shot state and will race the
+task path. The `// Was TaskSupport::Required until ADR-0028` comments in `tools::catalog()` are
+the revert marker: flip the two values back and the plain path becomes unreachable.
 
 ## The Task↔Job bridge (`tasks.rs`)
 
@@ -136,6 +152,14 @@ onto a different app with its own "background job, polled by the client" system:
    source of truth (ADR-0002) regardless of which surface asks, so re-reading it after completion
    is the *correct* way to answer "what happened," not a shortcut around a missing feature.
 4. **`cancel_task`** (`tasks/cancel`) forwards straight to the job system's own `cancel`.
+5. **`call_sync_bounded`** (the plain-call fallback, ADR-0028) is not a fifth kind of reader: it
+   calls the same `claim_and_spawn` as step 1, registers a real task id (plus a `slug → task_id`
+   reverse index, with the `chat` message recorded on the entry, so a retry with the same
+   arguments can find its own task whether it is still running or already finished), and loops
+   on the same `observe()` terminal cache steps 2–3 use, for a fixed budget. Its result is built
+   by the same helper as step 3. Once it has served a terminal outcome it drops the reverse-index
+   entry, so the next plain call for that idea claims a fresh job instead of replaying the cached
+   reply.
 
 If you adapt this pattern for a job system that already returns a value from its completion
 callback, `get_task_result` gets simpler — you'd store that value in the task-id map instead of
@@ -166,7 +190,10 @@ test — building a fresh router per request would mint a fresh, empty `LocalSes
    `tasks/get` until `result.status != "working"` → POST `tasks/result` → assert on the payload
    **and** on the on-disk vault state (markdown-is-truth: a test that only checks the MCP response
    without checking `conversation.md`/`idea.md` on disk hasn't actually verified anything durable
-   happened).
+   happened). For a plain call: POST `tools/call` without `task` → assert on the payload directly
+   (a fast mock) or on the "still running" note followed by a retry (a `TokensAfterDelay` mock
+   longer than the wait budget), and count `## user`/`## assistant` headings in `conversation.md`
+   to prove a retry neither duplicated nor lost a turn.
 4. AI paths reuse the existing `support::spawn`/`ChatScript` mock Ollama server — never a live
    model, exactly like every other AI-path test in this suite (docs/10-testing-strategy.md).
 
@@ -183,7 +210,10 @@ defaulting to open.
 ## Scope: what's in, what's deferred
 
 **In (this pass):** `list_ideas`, `get_idea`, `search`, `create_idea`, `chat`, `store_idea`,
-`reopen_idea`, plus the two-prompt catalog.
+`reopen_idea`, plus the two-prompt catalog. `chat`/`store_idea` are callable both as a task and
+plainly (bounded wait, ADR-0028); the task path is the primary one and the only one a
+Task-unaware client can cancel from (a plain caller holding the task id from a "still running"
+note can `tasks/cancel` it too, if it speaks that method).
 
 **Deferred:** skills/swarm/workflow/extract/compact tools, fork/tags/sources-management/delete-*
 tools, MCP `resources` (idea.md/conversation.md as `resources/read` + `resources/subscribe`

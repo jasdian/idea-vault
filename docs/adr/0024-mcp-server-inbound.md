@@ -1,6 +1,6 @@
 # ADR-0024 — Inbound MCP server: exposing idea-vault to LLM clients
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0028](./0028-optional-task-support-bounded-wait.md)
 - **Date:** 2026-09-28
 - **Deciders:** Owner
 
@@ -62,7 +62,10 @@ tags/sources management, and delete-* tools, and MCP `resources` (idea.md/conver
 `chat` and `store_idea` are declared `TaskSupport::Required` in the tool catalog: the `rmcp`
 dispatch layer itself rejects a plain (non-task) `tools/call` for either with `-32601` before our
 handler ever runs, so a client is forced onto the Task lifecycle for exactly the two tools that
-run a model call. A new `web::mcp_server::tasks::TaskRegistry` bridges an MCP task id to an idea
+run a model call. *(Amended by [ADR-0028](./0028-optional-task-support-bounded-wait.md): both
+tools are now `TaskSupport::Optional` — the task path below is unchanged, and a plain call takes a
+short bounded wait on the same registry instead of being rejected.)* A new
+`web::mcp_server::tasks::TaskRegistry` bridges an MCP task id to an idea
 slug and a tool kind, and translates `web::jobs::peek`'s `Pending` states into MCP `TaskStatus`
 (`Running → Working`, `Idle → Completed`, `Failed → Failed`). `web::jobs::peek` is a **one-shot,
 consuming** read of a terminal slot (correct for its one HTTP poll endpoint) — but the Task
