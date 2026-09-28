@@ -249,6 +249,39 @@ async fn oversized_angle_list_is_400_with_no_ai_calls() {
 }
 
 #[tokio::test]
+async fn swarm_picker_caps_selection_at_max_angles() {
+    use idea_vault::web::routes::memory::MAX_ANGLES;
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["x".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion);
+
+    let (status, page) = support::web::get(state, "/idea/movable").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let offered = page.matches("class=\"swarm-angle\"").count();
+    assert!(
+        offered > MAX_ANGLES,
+        "the setup must offer more angles than the cap ({offered} offered, cap {MAX_ANGLES})"
+    );
+    assert!(
+        page.contains(&format!("data-max-angles=\"{MAX_ANGLES}\"")),
+        "the picker must carry the server's cap"
+    );
+    let menu_start = page
+        .find("data-max-angles=")
+        .expect("cap attribute present");
+    // The handler's own `>=` makes `>` useless as a tag end; the menu's first child opens with `<`.
+    let menu_tag = &page[menu_start..menu_start + page[menu_start..].find('<').unwrap()];
+    assert!(
+        menu_tag.contains("hx-on:change=")
+            && menu_tag.contains("dataset.maxAngles")
+            && menu_tag.contains(".disabled"),
+        "the element carrying the cap must also carry a change handler that reads it and disables boxes"
+    );
+    assert!(mock.chat_bodies().is_empty());
+}
+
+#[tokio::test]
 async fn run_swarm_all_agents_failed_surfaces_error_and_persists_nothing() {
     let mock = spawn(&["llama3.2"], ChatScript::EofAfter(vec![])).await;
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);

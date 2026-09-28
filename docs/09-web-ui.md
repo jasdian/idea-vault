@@ -262,7 +262,11 @@ base.html`.
   field R7 already accepted. That keeps the picker additive: with JS off, or nothing checked, the
   form posts no `angles` and `memory::run_swarm` falls back to `DEFAULT_ANGLES`. R7 still
   validates synchronously before claiming the slot: an unknown angle, more than `MAX_ANGLES` (8),
-  or a capstone-stage angle (e.g. `build-prompt`) is a `400`, not an error turn.
+  or a capstone-stage angle (e.g. `build-prompt`) is a `400`, not an error turn. The menu also
+  carries that cap (`web::templates::Actions::max_angles`, rendered as `data-max-angles`), and an
+  `hx-on:change` hook disables the unchecked boxes once that many are checked. The offered list is
+  unbounded (owner skills in `vault/.skills/` join it), so the picker can't build a selection R7
+  would reject. The route check stays authoritative.
 - **The spine strip:** `_actions.html` also renders a `spine` strip above the move chips
   (`concepts::coverage::coverage`, derived purely from `conversation.md`'s turn headings — nothing
   new is persisted): a ✓/○ per ideation-spine stage (steelman → attack → consequence → converge →

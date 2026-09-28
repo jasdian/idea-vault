@@ -207,6 +207,9 @@ pub struct Actions {
     /// the owner can aim a swarm instead of always firing the canonical four (#1). The same set
     /// as `moves`; `on` marks `swarm::DEFAULT_ANGLES`.
     pub swarm_angles: Vec<SwarmAngle>,
+    /// The most angles one swarm may be aimed at (`memory::MAX_ANGLES`); the picker disables
+    /// further checkboxes at this count so it never offers a selection the route rejects.
+    pub max_angles: usize,
     /// How many angles start checked — the caption's count, so it can't drift from the picker.
     pub default_angles: usize,
     /// The ideation spine with each stage's coverage (`concepts::coverage`, ADR-0022).

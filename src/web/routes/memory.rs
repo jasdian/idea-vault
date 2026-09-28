@@ -292,7 +292,8 @@ pub struct SwarmForm {
 /// Upper bound on one swarm request's fan-out: the semaphore bounds concurrency (K in
 /// flight), this bounds total queued work N so a single request cannot monopolize the shared
 /// AI budget for every other route (ADR-0006 spirit: bounded latency, not just bounded rate).
-const MAX_ANGLES: usize = 8;
+/// The idea page's angle picker renders this as its selection cap; this check stays authoritative.
+pub const MAX_ANGLES: usize = 8;
 
 /// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge, as a background job (D14). The
 /// swarm bounds itself on the shared semaphore and persists only the converged synthesis.

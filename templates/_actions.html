@@ -32,14 +32,18 @@
     {# The swarm chip carries an angle picker (#1). The checkboxes have no `name`, so they are not
        submitted natively; the config-request hook joins the checked ones into the single
        comma-separated `angles` field the route already accepts. With JS off the form still posts
-       (no `angles`), and the server falls back to the canonical four — the picker is additive. #}
+       (no `angles`), and the server falls back to the canonical four — the picker is additive.
+       The menu carries the route's fan-out cap: once that many angles are checked the change hook
+       disables the rest, so the picker cannot build a selection the route rejects with a 400. #}
     <form class="swarm" hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML"
           hx-on::config-request="event.detail.parameters['angles'] = Array.from(this.querySelectorAll('.swarm-angle:checked')).map(function (c) { return c.value; }).join(',')">
       <button type="submit" class="chip chip--swarm"
               title="Fans out subagents that attack the idea from the selected angles (default: premortem, cheapest-disproof, constraints, second-order effects), then converges them into one synthesis. {{ backend_note }}">swarm</button>
       <details class="swarm-picker">
-        <summary class="swarm-picker__summary" title="Choose which angles this swarm attacks from — uncheck all to fall back to the canonical four">angles ▾</summary>
-        <div class="swarm-picker__menu">
+        <summary class="swarm-picker__summary" title="Choose up to {{ max_angles }} angles this swarm attacks from — uncheck all to fall back to the canonical four">angles ▾</summary>
+        <div class="swarm-picker__menu" data-max-angles="{{ max_angles }}"
+             hx-on:change="var full = this.querySelectorAll('.swarm-angle:checked').length >= Number(this.dataset.maxAngles); this.querySelectorAll('.swarm-angle').forEach(function (c) { c.disabled = !c.checked && full; })">
+          <span class="swarm-picker__cap">up to {{ max_angles }}</span>
           {% for a in swarm_angles %}
           <label class="swarm-picker__opt" title="{{ a.title }}"><input type="checkbox" class="swarm-angle" value="{{ a.name }}"{% if a.on %} checked{% endif %}> {{ a.name }}</label>
           {% endfor %}

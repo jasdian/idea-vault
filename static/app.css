@@ -423,6 +423,11 @@ a.tagchip:hover { border-color: var(--accent); }
   padding: .12rem .2rem; cursor: pointer;
 }
 .swarm-picker__opt:hover { color: var(--accent); }
+.swarm-picker__opt:has(.swarm-angle:disabled) { color: var(--faint); cursor: not-allowed; }
+.swarm-picker__cap {
+  font-family: var(--mono); font-size: .68rem; color: var(--faint);
+  padding: 0 .2rem .2rem;
+}
 
 /* The terminal lifecycle action — pulled out of the chip rail and given its own bar so it
    reads as the commit, not just another move. Filled indigo (default .btn), not a ghost chip. */

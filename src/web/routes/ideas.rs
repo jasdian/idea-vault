@@ -371,6 +371,7 @@ pub(crate) fn render_actions(
         can_store,
         moves,
         swarm_angles,
+        max_angles: crate::web::routes::memory::MAX_ANGLES,
         default_angles,
         spine: coverage
             .stages
