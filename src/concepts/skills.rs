@@ -149,7 +149,7 @@ pub(crate) fn hydrate_context(
         .map(|e| format!("[[{}]] — {}", e.slug, e.summary))
         .collect();
     let mut facts = store::read_memory_facts(vault_dir, idea_slug)?;
-    facts.sort_by(|a, b| b.frontmatter.created.cmp(&a.frontmatter.created));
+    facts.sort_by_key(|b| std::cmp::Reverse(b.frontmatter.created));
     memory.extend(
         facts
             .iter()

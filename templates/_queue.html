@@ -1,0 +1,18 @@
+<div id="queue" class="queue"{% if oob %} hx-swap-oob="true"{% endif %}{% if items.is_empty() %} hidden{% endif %}>
+  {% if !items.is_empty() %}
+  {# An openable disclosure so a long queue folds away; each row can be dropped before it runs. #}
+  <details class="queue__box" open>
+    <summary class="queue__summary">{{ items.len() }} queued — sends in order as the foil frees up</summary>
+    <ul class="queue__list">
+      {% for it in items %}
+      <li class="queue__item">
+        <span class="queue__text">{{ it.preview }}</span>
+        <form hx-post="/idea/{{ slug }}/queue/{{ it.id }}/delete" hx-target="#queue" hx-swap="outerHTML">
+          <button type="submit" class="queue__remove" title="Remove this queued message before it sends" aria-label="Remove queued message">✕</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>

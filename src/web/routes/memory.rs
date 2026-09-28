@@ -128,6 +128,7 @@ pub async fn reopen_idea(
     let health = state.llm.probe().await;
     let skill_names = state.skills.move_names();
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
+    let queued_items = crate::web::jobs::list_queued(&state.queues, &slug);
     // The reopen form swaps `#discussion` (buttons come back with it); the subhead badge sits
     // outside, so carry an out-of-band badge flip alongside.
     let mut html = build_discussion(
@@ -140,6 +141,7 @@ pub async fn reopen_idea(
         true,
         skill_names,
         pending,
+        queued_items,
         state.llm.context_budget().max_bytes,
         state.llm.tool_context_bytes(),
     )?
@@ -239,19 +241,10 @@ pub struct SwarmForm {
     pub angles: String,
 }
 
-/// The canonical D14 angle set (docs/06-concepts/swarm.md: "swarm(idea, angles=[premortem,
-/// disproof, constraints, 2nd-order])").
 /// Upper bound on one swarm request's fan-out: the semaphore bounds concurrency (K in
 /// flight), this bounds total queued work N so a single request cannot monopolize the shared
 /// AI budget for every other route (ADR-0006 spirit: bounded latency, not just bounded rate).
 const MAX_ANGLES: usize = 8;
-
-const DEFAULT_ANGLES: [&str; 4] = [
-    "premortem",
-    "cheapest-disproof",
-    "constraints",
-    "second-order-effects",
-];
 
 /// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge, as a background job (D14). The
 /// swarm bounds itself on the shared semaphore and persists only the converged synthesis.
@@ -265,7 +258,10 @@ pub async fn run_swarm(
     guard_discussion_state(idea.frontmatter.state)?;
 
     let angles: Vec<String> = if form.angles.trim().is_empty() {
-        DEFAULT_ANGLES.iter().map(|a| a.to_string()).collect()
+        crate::concepts::swarm::DEFAULT_ANGLES
+            .iter()
+            .map(|a| a.to_string())
+            .collect()
     } else {
         form.angles
             .split(',')

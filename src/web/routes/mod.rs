@@ -131,6 +131,7 @@ mod tests {
             ai_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             skills: Arc::new(crate::concepts::skills::SkillRegistry::builtin()),
             jobs: crate::web::jobs::new_registry(),
+            queues: crate::web::jobs::new_queues(),
             mcp: Arc::new(crate::mcp::McpRegistry::load(
                 tmp.path().join(".mcp-servers.json"),
             )),

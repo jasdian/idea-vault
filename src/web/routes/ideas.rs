@@ -181,16 +181,31 @@ fn notice_block(message: &str) -> String {
     )
 }
 
+/// A bare re-arm poller: keeps the `/pending` poll alive across a beat when the idea is idle (or
+/// showing a one-shot error/notice) but the queue still has messages waiting. Same target/swap as
+/// the "thinking" indicator, so the next tick reaches `pending`, which drains the next message and
+/// re-renders a real indicator. Without this, polling stops the moment a job finishes and a queued
+/// message would sit forever.
+fn queue_poller(slug: &str) -> String {
+    // `r##"…"##` (not `r#"…"#`): the body contains `hx-target="#transcript"`, whose `"#` would
+    // otherwise close a single-hash raw string early — same reason `pending_block` uses `r##`.
+    format!(
+        r##"<div class="queue-poll" aria-hidden="true" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="#transcript" hx-swap="innerHTML"></div>"##
+    )
+}
+
 /// The complete inner HTML of `#transcript`: the turns, then a job indicator / error block if a
 /// job is active, then the usage meter. This is the single renderer every transcript response
 /// goes through — the idea page, the poll endpoint, and chat/skill/swarm/delete all emit it, so
 /// the view is identical whether freshly loaded or swapped in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn transcript_inner(
     vault_dir: &std::path::Path,
     slug: &str,
     model: &str,
     conversation: &str,
     pending: crate::web::jobs::Pending,
+    queued: usize,
     budget_bytes: usize,
     tools_bytes: usize,
 ) -> Result<String, WebError> {
@@ -211,11 +226,29 @@ pub(crate) fn transcript_inner(
         );
     }
     html.push_str(&turns_html.concat());
+    // A Running job carries its own poller (`pending_block`). When the idea is otherwise idle but
+    // messages are queued, attach a bare re-arm poller so the poll survives the beat and `pending`
+    // can drain the next message. (On a fresh `Idle`+queued render the drainer usually already
+    // started a job, so we'd be in the Running arm — this covers the cancel/error transitions.)
     match pending {
         Pending::Running { secs, note } => html.push_str(&pending_block(slug, secs, &note)),
-        Pending::Failed(msg) => html.push_str(&error_block(&msg)),
-        Pending::Notice(msg) => html.push_str(&notice_block(&msg)),
-        Pending::Idle => {}
+        Pending::Failed(msg) => {
+            html.push_str(&error_block(&msg));
+            if queued > 0 {
+                html.push_str(&queue_poller(slug));
+            }
+        }
+        Pending::Notice(msg) => {
+            html.push_str(&notice_block(&msg));
+            if queued > 0 {
+                html.push_str(&queue_poller(slug));
+            }
+        }
+        Pending::Idle => {
+            if queued > 0 {
+                html.push_str(&queue_poller(slug));
+            }
+        }
     }
     // The full transcript is never hidden (every turn is rendered above); this collapsible
     // disclosure just reveals the derived summary the model actually sees for the folded head, so
@@ -272,10 +305,23 @@ pub(crate) fn render_actions(
             description: w.description.to_string(),
         })
         .collect();
+    // The swarm angle picker (#1): every move except the `build-prompt` capstone is a candidate
+    // attack angle; the canonical `swarm::DEFAULT_ANGLES` start checked. Derived from the moves
+    // already threaded in, so no new call-site plumbing — an empty selection falls back to the
+    // same defaults server-side (memory::run_swarm), keeping the picker purely additive.
+    let swarm_angles = skill_names
+        .iter()
+        .filter(|n| n.as_str() != "build-prompt")
+        .map(|n| crate::web::templates::SwarmAngle {
+            name: n.clone(),
+            on: crate::concepts::swarm::DEFAULT_ANGLES.contains(&n.as_str()),
+        })
+        .collect();
     crate::web::templates::Actions {
         slug: slug.to_string(),
         can_store,
         skill_names,
+        swarm_angles,
         busy,
         workflows,
         backend_note: backend_note(backend),
@@ -313,12 +359,14 @@ pub(crate) fn respond_with_transcript(
     // The idea's scoped view (ADR-0021): the meter must count the source-schema bytes the next
     // turn will actually carry, not the shared instance's source-free figure.
     let llm = crate::web::routes::scoped_llm(state, slug);
+    let queued_items = crate::web::jobs::list_queued(&state.queues, slug);
     let mut html = transcript_inner(
         &state.config.vault_dir,
         slug,
         &llm.model(),
         &conversation,
         pending,
+        queued_items.len(),
         llm.context_budget().max_bytes,
         llm.tool_context_bytes(),
     )?;
@@ -347,7 +395,47 @@ pub(crate) fn respond_with_transcript(
         slug,
         true,
     )?);
+    // Fourth OOB fragment: the pending-message queue, so a send/drain/removal reflects live
+    // without a reload — the panel sits outside `#transcript`, next to the composer.
+    html.push_str(&render_queue_panel(slug, queued_items, true)?);
     Ok(axum::response::Html(html))
+}
+
+/// Render the `#queue` panel (`_queue.html`) — the pending-message FIFO with per-item remove.
+/// Shared by the transcript OOB refresh (`oob = true`), the full-page discussion render
+/// (`oob = false`), and the remove-queued route (`oob = false`, swaps `#queue`).
+pub(crate) fn render_queue_panel(
+    slug: &str,
+    items: Vec<crate::web::jobs::QueuedMessage>,
+    oob: bool,
+) -> Result<String, WebError> {
+    use askama::Template as _;
+    let items = items
+        .into_iter()
+        .map(|m| crate::web::templates::QueuedItem {
+            id: m.id,
+            preview: preview_line(&m.text),
+        })
+        .collect();
+    crate::web::templates::Queue {
+        slug: slug.to_string(),
+        items,
+        oob,
+    }
+    .render()
+    .map_err(|e| WebError::Internal(format!("template render: {e}")))
+}
+
+/// A short, single-line preview of a queued message (the full text is sent when the turn runs).
+fn preview_line(text: &str) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = one_line.chars();
+    let head: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 /// Render the memory panel (`_memory.html`) — the always-on MEMORY.md index with per-fact delete.
@@ -410,6 +498,10 @@ pub async fn pending(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<axum::response::Response, WebError> {
+    // Drain point: if the idea just went idle and a message is queued, start it now so this same
+    // poll response carries the fresh "thinking" indicator and the queue advances (no-op when a
+    // job is running, an unshown outcome is pending, or nothing is queued).
+    crate::web::routes::chat::start_next_queued(&state, &slug);
     respond_discussion_or_stored(&state, &slug)
 }
 
@@ -443,6 +535,7 @@ pub async fn history_page(
         &llm.model(),
         &conversation,
         crate::web::jobs::Pending::Idle,
+        0, // the read-only history view has no live queue
         llm.context_budget().max_bytes,
         llm.tool_context_bytes(),
     )?;
@@ -574,6 +667,7 @@ pub(crate) fn build_discussion(
     can_store: bool,
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
+    queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
     tools_bytes: usize,
 ) -> Result<crate::web::templates::Discussion, WebError> {
@@ -589,10 +683,12 @@ pub(crate) fn build_discussion(
         model,
         conversation,
         pending,
+        queued_items.len(),
         budget_bytes,
         tools_bytes,
     )?;
     let actions_html = render_actions(slug, skill_names, can_store, busy, backend, false)?;
+    let queue_html = render_queue_panel(slug, queued_items, false)?;
 
     Ok(crate::web::templates::Discussion {
         slug: slug.to_string(),
@@ -600,6 +696,7 @@ pub(crate) fn build_discussion(
         unavailable_hint,
         transcript_html,
         actions_html,
+        queue_html,
     })
 }
 
@@ -617,6 +714,7 @@ fn render_panel(
     model: &str,
     skill_names: Vec<String>,
     pending: crate::web::jobs::Pending,
+    queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
     tools_bytes: usize,
 ) -> Result<String, WebError> {
@@ -642,6 +740,7 @@ fn render_panel(
         can_store,
         skill_names,
         pending,
+        queued_items,
         budget_bytes,
         tools_bytes,
     )?
@@ -672,6 +771,9 @@ pub async fn idea_page(
     // Scoped for the meter (ADR-0021) — the probe above stays on the shared instance (health is
     // a backend property, not a per-idea one).
     let llm = crate::web::routes::scoped_llm(&state, &slug);
+    // The pending-message queue lives in-process, so it survives navigation and must render on a
+    // fresh page load (not only on OOB refreshes).
+    let queued_items = crate::web::jobs::list_queued(&state.queues, &slug);
     let panel_html = render_panel(
         vault_dir,
         &idea,
@@ -681,6 +783,7 @@ pub async fn idea_page(
         &llm.model(),
         skill_names,
         pending,
+        queued_items,
         llm.context_budget().max_bytes,
         llm.tool_context_bytes(),
     )?;

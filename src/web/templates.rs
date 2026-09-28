@@ -164,6 +164,27 @@ pub struct Discussion {
     /// The `#idea-actions` block (`_actions.html`), pre-rendered so the same partial serves the
     /// full page and the out-of-band swap transcript responses carry (empty shell in Draft).
     pub actions_html: String,
+    /// The `#queue` panel (`_queue.html`), pre-rendered — the pending-message FIFO with per-item
+    /// remove controls. Empty/hidden unless messages were sent while a job was running (#2).
+    pub queue_html: String,
+}
+
+/// One row of the pending-message queue panel (`_queue.html`).
+pub struct QueuedItem {
+    pub id: u64,
+    /// A short, single-line preview of the queued message (the full text is sent when it runs).
+    pub preview: String,
+}
+
+/// Partial: the pending-message queue (`templates/_queue.html`). The `#queue` container always
+/// renders (hidden when empty) so out-of-band transcript responses have a target; with `oob = true`
+/// the root carries `hx-swap-oob="true"`.
+#[derive(Template, WebTemplate)]
+#[template(path = "_queue.html")]
+pub struct Queue {
+    pub slug: String,
+    pub items: Vec<QueuedItem>,
+    pub oob: bool,
 }
 
 /// Partial: the state-dependent action block (moves/swarm/compact/store) (`templates/_actions.html`).
@@ -180,6 +201,10 @@ pub struct Actions {
     pub can_store: bool,
     /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
     pub skill_names: Vec<String>,
+    /// The swarm angle picker: every candidate attack angle with its default-checked state, so
+    /// the owner can aim a swarm instead of always firing the canonical four (#1). Derived from
+    /// `skill_names` (moves minus the `build-prompt` capstone); `on` marks `swarm::DEFAULT_ANGLES`.
+    pub swarm_angles: Vec<SwarmAngle>,
     /// A job is currently running for this idea. Store is a commitment action, so its button
     /// renders `disabled` while busy (a click would only bounce off `try_claim` anyway); the OOB
     /// actions refresh re-enables it once the job finishes or is cancelled.
@@ -198,6 +223,12 @@ pub struct Actions {
 pub struct WorkflowChip {
     pub name: String,
     pub description: String,
+}
+
+/// One checkbox in the swarm angle picker: the angle (a skill name) and whether it starts checked.
+pub struct SwarmAngle {
+    pub name: String,
+    pub on: bool,
 }
 
 /// One row of the artifacts panel: a file under `vault/<slug>/artifacts/` (docs/adr/0015).
