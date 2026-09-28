@@ -10,7 +10,7 @@ use std::path::Path;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection};
 
-use super::{IndexError, SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
+use super::{schema, IndexError, SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
 use crate::domain::links;
 use crate::domain::slug as domain_slug;
 use crate::vault::{store, walk};
@@ -53,10 +53,16 @@ fn ts(dt: &DateTime<Utc>) -> String {
 ///
 /// Compares the per-idea tuple (slug, title, state, created, updated, tags) between disk
 /// frontmatter and the `ideas`/`idea_tags` tables. This catches missing/extra/edited ideas —
-/// the boot-relevant drift. It deliberately does not diff conversations or fact bodies
+/// the boot-relevant drift — and reports drift whenever the index's `user_version` differs from
+/// [`schema::SCHEMA_VERSION`], so an index built before a table existed is rebuilt rather than
+/// served with that table empty. It deliberately does not diff conversations or fact bodies
 /// (post-write upserts keep those fresh; `POST /admin/reindex` is the manual override), and it
 /// skips unparsable idea dirs the same way `reindex` does, so a malformed file never wedges boot.
 pub fn check_drift(conn: &Connection, vault_dir: &Path) -> Result<bool, IndexError> {
+    let stamped: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if stamped != schema::SCHEMA_VERSION {
+        return Ok(true);
+    }
     let mut disk: Vec<String> = Vec::new();
     for entry in walk::walk_ideas(vault_dir)? {
         let idea = match store::read_idea(vault_dir, &entry.slug) {
@@ -168,6 +174,11 @@ fn reindex_inner(
 
     let tx = conn.transaction()?;
     let mut counts = ReindexCounts::default();
+
+    let stamped: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if stamped != schema::SCHEMA_VERSION {
+        schema::recreate_schema(&tx)?;
+    }
 
     // 2. Clear every derived table — full rebuild semantics.
     tx.execute_batch(
@@ -394,6 +405,7 @@ fn reindex_inner(
     // 12. Derive the typed idea-to-idea `edges` from the now-resolved links.
     derive_link_edges(&tx)?;
 
+    tx.pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(counts)
 }
@@ -1025,6 +1037,14 @@ mod tests {
             other => panic!("expected RefusingEmptyRebuild, got {other:?}"),
         }
         assert_eq!(before, snapshot(&conn), "the index must be untouched");
+        let stamped: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            stamped,
+            schema::SCHEMA_VERSION,
+            "the refusal keeps the stamp"
+        );
     }
 
     /// The escape hatch, and proof ADR-0002's unconditional rebuild identity is still available:
@@ -1583,6 +1603,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         build_fixture_vault(tmp.path());
         let mut conn = mem_conn();
+        conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION)
+            .unwrap();
 
         // Empty index + non-empty vault = drift.
         assert!(check_drift(&conn, tmp.path()).unwrap());
@@ -1604,6 +1626,48 @@ mod tests {
 
         reindex(&mut conn, tmp.path()).unwrap();
         assert!(!check_drift(&conn, tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn reindex_rebuilds_a_derived_table_whose_layout_predates_the_current_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE edges (src_idea_id INTEGER, dst_idea_id INTEGER);")
+            .unwrap();
+        schema::apply_schema(&conn).unwrap();
+
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let edges: i64 = conn
+            .query_row("SELECT COUNT(*) FROM edges WHERE detail <> ''", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(edges > 0);
+        assert!(!check_drift(&conn, tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn check_drift_true_when_the_index_predates_the_current_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert!(!check_drift(&conn, tmp.path()).unwrap());
+
+        // An index built by an older binary: idea metadata matches, the derived tables it
+        // never knew about are empty.
+        conn.execute_batch("DELETE FROM edges; DELETE FROM fact_links; PRAGMA user_version = 0;")
+            .unwrap();
+        assert!(check_drift(&conn, tmp.path()).unwrap());
+
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert!(!check_drift(&conn, tmp.path()).unwrap());
+        let edges: i64 = conn
+            .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+            .unwrap();
+        assert!(edges > 0);
     }
 
     #[test]

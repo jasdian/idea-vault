@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let mut conn = index::schema::open_or_create(&config.index_path)
         .with_context(|| format!("opening index {}", config.index_path.display()))?;
 
-    // 4. Reindex if the index has drifted from the vault (scaffold check_drift returns false).
+    // 4. Reindex if the index has drifted from the vault or predates the current schema version.
     match index::reindex::check_drift(&conn, &config.vault_dir) {
         Ok(true) => match index::reindex::reindex(&mut conn, &config.vault_dir) {
             Ok(counts) => tracing::info!(

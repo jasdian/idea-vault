@@ -1,14 +1,34 @@
 //! SQLite schema for the derived index (docs/03-data-model.md §D6).
 //!
 //! Every table here is **derived** and rebuilt by [`crate::index::reindex`]. There are no
-//! migrations: because markdown is the source of truth (ADR-0002), recovery from any schema
-//! change or corruption is `delete index.db + reindex`, not an in-place migration. All DDL is
-//! written `IF NOT EXISTS` so [`apply_schema`] is idempotent.
+//! migrations: because markdown is the source of truth (ADR-0002), a schema change bumps
+//! [`SCHEMA_VERSION`] and the next reindex drops and rebuilds every derived table; recovery from
+//! corruption is `delete index.db + reindex`. All DDL is written `IF NOT EXISTS` so
+//! [`apply_schema`] is idempotent.
 
 use rusqlite::Connection;
 use std::path::Path;
 
 use super::IndexError;
+
+/// Version of [`SCHEMA_DDL`], stamped into `PRAGMA user_version` by a completed reindex. Bump it
+/// whenever the DDL or the derivation of any table changes: an index stamped with another value
+/// was built by a different binary, so `reindex::check_drift` reports drift and `reindex` drops
+/// and recreates every derived table before rebuilding from the vault (ADR-0002).
+///
+/// 0 = unstamped (binaries before the stamp), 2 = `fact_links` + `edges`.
+pub const SCHEMA_VERSION: i64 = 2;
+
+const DERIVED_TABLES: [&str; 8] = [
+    "edges",
+    "idea_tags",
+    "fact_links",
+    "memory_facts",
+    "backlinks",
+    "search_fts",
+    "tags",
+    "ideas",
+];
 
 /// Full derived-index DDL (docs/03 §D6). Applied verbatim, idempotently.
 const SCHEMA_DDL: &str = r#"
@@ -89,6 +109,16 @@ pub fn open_or_create(path: &Path) -> Result<Connection, IndexError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     apply_schema(&conn)?;
     Ok(conn)
+}
+
+/// Drop every derived table and re-apply [`SCHEMA_DDL`], so a layout from another
+/// [`SCHEMA_VERSION`] is replaced rather than kept by `IF NOT EXISTS`. Only `reindex` calls this,
+/// inside its rebuild transaction.
+pub(crate) fn recreate_schema(conn: &Connection) -> Result<(), IndexError> {
+    for table in DERIVED_TABLES {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?;
+    }
+    apply_schema(conn)
 }
 
 /// Apply the full derived-index DDL. Idempotent (`CREATE ... IF NOT EXISTS` throughout), so it is
