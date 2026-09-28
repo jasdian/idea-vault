@@ -352,6 +352,168 @@ pub fn vault_search(
     Ok(hits)
 }
 
+/// One idea returned by [`lexical_baseline`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LexicalHit {
+    pub idea_slug: String,
+    /// `-bm25` of the idea's best-matching row; higher is better.
+    pub score: f64,
+}
+
+const LEXICAL_KINDS: &str = "('title', 'tags', 'idea_body', 'memory')";
+const LEXICAL_MAX_TOKENS: usize = 20;
+const LEXICAL_MIN_TERM_CHARS: usize = 3;
+const LEXICAL_VOCAB_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS temp.search_fts_vocab \
+                                 USING fts5vocab(main, search_fts, instance);";
+
+fn push_token(tokens: &mut Vec<String>, term: String) {
+    if tokens.len() < LEXICAL_MAX_TOKENS && !tokens.contains(&term) {
+        tokens.push(term);
+    }
+}
+
+/// The query tokens [`lexical_baseline`] runs for the idea `slug`, at most 20, in this order:
+///
+/// 1. the idea's title words, then its tag words — the tokens FTS5 `unicode61` produced for its
+///    `title` and `tags` rows (case-folded, split on non-alphanumerics), in first-occurrence
+///    order, deduplicated;
+/// 2. the idea's top TF-IDF terms by `tf * idf` descending, ties by term ascending, skipping
+///    terms already taken.
+///
+/// Only `search_fts` rows of kind `title`, `tags`, `idea_body` and `memory` count, both as the
+/// TF-IDF source and as the corpus; conversation and artifact rows are excluded. `tf` is the number of occurrences of a term in this idea's
+/// eligible rows, `df` the number of distinct ideas whose eligible rows contain it, and
+/// `idf = ln(N / df)` with `N` the number of ideas that have eligible rows. A term with
+/// `idf = 0` (present in every idea), a pure-numeric term, or a term shorter than 3 characters is
+/// never chosen by TF-IDF. Title and tag tokens count toward the 20 and are truncated too.
+///
+/// Term statistics come from an `fts5vocab` instance table created in the connection's `temp`
+/// schema on first call; the derived schema is untouched. An unknown slug yields an empty list.
+pub fn lexical_query_terms(conn: &Connection, slug: &str) -> Result<Vec<String>, IndexError> {
+    let idea_id: i64 = match conn.query_row("SELECT id FROM ideas WHERE slug = ?1", [slug], |row| {
+        row.get(0)
+    }) {
+        Ok(id) => id,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    conn.execute_batch(LEXICAL_VOCAB_DDL)?;
+
+    let mut tokens = Vec::new();
+    // CROSS JOIN pins the vocab scan as the outer loop: fts5vocab only filters on `term`, so as
+    // the inner table it would be rescanned once per search_fts row.
+    let mut stmt = conn.prepare(
+        "SELECT v.term
+         FROM temp.search_fts_vocab v CROSS JOIN search_fts s ON s.rowid = v.doc
+         WHERE s.idea_id = ?1 AND s.kind IN ('title', 'tags')
+         ORDER BY CASE s.kind WHEN 'title' THEN 0 ELSE 1 END, v.doc, v.offset",
+    )?;
+    for term in stmt.query_map([idea_id], |row| row.get::<_, String>(0))? {
+        push_token(&mut tokens, term?);
+    }
+    if tokens.len() == LEXICAL_MAX_TOKENS {
+        return Ok(tokens);
+    }
+
+    let ideas: i64 = conn.query_row(
+        &format!("SELECT COUNT(DISTINCT idea_id) FROM search_fts WHERE kind IN {LEXICAL_KINDS}"),
+        [],
+        |row| row.get(0),
+    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT v.term, SUM(s.idea_id = ?1) AS tf, COUNT(DISTINCT s.idea_id) AS df
+         FROM temp.search_fts_vocab v CROSS JOIN search_fts s ON s.rowid = v.doc
+         WHERE s.kind IN {LEXICAL_KINDS}
+         GROUP BY v.term
+         HAVING tf > 0 AND df < ?2"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![idea_id, ideas], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut ranked: Vec<(f64, String)> = Vec::new();
+    for row in rows {
+        let (term, tf, df) = row?;
+        if term.chars().count() < LEXICAL_MIN_TERM_CHARS || term.chars().all(char::is_numeric) {
+            continue;
+        }
+        ranked.push((tf as f64 * (ideas as f64 / df as f64).ln(), term));
+    }
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, term) in ranked {
+        if tokens.len() == LEXICAL_MAX_TOKENS {
+            break;
+        }
+        push_token(&mut tokens, term);
+    }
+    Ok(tokens)
+}
+
+/// Fair lexical baseline retriever: the ideas most lexically similar to the idea `slug`.
+///
+/// The query is [`lexical_query_terms`] (title words, tag words, top TF-IDF terms; at most 20
+/// tokens), each token quoted and OR-ed, run with FTS5 `bm25` against the `search_fts` rows of
+/// kind `title`, `tags`, `idea_body` and `memory` of every idea except `slug`; conversation
+/// and artifact rows never match, but FTS5 still computes the `bm25` corpus statistics (IDF,
+/// average row length) over every `search_fts` row, including them and `slug`'s own rows. The
+/// idea itself is excluded in SQL, so `limit` applies to the other ideas only. An idea's `score` is `-bm25` of
+/// its best-matching row. Results are ordered by `score` descending, then slug. An unknown slug,
+/// or an idea with no query tokens, yields an empty list.
+///
+/// This is an instrument for offline retrieval experiments, not a full-body OR-query. It is
+/// never registered as a model tool: context reaches the model by push, not pull.
+pub fn lexical_baseline(
+    conn: &Connection,
+    slug: &str,
+    limit: usize,
+) -> Result<Vec<LexicalHit>, IndexError> {
+    let terms = lexical_query_terms(conn, slug)?;
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let match_expr = terms
+        .iter()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT i.slug, bm25(search_fts)
+         FROM search_fts s
+         JOIN ideas i ON i.id = s.idea_id
+         WHERE search_fts MATCH ?1
+           AND s.kind IN {LEXICAL_KINDS}
+           AND i.slug <> ?2"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![&match_expr, slug], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+    })?;
+    let mut best: HashMap<String, f64> = HashMap::new();
+    for row in rows {
+        let (idea_slug, bm25) = row?;
+        best.entry(idea_slug)
+            .and_modify(|b| *b = b.min(bm25))
+            .or_insert(bm25);
+    }
+    let mut hits: Vec<LexicalHit> = best
+        .into_iter()
+        .map(|(idea_slug, bm25)| LexicalHit {
+            idea_slug,
+            score: -bm25,
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.idea_slug.cmp(&b.idea_slug))
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
 /// Inbound direction of D23: distinct slugs of ideas that link *to* `slug` via `[[slug]]`,
 /// sorted. Matches on `target_slug`, so it also answers "who links to this not-yet-created
 /// idea?" for forward references.
@@ -1226,5 +1388,299 @@ mod tests {
         assert!(vault_search(&conn, "", None, 5).unwrap().is_empty());
         assert!(vault_search(&conn, "   \t\n", None, 5).unwrap().is_empty());
         assert!(vault_search(&conn, "\0", None, 5).unwrap().is_empty());
+    }
+
+    fn reindexed(vault: &Path) -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        reindex(&mut conn, vault).unwrap();
+        conn
+    }
+
+    fn idea_id(conn: &Connection, slug: &str) -> i64 {
+        conn.query_row("SELECT id FROM ideas WHERE slug = ?1", [slug], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    fn hit_slugs(hits: &[LexicalHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.idea_slug.as_str()).collect()
+    }
+
+    #[test]
+    fn lexical_baseline_terms_are_capped_title_and_tags_first_and_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let words: Vec<String> = (0..30u8)
+            .map(|i| format!("qz{}{}", (b'a' + i / 5) as char, (b'a' + i % 5) as char))
+            .collect();
+        let mut body: Vec<String> = words.iter().rev().cloned().collect();
+        body.extend(std::iter::repeat_n("brimstoke".to_string(), 5));
+        write_fixture_idea(
+            tmp.path(),
+            "harbor",
+            "Glass Harbor",
+            &["energy-grid", "tidal"],
+            &format!("{}\n", body.join(" ")),
+            10,
+        );
+        write_fixture_idea(
+            tmp.path(),
+            "other",
+            "Other",
+            &[],
+            "Unrelated filler text.\n",
+            11,
+        );
+        let conn = reindexed(tmp.path());
+
+        let terms = lexical_query_terms(&conn, "harbor").unwrap();
+        assert_eq!(terms.len(), 20, "capped at 20 tokens: {terms:?}");
+        assert_eq!(terms[..5], ["glass", "harbor", "energy", "grid", "tidal"]);
+        assert_eq!(
+            terms[5], "brimstoke",
+            "highest tf·idf term follows title and tags"
+        );
+        let mut tied = words.clone();
+        tied.sort();
+        assert_eq!(
+            terms[6..],
+            tied[..14],
+            "equal tf·idf ties break by term ascending"
+        );
+        assert_eq!(terms, lexical_query_terms(&conn, "harbor").unwrap());
+    }
+
+    #[test]
+    fn lexical_baseline_skips_zero_idf_terms_and_picks_rare_repeated_word() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(
+            tmp.path(),
+            "alpha",
+            "Alpha",
+            &[],
+            "ubiquitous ubiquitous ubiquitous ubiquitous flonkery flonkery\n",
+            10,
+        );
+        write_fixture_idea(tmp.path(), "beta", "Beta", &[], "ubiquitous here\n", 11);
+        write_fixture_idea(tmp.path(), "gamma", "Gamma", &[], "ubiquitous there\n", 12);
+        let conn = reindexed(tmp.path());
+
+        let terms = lexical_query_terms(&conn, "alpha").unwrap();
+        assert!(terms.contains(&"flonkery".to_string()), "{terms:?}");
+        assert!(!terms.contains(&"ubiquitous".to_string()), "{terms:?}");
+    }
+
+    #[test]
+    fn lexical_baseline_skips_short_and_numeric_terms() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(
+            tmp.path(),
+            "alpha",
+            "Alpha",
+            &[],
+            "zq zq zq 2026 2026 2026 marrowind\n",
+            10,
+        );
+        write_fixture_idea(tmp.path(), "beta", "Beta", &[], "Beta statement.\n", 11);
+        let conn = reindexed(tmp.path());
+
+        let terms = lexical_query_terms(&conn, "alpha").unwrap();
+        assert_eq!(terms, ["alpha", "marrowind"]);
+    }
+
+    #[test]
+    fn lexical_baseline_excludes_own_slug_and_limits_after_exclusion() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(
+            tmp.path(),
+            "idea-a",
+            "Anchor",
+            &[],
+            "quorvex quorvex quorvex\n",
+            10,
+        );
+        for (hour, slug) in [(11, "idea-b"), (12, "idea-c"), (13, "idea-d")] {
+            write_fixture_idea(
+                tmp.path(),
+                slug,
+                slug,
+                &[],
+                "quorvex among many other filler words\n",
+                hour,
+            );
+        }
+        write_fixture_idea(tmp.path(), "idea-e", "idea-e", &[], "unrelated\n", 14);
+        let conn = reindexed(tmp.path());
+
+        let two = lexical_baseline(&conn, "idea-a", 2).unwrap();
+        assert_eq!(two.len(), 2, "{two:?}");
+        assert!(two.iter().all(|h| h.idea_slug != "idea-a"), "{two:?}");
+
+        let three = lexical_baseline(&conn, "idea-a", 3).unwrap();
+        assert_eq!(hit_slugs(&three), ["idea-b", "idea-c", "idea-d"]);
+        assert!(three.iter().all(|h| h.score > 0.0));
+    }
+
+    #[test]
+    fn lexical_baseline_ignores_conversation_and_artifact_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(
+            tmp.path(),
+            "alpha",
+            "Alpha",
+            &[],
+            "snorkelpin snorkelpin\n",
+            10,
+        );
+        store::append_conversation(tmp.path(), "alpha", "## user\nblorptang blorptang\n").unwrap();
+        write_fixture_idea(tmp.path(), "conv", "Conv", &[], "Nothing here.\n", 11);
+        store::append_conversation(tmp.path(), "conv", "## user\nsnorkelpin talk\n").unwrap();
+        write_fixture_idea(tmp.path(), "arti", "Arti", &[], "Nothing there.\n", 12);
+        write_fixture_idea(tmp.path(), "body", "Body", &[], "snorkelpin body\n", 13);
+        let conn = reindexed(tmp.path());
+        for (slug, content) in [
+            ("arti", "snorkelpin artifact"),
+            ("alpha", "glimmerax glimmerax glimmerax"),
+        ] {
+            conn.execute(
+                "INSERT INTO search_fts (idea_id, kind, ref, content) \
+                 VALUES (?1, 'artifact', 'run', ?2)",
+                rusqlite::params![idea_id(&conn, slug), content],
+            )
+            .unwrap();
+        }
+
+        let terms = lexical_query_terms(&conn, "alpha").unwrap();
+        assert!(terms.contains(&"snorkelpin".to_string()), "{terms:?}");
+        assert!(!terms.contains(&"blorptang".to_string()), "{terms:?}");
+        assert!(!terms.contains(&"glimmerax".to_string()), "{terms:?}");
+
+        let hits = lexical_baseline(&conn, "alpha", 10).unwrap();
+        assert_eq!(hit_slugs(&hits), ["body"]);
+    }
+
+    #[test]
+    fn lexical_baseline_ranks_rare_term_sharer_above_common_term_sharer() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(
+            tmp.path(),
+            "anchor",
+            "Anchor",
+            &[],
+            "zintharo zintharo widget\n",
+            10,
+        );
+        write_fixture_idea(tmp.path(), "rare", "Rare", &[], "zintharo notes here\n", 11);
+        write_fixture_idea(
+            tmp.path(),
+            "common",
+            "Common",
+            &[],
+            "widget notes here\n",
+            12,
+        );
+        for (hour, slug) in [(13, "x-one"), (14, "x-two"), (15, "x-three")] {
+            write_fixture_idea(tmp.path(), slug, slug, &[], "widget filler\n", hour);
+        }
+        write_fixture_idea(tmp.path(), "bystander", "Bystander", &[], "unrelated\n", 16);
+        let conn = reindexed(tmp.path());
+
+        let terms = lexical_query_terms(&conn, "anchor").unwrap();
+        assert!(terms.contains(&"widget".to_string()), "{terms:?}");
+        let hits = lexical_baseline(&conn, "anchor", 10).unwrap();
+        let slugs = hit_slugs(&hits);
+        let rare = slugs.iter().position(|s| *s == "rare").unwrap();
+        let common = slugs.iter().position(|s| *s == "common").unwrap();
+        assert!(rare < common, "{hits:?}");
+        assert!(!slugs.contains(&"bystander"), "{hits:?}");
+    }
+
+    fn write_fact(vault: &Path, idea: &str, slug: &str, body: &str) {
+        store::write_memory_fact(
+            vault,
+            idea,
+            &MemoryFact {
+                frontmatter: MemoryFactFrontmatter {
+                    slug: slug.into(),
+                    title: slug.into(),
+                    tags: vec![],
+                    created: Utc.with_ymd_and_hms(2026, 7, 7, 12, 0, 0).unwrap(),
+                    links: vec![],
+                },
+                body: body.into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn lexical_baseline_df_counts_ideas_not_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(tmp.path(), "alpha", "Alpha", &[], "quillane plans\n", 10);
+        write_fixture_idea(tmp.path(), "beta", "Beta", &[], "quillane notes\n", 11);
+        write_fixture_idea(tmp.path(), "gamma", "Gamma", &[], "unrelated\n", 12);
+        write_fact(tmp.path(), "alpha", "fact-one", "quillane again\n");
+        let conn = reindexed(tmp.path());
+
+        let terms = lexical_query_terms(&conn, "alpha").unwrap();
+        assert!(terms.contains(&"quillane".to_string()), "{terms:?}");
+    }
+
+    #[test]
+    fn lexical_baseline_reads_memory_facts_as_source_and_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(tmp.path(), "alpha", "Alpha", &[], "plain body\n", 10);
+        write_fixture_idea(tmp.path(), "beta", "Beta", &[], "other body\n", 11);
+        write_fixture_idea(tmp.path(), "gamma", "Gamma", &[], "third body\n", 12);
+        write_fact(tmp.path(), "alpha", "fact-a", "sprockelt mechanism\n");
+        write_fact(tmp.path(), "beta", "fact-b", "sprockelt elsewhere\n");
+        let conn = reindexed(tmp.path());
+
+        let terms = lexical_query_terms(&conn, "alpha").unwrap();
+        assert!(terms.contains(&"sprockelt".to_string()), "{terms:?}");
+        let hits = lexical_baseline(&conn, "alpha", 5).unwrap();
+        assert_eq!(hit_slugs(&hits).first(), Some(&"beta"), "{hits:?}");
+    }
+
+    #[test]
+    fn lexical_baseline_truncates_long_titles_and_dedupes_title_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        let title_words: Vec<String> = (0..22u8)
+            .map(|i| format!("tw{}{}", (b'a' + i / 5) as char, (b'a' + i % 5) as char))
+            .collect();
+        write_fixture_idea(
+            tmp.path(),
+            "long",
+            &title_words.join(" "),
+            &[],
+            "twaa twaa twaa rarevox rarevox\n",
+            10,
+        );
+        write_fixture_idea(tmp.path(), "other", "Other", &[], "filler\n", 11);
+        write_fixture_idea(
+            tmp.path(),
+            "short",
+            "Tidewrack",
+            &[],
+            "tidewrack tidewrack mirelune\n",
+            12,
+        );
+        let conn = reindexed(tmp.path());
+
+        let terms = lexical_query_terms(&conn, "long").unwrap();
+        assert_eq!(terms, title_words[..20]);
+        let terms = lexical_query_terms(&conn, "short").unwrap();
+        assert_eq!(terms, ["tidewrack", "mirelune"]);
+    }
+
+    #[test]
+    fn lexical_baseline_unknown_slug_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(tmp.path(), "alpha", "Alpha", &[], "Alpha statement.\n", 10);
+        let conn = reindexed(tmp.path());
+
+        assert!(lexical_query_terms(&conn, "nobody").unwrap().is_empty());
+        assert!(lexical_baseline(&conn, "nobody", 5).unwrap().is_empty());
     }
 }
