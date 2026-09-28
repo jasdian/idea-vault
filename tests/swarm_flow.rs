@@ -65,6 +65,7 @@ async fn run_swarm_audited(
         angles.iter().map(|a| a.to_string()).collect(),
         ContextBudget::new(4096),
         audit,
+        &|_| String::new(),
         &|_: &str| {},
     )
     .await
@@ -274,4 +275,62 @@ async fn with_the_audit_off_there_is_no_auditor_call() {
         .chat_bodies()
         .iter()
         .any(|b| b.contains("You are the Auditor")));
+}
+
+#[tokio::test]
+async fn related_block_reaches_every_angle_once_computed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["1. x".into()])).await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let registry = SkillRegistry::builtin();
+    let calls = AtomicUsize::new(0);
+    let provider = |_: usize| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        "## Related ideas elsewhere in the vault\n- RELATED-MARKER (`other`): link\n\n".to_string()
+    };
+    let angles = ["premortem", "devils-advocate", "constraints"];
+
+    swarm(
+        &client,
+        &Semaphore::new(2),
+        &registry,
+        tmp.path(),
+        "i",
+        angles.iter().map(|a| a.to_string()).collect(),
+        ContextBudget::new(4096),
+        true,
+        &provider,
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "computed once per fan-out");
+    let bodies = mock.chat_bodies();
+    assert_eq!(
+        bodies.len(),
+        angles.len() + 2,
+        "angles + auditor + synthesizer"
+    );
+    let (auditor, rest): (Vec<&String>, Vec<&String>) = bodies
+        .iter()
+        .partition(|b| b.contains("You are the Auditor"));
+    assert_eq!(auditor.len(), 1);
+    assert!(
+        !auditor[0].contains("RELATED-MARKER"),
+        "the audit prompt carries no related block; agent answers here never quote it"
+    );
+    let agents: Vec<&&String> = rest
+        .iter()
+        .filter(|b| !b.contains("You are the Synthesizer"))
+        .collect();
+    assert_eq!(agents.len(), angles.len());
+    for body in agents {
+        let block = body.find("RELATED-MARKER").expect("block in every angle");
+        let own = body.find("Idea under swarm attack.").unwrap();
+        assert!(block < own, "block precedes the own context");
+    }
 }

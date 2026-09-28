@@ -14,11 +14,11 @@ use std::path::Path;
 
 use tokio::sync::Semaphore;
 
-use crate::ai::budget::ContextBudget;
+use crate::ai::budget::{related_allowance, ContextBudget};
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{build_prompt, AgentResult, AgentRole, AgentTask};
 use crate::concepts::audit::{self, AuditReport, Finding};
-use crate::concepts::skills::{ask_on_contract, hydrate_context, SkillRegistry};
+use crate::concepts::skills::{ask_on_contract, hydrate_context, RelatedProvider, SkillRegistry};
 use crate::concepts::swarm::{fan_out, judge, synthesize};
 use crate::concepts::ConceptError;
 use crate::domain::OutputContract;
@@ -178,21 +178,25 @@ fn gather(results: &[Option<AgentResult>]) -> Result<Vec<Finding>, ConceptError>
     Ok(audit::findings_from(&shortlist, audit::MAX_AUDIT_FINDINGS))
 }
 
-/// The context a fan-out or chained stage sees: the carried-forward blocks, then the idea,
-/// memory and discussion hydrated under whatever budget the carried blocks leave.
+/// The context a fan-out or chained stage sees: the related-ideas block, the carried-forward
+/// blocks, then the idea, memory and discussion hydrated under whatever budget the carried blocks
+/// leave. `related` is asked per stage, against what that stage's hydrated context leaves of its
+/// own `rest` budget, because carried blocks shrink `rest` from stage to stage.
 fn stage_context(
     vault_dir: &Path,
     idea_slug: &str,
     budget: ContextBudget,
     carried: &[String],
+    related: RelatedProvider<'_>,
 ) -> Result<String, ConceptError> {
     let carried = carried.join("\n\n");
     let rest = ContextBudget::new(budget.max_bytes.saturating_sub(carried.len()));
     let base = hydrate_context(vault_dir, idea_slug, rest)?;
+    let block = related(related_allowance(rest, base.text.len()));
     Ok(if carried.is_empty() {
-        base.text
+        format!("{block}{}", base.text)
     } else {
-        format!("{carried}\n\n{}", base.text)
+        format!("{block}{carried}\n\n{}", base.text)
     })
 }
 
@@ -200,6 +204,10 @@ fn stage_context(
 /// semaphore permit of its own (every model call takes one), and append the final stage's output
 /// — plus the audit appendix, if an audit ran — as one assistant turn. Deterministic control
 /// flow: the same workflow takes the same path every run; only stage outputs vary.
+///
+/// Every fan-out and chained stage is prefixed with a related-ideas block, asked of `related` once
+/// per such stage against that stage's own leftover budget; audit and synthesis stages never see
+/// it.
 ///
 /// Degradation: failed fan-out agents are skipped; a failed middle chained step is skipped with
 /// nothing carried forward; a failed final stage, or a fan-out with no usable result before an
@@ -214,6 +222,7 @@ pub async fn run_workflow(
     name: &str,
     budget: ContextBudget,
     audit_findings: bool,
+    related: RelatedProvider<'_>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<WorkflowOutcome, ConceptError> {
     let workflow = get_workflow(name).ok_or_else(|| ConceptError::UnknownWorkflow(name.into()))?;
@@ -242,7 +251,7 @@ pub async fn run_workflow(
         match stage {
             Stage::FanOut(steps) => {
                 note(&format!("fanning out {} angles", steps.len()));
-                let context = stage_context(vault_dir, idea_slug, budget, &carried)?;
+                let context = stage_context(vault_dir, idea_slug, budget, &carried, related)?;
                 let tasks = steps
                     .iter()
                     .map(|s| AgentTask {
@@ -272,7 +281,7 @@ pub async fn run_workflow(
                 let task = AgentTask {
                     role: step.role,
                     skill: step.skill.map(str::to_string),
-                    context: stage_context(vault_dir, idea_slug, budget, &carried)?,
+                    context: stage_context(vault_dir, idea_slug, budget, &carried, related)?,
                 };
                 let contract = step
                     .skill

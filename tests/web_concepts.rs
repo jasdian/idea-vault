@@ -323,3 +323,68 @@ async fn turning_the_audit_off_in_settings_drops_the_auditor_call() {
         .iter()
         .any(|b| b.contains("You are the Auditor")));
 }
+
+fn seed_linked_pair(vault: &std::path::Path) {
+    for (slug, title, body) in [
+        (
+            "orchard-sensor",
+            "Orchard sensor",
+            "It builds on [[frost-alarm]].\n",
+        ),
+        ("frost-alarm", "Frost alarm for growers", "Standalone.\n"),
+    ] {
+        store::write_idea(
+            vault,
+            &Idea {
+                frontmatter: IdeaFrontmatter {
+                    title: title.into(),
+                    slug: slug.into(),
+                    state: IdeaState::InDiscussion,
+                    tags: vec![],
+                    sources: vec![],
+                    created: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
+                    updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
+                },
+                body: body.into(),
+            },
+        )
+        .unwrap();
+    }
+    store::append_turn(vault, "orchard-sensor", "user", "attack it").unwrap();
+}
+
+async fn related_route_bodies(route: &str, done: &str) -> Vec<String> {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["1. x".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed_linked_pair(&vault_dir);
+    idea_vault::index::reindex::reindex(&mut state.db.lock().unwrap(), &vault_dir).unwrap();
+
+    let (status, _) = post_form(state.clone(), &format!("/idea/orchard-sensor/{route}"), "").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state, "/idea/orchard-sensor/pending", done).await;
+    mock.chat_bodies()
+}
+
+#[tokio::test]
+async fn related_block_reaches_the_model_through_skill_swarm_and_workflow_routes() {
+    for (route, done) in [
+        ("skill/premortem", "foil · premortem"),
+        ("swarm", "foil · swarm"),
+        ("workflow/interrogate", "foil · workflow interrogate"),
+    ] {
+        let bodies = related_route_bodies(route, done).await;
+        let (audits, others): (Vec<&String>, Vec<&String>) = bodies
+            .iter()
+            .partition(|b| b.contains("You are the Auditor"));
+        assert!(
+            others.iter().any(|b| b.contains("Frost alarm for growers")),
+            "{route}: the linked idea never reached the model"
+        );
+        assert!(
+            audits
+                .iter()
+                .all(|b| !b.contains("Frost alarm for growers")),
+            "{route}: the audit saw another idea"
+        );
+    }
+}

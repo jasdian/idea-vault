@@ -17,11 +17,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures::future::join_all;
 use tokio::sync::Semaphore;
 
-use crate::ai::budget::ContextBudget;
+use crate::ai::budget::{related_allowance, ContextBudget};
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{run_agent, AgentResult, AgentRole, AgentTask};
 use crate::concepts::audit::{self, AuditReport, Finding};
-use crate::concepts::skills::{hydrate_context, SkillRegistry};
+use crate::concepts::skills::{hydrate_context, RelatedProvider, SkillRegistry};
 use crate::concepts::ConceptError;
 use crate::vault::store;
 
@@ -165,6 +165,10 @@ pub(crate) fn judge(results: &[Option<AgentResult>]) -> Vec<&AgentResult> {
 /// single assistant turn only after everything completes; intermediate agent outputs are never
 /// persisted.
 ///
+/// Every angle's context is prefixed with one related-ideas block, asked of `related` once per
+/// run against whatever of `budget` the hydrated context leaves; the audit and the synthesizer
+/// never see it.
+///
 /// Unknown angles fail fast before any model call. If every agent fails the swarm errors with
 /// [`ConceptError::NothingToSynthesize`] and nothing is appended.
 #[allow(clippy::too_many_arguments)]
@@ -177,6 +181,7 @@ pub async fn swarm(
     angles: Vec<String>,
     budget: ContextBudget,
     audit_findings: bool,
+    related: RelatedProvider<'_>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<SwarmOutcome, ConceptError> {
     // Fail fast on a misconfigured request — before any AI call.
@@ -188,6 +193,8 @@ pub async fn swarm(
 
     // One budgeted context block for every agent (D21; hydrated once, lenses differ per angle).
     let context = hydrate_context(vault_dir, idea_slug, budget)?;
+    let block = related(related_allowance(budget, context.text.len()));
+    let shared = format!("{block}{}", context.text);
 
     // Bounded fan-out (D14/ADR-0006): one agent per angle over the shared context block, each
     // under the persona its skill names (a `constraints` lens researches, a `premortem` attacks).
@@ -198,7 +205,7 @@ pub async fn swarm(
                 .get(angle)
                 .map_or(AgentRole::Critic, |s| s.role.into()),
             skill: Some(angle.clone()),
-            context: context.text.clone(),
+            context: shared.clone(),
         })
         .collect();
     // Report per-angle progress as each agent lands ("swarm · attacking 2/4: constraints").

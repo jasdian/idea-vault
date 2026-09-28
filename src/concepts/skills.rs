@@ -6,7 +6,9 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::Semaphore;
 
-use crate::ai::budget::{assemble_context, AssembledContext, ContextBudget, ContextInput};
+use crate::ai::budget::{
+    assemble_context, related_allowance, AssembledContext, ContextBudget, ContextInput,
+};
 use crate::ai::contract;
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
@@ -324,6 +326,22 @@ impl LiveSkills {
     }
 }
 
+/// Supplies the cross-idea "related ideas" block (`memory::related`) for one prompt: given the
+/// most bytes it may take, returns the block or `""`. The web layer builds it over the index so
+/// `concepts` stays DB-free; callers without an index pass `&|_| String::new()`.
+pub type RelatedProvider<'a> = &'a (dyn Fn(usize) -> String + Sync);
+
+/// How [`invoke`] fills a skill's `{context}` slot: the idea's own context assembled under
+/// `budget`, prefixed with the block `related` supplies within whatever of `budget` the own
+/// context leaves.
+#[derive(Clone, Copy)]
+pub struct ContextSlot<'a> {
+    /// Budget for the idea's own context; the related block only takes what it leaves.
+    pub budget: ContextBudget,
+    /// Source of the related-ideas block.
+    pub related: RelatedProvider<'a>,
+}
+
 /// Gather the D18 skill inputs (`idea_body`, `memory`, `recent_conversation`) via `vault::store`
 /// and assemble them under `budget` with `ai::budget` directly — per D4, `concepts` composes
 /// `vault` + `ai` itself rather than reaching through `memory` (whose `load_context` is the
@@ -420,11 +438,11 @@ pub(crate) async fn ask_on_contract(
 /// Hydrate a skill's `{context}` slot and run it against the AI, appending the result as an
 /// assistant turn (docs/06-concepts/skills.md §D18).
 ///
-/// The `{context}` slot is filled by `ai::budget` (idea body + memory + recent conversation,
-/// under `budget` — never the raw full history). The call is gated by the process-wide
-/// `ai_semaphore` (ADR-0006: chat, skills, and swarm share one bound). Callers must NOT already
-/// hold a permit from that semaphore when calling this — `invoke` acquires its own, and a held
-/// permit plus a small configured bound would deadlock.
+/// The `{context}` slot is filled per [`ContextSlot`]: `ai::budget` (idea body + memory + recent
+/// conversation, under its budget — never the raw full history), prefixed with the related-ideas
+/// block. The call is gated by the process-wide `ai_semaphore` (ADR-0006: chat, skills, and swarm
+/// share one bound). Callers must NOT already hold a permit from that semaphore when calling this
+/// — `invoke` acquires its own, and a held permit plus a small configured bound would deadlock.
 ///
 /// The answer is held to the skill's output contract with at most one retry
 /// ([`ask_on_contract`]). Stateless: the output is appended as an assistant turn only after the
@@ -435,12 +453,15 @@ pub async fn invoke(
     vault_dir: &Path,
     idea_slug: &str,
     skill: &Skill,
-    budget: ContextBudget,
+    slot: ContextSlot<'_>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<String, ConceptError> {
     progress(&format!("running {}", skill.name));
-    let context = hydrate_context(vault_dir, idea_slug, budget)?;
-    let prompt = skill.prompt.replace("{context}", &context.text);
+    let context = hydrate_context(vault_dir, idea_slug, slot.budget)?;
+    let block = (slot.related)(related_allowance(slot.budget, context.text.len()));
+    let prompt = skill
+        .prompt
+        .replace("{context}", &format!("{block}{}", context.text));
     let llm = ollama.for_role(AgentRole::from(skill.role).as_str());
     let output = ask_on_contract(
         &llm,

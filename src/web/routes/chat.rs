@@ -24,7 +24,7 @@ use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::{render_queue_panel, respond_with_transcript};
-use crate::web::routes::{reindex_logged, scoped_llm};
+use crate::web::routes::{reindex_logged, related_block_logged, scoped_llm};
 use crate::web::WebError;
 
 /// The rigorous-foil persona for free chat (CLAUDE.md: steelman, then stress-test).
@@ -185,28 +185,6 @@ const SKILL_BOOK_BYTES: usize = 1024;
 
 fn compose_prompt(book: &str, related: &str, own: &str) -> String {
     format!("{FOIL_INSTRUCTION}\n\n{book}\n{related}{own}")
-}
-
-// The related block is best-effort context: an index failure or a poisoned lock yields no block,
-// never a failed turn. Sync on purpose, so the guard cannot live across an `.await`.
-fn related_block_logged(state: &AppState, slug: &str, allowance: usize) -> String {
-    if allowance == 0 {
-        return String::new();
-    }
-    let conn = match state.db.lock() {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(slug = %slug, error = %e, "db mutex poisoned; no related-ideas block");
-            return String::new();
-        }
-    };
-    match memory::related::related_block(&conn, slug, allowance) {
-        Ok(block) => block,
-        Err(e) => {
-            tracing::warn!(slug = %slug, error = %e, "related-ideas block skipped");
-            String::new()
-        }
-    }
 }
 
 /// The background half: assemble the budgeted context (which already includes the just-persisted

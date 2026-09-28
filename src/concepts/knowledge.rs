@@ -99,6 +99,7 @@ pub async fn extract_knowledge(
     }
 
     // One budgeted context block for every lens (D21; hydrated once, lenses differ per task).
+    // No related-ideas block: other ideas' content never becomes this idea's knowledge (ADR-0023).
     let context = hydrate_context(vault_dir, idea_slug, budget)?;
 
     // Bounded fan-out (ADR-0006): one Harvester per lens over the shared context block — the

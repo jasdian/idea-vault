@@ -10,7 +10,7 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 use idea_vault::ai::budget::ContextBudget;
 use idea_vault::ai::{LlmBackend, OllamaClient};
-use idea_vault::concepts::skills::{self, SkillRegistry};
+use idea_vault::concepts::skills::{self, ContextSlot, SkillRegistry};
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState};
 use idea_vault::vault::store;
 use support::{refused_url, spawn, spawn_sequence, ChatScript};
@@ -56,7 +56,10 @@ async fn invoke_hydrates_context_and_appends_assistant_turn() {
         tmp.path(),
         "i",
         skill,
-        ContextBudget::new(4096),
+        ContextSlot {
+            budget: ContextBudget::new(4096),
+            related: &|_| String::new(),
+        },
         &|_: &str| {},
     )
     .await
@@ -115,7 +118,10 @@ async fn failed_skill_call_appends_nothing() {
         tmp.path(),
         "i",
         registry.get("devils-advocate").unwrap(),
-        ContextBudget::new(4096),
+        ContextSlot {
+            budget: ContextBudget::new(4096),
+            related: &|_| String::new(),
+        },
         &|_: &str| {},
     )
     .await;
@@ -146,7 +152,10 @@ async fn invoke_waits_on_the_shared_semaphore() {
         tmp.path(),
         "i",
         &skill,
-        ContextBudget::new(4096),
+        ContextSlot {
+            budget: ContextBudget::new(4096),
+            related: &|_| String::new(),
+        },
         &|_: &str| {},
     );
     tokio::pin!(fut);
@@ -188,7 +197,10 @@ async fn invoke_with(skill: &str, answers: &[&str]) -> (String, Vec<String>, Str
         tmp.path(),
         "i",
         registry.get(skill).unwrap(),
-        ContextBudget::new(4096),
+        ContextSlot {
+            budget: ContextBudget::new(4096),
+            related: &|_| String::new(),
+        },
         &|_: &str| {},
     )
     .await
@@ -271,7 +283,10 @@ async fn a_skill_invocation_samples_at_its_role_profile() {
         tmp.path(),
         "i",
         skill,
-        ContextBudget::new(4096),
+        ContextSlot {
+            budget: ContextBudget::new(4096),
+            related: &|_| String::new(),
+        },
         &|_: &str| {},
     )
     .await
@@ -280,4 +295,106 @@ async fn a_skill_invocation_samples_at_its_role_profile() {
     let body: serde_json::Value = serde_json::from_str(&mock.chat_bodies()[0]).unwrap();
     let t = body["options"]["temperature"].as_f64().unwrap();
     assert!((t - 0.5).abs() < 1e-6, "synthesizer skill sampled at {t}");
+}
+
+const RELATED_BLOCK: &str =
+    "## Related ideas elsewhere in the vault\n- RELATED-MARKER (`other`): link\n\n";
+
+fn prompt_content(body: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    v["messages"][0]["content"].as_str().unwrap().to_string()
+}
+
+async fn invoke_premortem_with(
+    related: idea_vault::concepts::skills::RelatedProvider<'_>,
+) -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["1. Nobody pays.".into()]),
+    )
+    .await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let registry = SkillRegistry::builtin();
+    skills::invoke(
+        &client,
+        &Semaphore::new(1),
+        tmp.path(),
+        "i",
+        registry.get("premortem").unwrap(),
+        ContextSlot {
+            budget: ContextBudget::new(4096),
+            related,
+        },
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 1);
+    prompt_content(&bodies[0])
+}
+
+fn own_context_for_seed() -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let conversation = store::read_conversation(tmp.path(), "i").unwrap();
+    let turns = store::split_turns(&conversation);
+    idea_vault::ai::budget::assemble_context(
+        ContextBudget::new(4096),
+        idea_vault::ai::budget::ContextInput {
+            idea_body: "A distinctive idea statement.\n",
+            memory: &[],
+            summary: None,
+            turns: &turns,
+        },
+    )
+    .text
+}
+
+#[tokio::test]
+async fn related_block_reaches_skill_prompt() {
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    let provider = |max: usize| {
+        asked.store(max, std::sync::atomic::Ordering::SeqCst);
+        RELATED_BLOCK.to_string()
+    };
+    let content = invoke_premortem_with(&provider).await;
+
+    let block = content
+        .find("RELATED-MARKER")
+        .expect("related block in the prompt");
+    let own = content
+        .find("A distinctive idea statement.")
+        .expect("own context in the prompt");
+    assert!(
+        block < own,
+        "the related block precedes the idea's own context"
+    );
+    let max = asked.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        max > 0 && max <= 4096 / 10,
+        "allowance is the leftover-only cap: {max}"
+    );
+}
+
+#[tokio::test]
+async fn related_empty_provider_leaves_prompts_byte_identical() {
+    let template = SkillRegistry::builtin()
+        .get("premortem")
+        .unwrap()
+        .prompt
+        .clone();
+    let own = own_context_for_seed();
+
+    let without = invoke_premortem_with(&|_| String::new()).await;
+    assert_eq!(without, template.replace("{context}", &own));
+
+    let with = invoke_premortem_with(&|_| RELATED_BLOCK.to_string()).await;
+    assert_eq!(
+        with,
+        template.replace("{context}", &format!("{RELATED_BLOCK}{own}"))
+    );
+    assert_eq!(with.replacen(RELATED_BLOCK, "", 1), without);
 }

@@ -72,6 +72,7 @@ async fn interrogate_runs_the_fixed_dag_in_order_and_persists_only_the_synthesis
         "interrogate",
         ContextBudget::new(4096),
         false,
+        &|_| String::new(),
         &|_: &str| {},
     )
     .await
@@ -128,6 +129,7 @@ async fn failed_step_is_skipped_and_workflow_degrades() {
         "interrogate",
         ContextBudget::new(4096),
         false,
+        &|_| String::new(),
         &|_: &str| {},
     )
     .await
@@ -168,6 +170,7 @@ async fn all_steps_failed_errors_and_persists_nothing() {
         "interrogate",
         ContextBudget::new(4096),
         false,
+        &|_| String::new(),
         &|_: &str| {},
     )
     .await
@@ -197,6 +200,7 @@ async fn unknown_workflow_fails_fast_with_no_ai_calls() {
         "nope",
         ContextBudget::new(4096),
         false,
+        &|_| String::new(),
         &|_: &str| {},
     )
     .await
@@ -223,6 +227,7 @@ async fn run(
         name,
         ContextBudget::new(8192),
         audit,
+        &|_| String::new(),
         &|_: &str| {},
     )
     .await
@@ -363,6 +368,7 @@ async fn run_ready_to_build(role_tuning: bool) -> Vec<f64> {
         "ready-to-build",
         ContextBudget::new(4096),
         false,
+        &|_| String::new(),
         &|_: &str| {},
     )
     .await
@@ -389,4 +395,75 @@ async fn role_tuning_off_samples_every_step_at_the_global_temperature() {
     let temps = run_ready_to_build(false).await;
     assert_eq!(temps.len(), 6);
     assert!(temps.iter().all(|t| (t - 0.7).abs() < 1e-6), "{temps:?}");
+}
+
+#[tokio::test]
+async fn related_block_reaches_workflow_stages_but_not_audit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("STEELMAN-MARKER: the best version"),
+            tokens("1. fails because a"),
+            tokens("- disproof b"),
+            tokens("argument c"),
+            tokens("F1: CONFIRMED — a\nF2: UNCERTAIN — b\nF3: REFUTED — c"),
+            tokens("converged"),
+        ],
+    )
+    .await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let calls = AtomicUsize::new(0);
+    let provider = |_: usize| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        "## Related ideas elsewhere in the vault\n- RELATED-MARKER (`other`): link\n\n".to_string()
+    };
+
+    run_workflow(
+        &client,
+        &Semaphore::new(1),
+        &SkillRegistry::builtin(),
+        tmp.path(),
+        "i",
+        "steelman-then-attack",
+        ContextBudget::new(8192),
+        true,
+        &provider,
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "once per hydrated stage");
+    let bodies = mock.chat_bodies();
+    assert_eq!(
+        bodies.len(),
+        6,
+        "steelman + 3 critics + auditor + synthesizer"
+    );
+    for stage in &bodies[0..4] {
+        let block = stage
+            .find("RELATED-MARKER")
+            .expect("block in every stage prompt");
+        let own = stage.find("Idea under workflow.").unwrap();
+        assert!(block < own, "block precedes the own context");
+    }
+    for critic in &bodies[1..4] {
+        assert!(
+            critic.contains("STEELMAN-MARKER"),
+            "carried stage output kept"
+        );
+    }
+    let audit = &bodies[4];
+    assert!(
+        audit.contains("Judge each finding ONLY"),
+        "the audit prompt"
+    );
+    assert!(
+        !audit.contains("RELATED-MARKER"),
+        "the audit prompt carries no related block; agent answers here never quote it"
+    );
 }

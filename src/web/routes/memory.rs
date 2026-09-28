@@ -12,7 +12,7 @@ use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::{build_discussion, respond_with_transcript, state_badge_oob};
-use crate::web::routes::{reindex_logged, scoped_llm};
+use crate::web::routes::{reindex_logged, related_block_logged, scoped_llm};
 
 use crate::web::WebError;
 use askama::Template as _;
@@ -270,7 +270,10 @@ async fn run_skill_work(
         &state.config.vault_dir,
         slug,
         &skill,
-        llm.context_budget(),
+        concepts::skills::ContextSlot {
+            budget: llm.context_budget(),
+            related: &|max| related_block_logged(state, slug, max),
+        },
         &progress,
     )
     .await
@@ -402,6 +405,7 @@ async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(
         name,
         llm.context_budget(),
         llm.settings().audit_findings,
+        &|max| related_block_logged(state, slug, max),
         &progress,
     )
     .await
@@ -432,6 +436,7 @@ async fn run_swarm_work(
         angles,
         llm.context_budget(),
         llm.settings().audit_findings,
+        &|max| related_block_logged(state, slug, max),
         &progress,
     )
     .await

@@ -279,6 +279,7 @@ pub async fn audit(
         .collect::<Vec<_>>()
         .join("\n");
     let rest = ContextBudget::new(budget.max_bytes.saturating_sub(numbered.len()));
+    // No related-ideas block: a verdict must rest on this idea's material alone.
     let material = hydrate_context(vault_dir, idea_slug, rest)?;
     let task = AgentTask {
         role: AgentRole::Auditor,

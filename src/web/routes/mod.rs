@@ -36,6 +36,31 @@ pub(crate) fn scoped_llm(state: &AppState, slug: &str) -> crate::ai::LlmBackend 
     }
 }
 
+/// The related-ideas block for `slug` in at most `allowance` bytes (`memory::related`), or `""`.
+///
+/// Best-effort context: an index failure or a poisoned lock yields no block, never a failed
+/// turn. Sync on purpose, so the index guard cannot live across an `.await`; this is also the
+/// body of every [`crate::concepts::skills::RelatedProvider`] the routes hand to `concepts`.
+pub(crate) fn related_block_logged(state: &AppState, slug: &str, allowance: usize) -> String {
+    if allowance == 0 {
+        return String::new();
+    }
+    let conn = match state.db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(slug = %slug, error = %e, "db mutex poisoned; no related-ideas block");
+            return String::new();
+        }
+    };
+    match crate::memory::related::related_block(&conn, slug, allowance) {
+        Ok(block) => block,
+        Err(e) => {
+            tracing::warn!(slug = %slug, error = %e, "related-ideas block skipped");
+            String::new()
+        }
+    }
+}
+
 /// Rebuild the index, logging instead of failing the request — markdown truth already landed
 /// and the next reindex reconciles (docs/03 "Consistency & failure model").
 pub(crate) fn reindex_logged(state: &AppState) {

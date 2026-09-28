@@ -36,8 +36,9 @@ want an honest experiment that decides whether embeddings are worth building at 
 - `[[fact]]` and `[[idea#fact]]` links resolve into a queryable fact-to-fact table in `index.db`.
 - Idea-to-idea `edges` (explicit links, exact shared tags, lexical word overlap) are derived from
   `vault/**` by reindex alone; deleting `index.db` and reindexing reproduces them exactly.
-- Chat context carries an auto-injected "Related ideas" block that never includes the idea itself
-  and only uses budget left over after the idea's own context, which stays byte-identical.
+- Chat, skill, swarm-angle and workflow-stage prompts carry an auto-injected "Related ideas" block
+  that never includes the idea itself and only uses budget left over after the idea's own context,
+  which stays byte-identical. Audit, synthesis and knowledge extraction never receive it.
 - Tag near-duplicates (`system-design`/`systems-design`) are surfaced, never silently merged.
 - `vault_search` exists for the offline experiment only and is never exposed to the model.
 - The phase-2 embeddings verdict follows the pre-registered kill criterion and lands in ADR-0027.
