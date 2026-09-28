@@ -212,3 +212,114 @@ async fn delete_turn_removes_it_and_returns_the_updated_transcript() {
     assert_eq!(store::split_turns(&convo).len(), 2);
     assert!(!convo.contains("## assistant"));
 }
+
+const RELATED_HEADER: &str = "Related ideas elsewhere in the vault";
+
+fn seed_titled(vault: &std::path::Path, slug: &str, title: &str, body: &str) {
+    store::write_idea(
+        vault,
+        &Idea {
+            frontmatter: IdeaFrontmatter {
+                title: title.into(),
+                slug: slug.into(),
+                state: IdeaState::InDiscussion,
+                tags: vec![],
+                sources: vec![],
+                created: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
+                updated: Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap(),
+            },
+            body: body.into(),
+        },
+    )
+    .unwrap();
+}
+
+fn prompt_of(body: &str) -> String {
+    let json: serde_json::Value = serde_json::from_str(body).expect("chat body is json");
+    json["messages"][0]["content"]
+        .as_str()
+        .expect("prompt content")
+        .to_string()
+}
+
+#[tokio::test]
+async fn related_ideas_block_reaches_model() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed_titled(
+        &vault_dir,
+        "orchard-sensor",
+        "Orchard sensor",
+        "It builds on [[frost-alarm]].\n",
+    );
+    seed_titled(
+        &vault_dir,
+        "frost-alarm",
+        "Frost alarm for growers",
+        "Standalone.\n",
+    );
+
+    let (status, _) = post_form(state.clone(), "/idea/orchard-sensor/chat", "message=go").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state, "/idea/orchard-sensor/pending", "turn--foil").await;
+
+    let prompt = prompt_of(&mock.chat_bodies()[0]);
+    let start = prompt.find(RELATED_HEADER).unwrap_or_else(|| {
+        panic!("related block missing from prompt:\n{prompt}");
+    });
+    let end = prompt.find("## Idea\n").expect("own context");
+    assert!(start < end, "related block precedes the idea's own context");
+    let related = &prompt[start..end];
+    assert!(
+        related.contains("Frost alarm for growers"),
+        "got {related:?}"
+    );
+    assert!(related.contains("`frost-alarm`"));
+    assert!(
+        !related.contains("orchard-sensor"),
+        "own slug leaked: {related:?}"
+    );
+}
+
+async fn chat_prompt_for(neighbour: bool) -> String {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed_titled(&vault_dir, "hedge-row", "Hedge row", "A statement.\n");
+    if neighbour {
+        seed_titled(
+            &vault_dir,
+            "field-margin",
+            "Field margin",
+            "Extends [[hedge-row]].\n",
+        );
+    }
+    let (status, _) = post_form(state.clone(), "/idea/hedge-row/chat", "message=go").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state, "/idea/hedge-row/pending", "turn--foil").await;
+    prompt_of(&mock.chat_bodies()[0])
+}
+
+#[tokio::test]
+async fn own_context_is_byte_identical_through_the_route_with_and_without_a_neighbour() {
+    let with = chat_prompt_for(true).await;
+    let without = chat_prompt_for(false).await;
+    assert!(with.contains(RELATED_HEADER), "got {with}");
+    assert!(!without.contains(RELATED_HEADER), "got {without}");
+    let own = |p: &str| p[p.find("## Idea\n").expect("own context")..].to_string();
+    assert_eq!(own(&with), own(&without));
+}
+
+#[tokio::test]
+async fn lone_idea_prompt_has_no_related_block() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion);
+
+    let (status, _) = post_form(state.clone(), "/idea/chatty/chat", "message=go").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state, "/idea/chatty/pending", "turn--foil").await;
+
+    let prompt = prompt_of(&mock.chat_bodies()[0]);
+    assert!(!prompt.contains(RELATED_HEADER), "got:\n{prompt}");
+    assert!(prompt.contains("\n## Idea\nThe idea body.\n"));
+}

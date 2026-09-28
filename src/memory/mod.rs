@@ -6,6 +6,7 @@ pub mod backlinks;
 pub mod compact;
 pub mod extract;
 pub mod load;
+pub mod related;
 
 /// Errors produced by the memory extraction/reload/backlink pipeline.
 #[derive(Debug, thiserror::Error)]

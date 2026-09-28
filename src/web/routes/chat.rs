@@ -183,6 +183,32 @@ pub async fn remove_queued(
 /// Byte cap on the skill book carried in every chat prompt.
 const SKILL_BOOK_BYTES: usize = 1024;
 
+fn compose_prompt(book: &str, related: &str, own: &str) -> String {
+    format!("{FOIL_INSTRUCTION}\n\n{book}\n{related}{own}")
+}
+
+// The related block is best-effort context: an index failure or a poisoned lock yields no block,
+// never a failed turn. Sync on purpose, so the guard cannot live across an `.await`.
+fn related_block_logged(state: &AppState, slug: &str, allowance: usize) -> String {
+    if allowance == 0 {
+        return String::new();
+    }
+    let conn = match state.db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(slug = %slug, error = %e, "db mutex poisoned; no related-ideas block");
+            return String::new();
+        }
+    };
+    match memory::related::related_block(&conn, slug, allowance) {
+        Ok(block) => block,
+        Err(e) => {
+            tracing::warn!(slug = %slug, error = %e, "related-ideas block skipped");
+            String::new()
+        }
+    }
+}
+
 /// The background half: assemble the budgeted context (which already includes the just-persisted
 /// user turn), call the model under the shared semaphore, and append the assistant turn. Returns a
 /// human-readable message on failure for the indicator to surface.
@@ -198,7 +224,9 @@ async fn run_chat(state: &AppState, slug: &str) -> Result<(), String> {
         llm.context_budget().max_bytes.saturating_sub(book.len()),
     );
     let context = memory::load::load_context(vault_dir, slug, budget).map_err(|e| e.to_string())?;
-    let prompt = format!("{FOIL_INSTRUCTION}\n\n{book}\n{}", context.text);
+    let allowance = crate::ai::budget::related_allowance(budget, context.text.len());
+    let related = related_block_logged(state, slug, allowance);
+    let prompt = compose_prompt(&book, &related, &context.text);
 
     let reply = {
         let _permit = state
@@ -221,4 +249,63 @@ async fn run_chat(state: &AppState, slug: &str) -> Result<(), String> {
     store::append_turn(vault_dir, slug, "assistant", reply).map_err(|e| e.to_string())?;
     reindex_logged(state);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::budget::{related_allowance, ContextBudget};
+    use crate::domain::IdeaFrontmatter;
+    use chrono::TimeZone;
+
+    fn write_idea(vault: &std::path::Path, slug: &str, title: &str, body: &str) {
+        let at = Utc.with_ymd_and_hms(2026, 7, 7, 10, 0, 0).unwrap();
+        store::write_idea(
+            vault,
+            &Idea {
+                frontmatter: IdeaFrontmatter {
+                    title: title.into(),
+                    slug: slug.into(),
+                    state: IdeaState::InDiscussion,
+                    tags: vec![],
+                    sources: vec![],
+                    created: at,
+                    updated: at,
+                },
+                body: body.into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn own_context_byte_identical_with_related() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), "alpha", "Own", "Alpha links [[beta]].\n");
+        write_idea(tmp.path(), "beta", "Neighbour", "Beta stands alone.\n");
+        store::append_turn(tmp.path(), "alpha", "user", "push it").unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::index::schema::apply_schema(&conn).unwrap();
+        crate::index::reindex::reindex(&mut conn, tmp.path()).unwrap();
+
+        let book = "Moves the owner can run:\n- premortem — imagine it failed\n";
+        let budget = ContextBudget::new(16_000);
+        let own = memory::load::load_context(tmp.path(), "alpha", budget).unwrap();
+        let allowance = related_allowance(budget, own.text.len());
+        let related = memory::related::related_block(&conn, "alpha", allowance).unwrap();
+        assert!(!related.is_empty(), "fixture has a related neighbour");
+
+        let with = compose_prompt(book, &related, &own.text);
+        assert!(with.contains(&own.text));
+        assert!(with.find(&related).unwrap() < with.find(&own.text).unwrap());
+
+        conn.execute("DELETE FROM edges", []).unwrap();
+        let none = memory::related::related_block(&conn, "alpha", allowance).unwrap();
+        let without = compose_prompt(book, &none, &own.text);
+        assert_eq!(
+            without,
+            format!("{FOIL_INSTRUCTION}\n\n{book}\n{}", own.text)
+        );
+        assert_eq!(with.replacen(&related, "", 1), without);
+    }
 }

@@ -159,9 +159,51 @@ pub fn assemble_context(budget: ContextBudget, input: ContextInput<'_>) -> Assem
     }
 }
 
+/// Absolute byte ceiling on the cross-idea related block that rides beside an idea's own context.
+pub const RELATED_CAP_BYTES: usize = 2048;
+
+/// Bytes the cross-idea related block may use under `budget` once the idea's own assembled
+/// context (`own_len` bytes) is in: `min(leftover, min(max_bytes / 10, RELATED_CAP_BYTES))`.
+///
+/// Leftover only: the own context is never trimmed to make room, so an own context that already
+/// fills or exceeds the budget leaves `0`.
+pub fn related_allowance(budget: ContextBudget, own_len: usize) -> usize {
+    let cap = (budget.max_bytes / 10).min(RELATED_CAP_BYTES);
+    budget.max_bytes.saturating_sub(own_len).min(cap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn related_allowance_is_the_leftover_when_smaller_than_the_cap() {
+        assert_eq!(related_allowance(ContextBudget::new(10_000), 9_900), 100);
+    }
+
+    #[test]
+    fn related_allowance_is_capped_at_the_absolute_ceiling() {
+        assert_eq!(
+            related_allowance(ContextBudget::new(100_000), 1_000),
+            RELATED_CAP_BYTES
+        );
+    }
+
+    #[test]
+    fn related_allowance_is_zero_when_the_own_context_fills_the_budget() {
+        assert_eq!(related_allowance(ContextBudget::new(4_000), 4_000), 0);
+    }
+
+    #[test]
+    fn related_allowance_is_zero_when_the_own_context_overflows() {
+        assert_eq!(related_allowance(ContextBudget::new(4_000), 9_000), 0);
+    }
+
+    #[test]
+    fn related_allowance_tiny_budget_binds_on_a_tenth() {
+        assert_eq!(related_allowance(ContextBudget::new(1_000), 10), 100);
+        assert_eq!(related_allowance(ContextBudget::new(9), 0), 0);
+    }
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
