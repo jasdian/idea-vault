@@ -244,6 +244,16 @@ templates/
   _skills_list.html         # partial — the #skills panel: every move grouped by spine stage,
                             #   with use_when/avoid_when/source/role/contract, plus load issues;
                             #   re-rendered by reload (R34)
+  _idea_tags.html           # partial — the idea page's #idea-tags-row: tag chips + inline editor;
+                            #   pre-rendered into idea.html (tags_html) and swapped whole by R42
+  _idea_sources.html        # partial — the #idea-sources-row: attached-source chips + checkbox
+                            #   editor (web::templates::IdeaSources); idea.html (sources_html) + R43
+  sources.html              # extends base — the reference-sources page shell (R36, ADR-0021)
+  _sources_list.html        # partial — the #sources panel: saved-vs-applied banner (the
+                            #   `docker compose up -d` the owner runs, or the bare-mode note), the
+                            #   source rows, then the add form; re-rendered by R37/R40/R41
+  _source_row.html          # partial — one source's normal view row (R39), {% include %}-d by the list
+  _source_edit_row.html     # partial — one source's host-path edit form (R38)
 ```
 
 Convention: files prefixed `_` are HTMX partials (never a full page); everything else `extends
