@@ -283,6 +283,75 @@ pub fn search(conn: &Connection, query: &str) -> Result<Vec<SearchHit>, IndexErr
     Ok(scored.into_iter().map(|(_, hit)| hit).collect())
 }
 
+/// One memory fact returned by [`vault_search`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactHit {
+    pub idea_slug: String,
+    pub fact_slug: String,
+    pub fact_title: String,
+    /// Raw FTS5 `bm25()` of the fact row; negative, more negative is a better match.
+    pub bm25: f64,
+    /// `-bm25` plus the backlink prior of the fact's idea; higher is better.
+    pub score: f64,
+}
+
+/// Fact-level retrieval over `kind = 'memory'` rows across every idea except `exclude_slug`.
+///
+/// `score = -bm25 + BACKLINK_BOOST * ln(1 + min(inbound, BACKLINK_CAP))`, where `inbound` is the
+/// number of resolved backlinks targeting the fact's idea, the same prior [`search`] applies.
+/// Results are ordered by `score` descending, then `idea_slug`, then `fact_slug`, and truncated
+/// to `limit` after the excluded idea's rows have been removed in SQL. A blank or token-less
+/// query yields an empty list. Each matching fact row is one hit; if two facts of one idea
+/// share a slug, the hit carries the smaller of their titles.
+///
+/// This is an instrument for offline retrieval experiments. It is never registered as a model
+/// tool: context reaches the model by push, not pull.
+pub fn vault_search(
+    conn: &Connection,
+    query: &str,
+    exclude_slug: Option<&str>,
+    limit: usize,
+) -> Result<Vec<FactHit>, IndexError> {
+    let Some(match_expr) = fts_query(query) else {
+        return Ok(Vec::new());
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT i.slug, s.ref,
+                (SELECT MIN(mf.title) FROM memory_facts mf
+                 WHERE mf.idea_id = s.idea_id AND mf.slug = s.ref),
+                bm25(search_fts),
+                (SELECT COUNT(*) FROM backlinks bl WHERE bl.target_idea_id = i.id)
+         FROM search_fts s
+         JOIN ideas i ON i.id = s.idea_id
+         WHERE search_fts MATCH ?1
+           AND s.kind = 'memory'
+           AND (?2 IS NULL OR i.slug <> ?2)
+           AND EXISTS (SELECT 1 FROM memory_facts mf
+                       WHERE mf.idea_id = s.idea_id AND mf.slug = s.ref)",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![&match_expr, exclude_slug], |row| {
+        let bm25: f64 = row.get(3)?;
+        let inbound: i64 = row.get(4)?;
+        Ok(FactHit {
+            idea_slug: row.get(0)?,
+            fact_slug: row.get(1)?,
+            fact_title: row.get(2)?,
+            bm25,
+            score: -bm25 + BACKLINK_BOOST * (1.0 + inbound.min(BACKLINK_CAP) as f64).ln(),
+        })
+    })?;
+    let mut hits = rows.collect::<Result<Vec<_>, _>>()?;
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.idea_slug.cmp(&b.idea_slug))
+            .then_with(|| a.fact_slug.cmp(&b.fact_slug))
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
 /// Inbound direction of D23: distinct slugs of ideas that link *to* `slug` via `[[slug]]`,
 /// sorted. Matches on `target_slug`, so it also answers "who links to this not-yet-created
 /// idea?" for forward references.
@@ -988,5 +1057,174 @@ mod tests {
             .collect();
         assert_eq!(markets, ["alpha"]);
         assert!(ideas_with_tag(&conn, "nope").unwrap().is_empty());
+    }
+
+    fn insert_fact(conn: &Connection, idea_id: i64, slug: &str, title: &str, body: &str) {
+        conn.execute(
+            "INSERT INTO memory_facts (idea_id, slug, title, created_at) \
+             VALUES (?1, ?2, ?3, '2026-07-07T10:00:00Z')",
+            rusqlite::params![idea_id, slug, title],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO search_fts (idea_id, kind, ref, content) \
+             VALUES (?1, 'memory', ?2, ?3)",
+            rusqlite::params![idea_id, slug, format!("{title}\n\n{body}")],
+        )
+        .unwrap();
+    }
+
+    fn fact_fixture_idea(conn: &Connection, slug: &str) -> i64 {
+        insert_idea(conn, slug, slug, "draft", "2026-07-07T10:00:00Z");
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn vault_search_returns_fact_level_hits_with_slugs() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(tmp.path(), "alpha", "Alpha", &[], "Alpha statement.\n", 10);
+        write_fixture_idea(tmp.path(), "beta", "Beta", &[], "Beta statement.\n", 11);
+        for (idea, slug, title, body) in [
+            (
+                "beta",
+                "churn-cliff",
+                "Churn cliff",
+                "Zorbicon retention drops.\n",
+            ),
+            ("beta", "unrelated", "Unrelated", "Nothing to see.\n"),
+        ] {
+            store::write_memory_fact(
+                tmp.path(),
+                idea,
+                &MemoryFact {
+                    frontmatter: MemoryFactFrontmatter {
+                        slug: slug.into(),
+                        title: title.into(),
+                        tags: vec![],
+                        created: Utc.with_ymd_and_hms(2026, 7, 7, 12, 0, 0).unwrap(),
+                        links: vec![],
+                    },
+                    body: body.into(),
+                },
+            )
+            .unwrap();
+        }
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let hits = vault_search(&conn, "zorbicon", Some("alpha"), 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].idea_slug, "beta");
+        assert_eq!(hits[0].fact_slug, "churn-cliff");
+        assert_eq!(hits[0].fact_title, "Churn cliff");
+        assert!(hits[0].bm25 < 0.0);
+        assert_eq!(hits[0].score, -hits[0].bm25);
+    }
+
+    #[test]
+    fn vault_search_excludes_the_querying_idea() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        let a = fact_fixture_idea(&conn, "idea-a");
+        let b = fact_fixture_idea(&conn, "idea-b");
+        insert_fact(&conn, a, "fact-a", "Fact A", "quorblex appears here");
+        insert_fact(&conn, b, "fact-b", "Fact B", "quorblex appears here too");
+
+        let hits = vault_search(&conn, "quorblex", Some("idea-a"), 10).unwrap();
+        let got: Vec<_> = hits
+            .iter()
+            .map(|h| (h.idea_slug.as_str(), h.fact_slug.as_str()))
+            .collect();
+        assert_eq!(got, [("idea-b", "fact-b")]);
+
+        let all = vault_search(&conn, "quorblex", None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn vault_search_limit_applies_after_exclusion() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        let a = fact_fixture_idea(&conn, "idea-a");
+        let b = fact_fixture_idea(&conn, "idea-b");
+        for n in 0..3 {
+            insert_fact(
+                &conn,
+                a,
+                &format!("a-{n}"),
+                "Dense",
+                "plinthar plinthar plinthar",
+            );
+        }
+        insert_fact(
+            &conn,
+            b,
+            "b-0",
+            "Sparse",
+            "plinthar among many other filler words here",
+        );
+        insert_fact(
+            &conn,
+            b,
+            "b-1",
+            "Sparse two",
+            "plinthar among many other filler words there",
+        );
+
+        let hits = vault_search(&conn, "plinthar", Some("idea-a"), 2).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|h| h.idea_slug == "idea-b"));
+    }
+
+    #[test]
+    fn vault_search_backlink_prior_breaks_ties() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        let quiet = fact_fixture_idea(&conn, "aaa-quiet");
+        let popular = fact_fixture_idea(&conn, "zzz-popular");
+        insert_fact(&conn, quiet, "f", "Same", "wombatron listing");
+        insert_fact(&conn, popular, "f", "Same", "wombatron listing");
+        for src in ["src-a", "src-b"] {
+            let src_id = fact_fixture_idea(&conn, src);
+            conn.execute(
+                "INSERT INTO backlinks (source_idea_id, target_slug, target_idea_id) \
+                 VALUES (?1, 'zzz-popular', ?2)",
+                rusqlite::params![src_id, popular],
+            )
+            .unwrap();
+        }
+
+        let hits = vault_search(&conn, "wombatron", None, 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].idea_slug, "zzz-popular");
+        assert_eq!(hits[0].bm25, hits[1].bm25);
+        let expected = BACKLINK_BOOST * 3.0_f64.ln();
+        assert!((hits[0].score - hits[1].score - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn vault_search_returns_one_hit_per_matching_fact_row_when_slugs_collide() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        let a = fact_fixture_idea(&conn, "idea-a");
+        insert_fact(&conn, a, "dup", "First", "grallomir appears here");
+        insert_fact(&conn, a, "dup", "Second", "nothing relevant");
+
+        let hits = vault_search(&conn, "grallomir", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].fact_slug, "dup");
+    }
+
+    #[test]
+    fn vault_search_blank_query_is_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        let a = fact_fixture_idea(&conn, "idea-a");
+        insert_fact(&conn, a, "f", "Fact", "anything at all");
+
+        assert!(vault_search(&conn, "", None, 5).unwrap().is_empty());
+        assert!(vault_search(&conn, "   \t\n", None, 5).unwrap().is_empty());
+        assert!(vault_search(&conn, "\0", None, 5).unwrap().is_empty());
     }
 }

@@ -16,8 +16,9 @@ use super::IndexError;
 /// was built by a different binary, so `reindex::check_drift` reports drift and `reindex` drops
 /// and recreates every derived table before rebuilding from the vault (ADR-0002).
 ///
-/// 0 = unstamped (binaries before the stamp), 2 = `fact_links` + `edges`, 3 = tag edges.
-pub const SCHEMA_VERSION: i64 = 3;
+/// 0 = unstamped (binaries before the stamp), 2 = `fact_links` + `edges`, 3 = tag edges,
+/// 4 = `search_fts.ref` (fact slug of `memory` rows, artifact slug of `artifact` rows).
+pub const SCHEMA_VERSION: i64 = 4;
 
 const DERIVED_TABLES: [&str; 8] = [
     "edges",
@@ -90,7 +91,8 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
     idea_id UNINDEXED,
     kind    UNINDEXED,
-    content
+    content,
+    ref     UNINDEXED
 );
 "#;
 

@@ -240,25 +240,25 @@ fn reindex_inner(
         // idea_body/conversation/artifact were indexed, leaving the title/tags/fact-body text the
         // owner actually wrote unsearchable.
         tx.execute(
-            "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'title', ?2)",
+            "INSERT INTO search_fts (idea_id, kind, ref, content) VALUES (?1, 'title', '', ?2)",
             params![idea_id, sanitized(&fm.title)],
         )?;
         if !fm.tags.is_empty() {
             // Space-joined so multi-word tags stay separable tokens; omitted entirely when there
             // are no tags rather than indexing an empty row.
             tx.execute(
-                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'tags', ?2)",
+                "INSERT INTO search_fts (idea_id, kind, ref, content) VALUES (?1, 'tags', '', ?2)",
                 params![idea_id, sanitized(&fm.tags.join(" "))],
             )?;
         }
         tx.execute(
-            "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'idea_body', ?2)",
+            "INSERT INTO search_fts (idea_id, kind, ref, content) VALUES (?1, 'idea_body', '', ?2)",
             params![idea_id, sanitized(&idea.body)],
         )?;
         let conversation = store::read_conversation(vault_dir, &entry.slug)?;
         if !conversation.is_empty() {
             tx.execute(
-                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'conversation', ?2)",
+                "INSERT INTO search_fts (idea_id, kind, ref, content) VALUES (?1, 'conversation', '', ?2)",
                 params![idea_id, sanitized(&conversation)],
             )?;
         }
@@ -276,9 +276,10 @@ fn reindex_inner(
         };
         for artifact in &artifacts {
             tx.execute(
-                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'artifact', ?2)",
+                "INSERT INTO search_fts (idea_id, kind, ref, content) VALUES (?1, 'artifact', ?2, ?3)",
                 params![
                     idea_id,
+                    artifact.frontmatter.slug,
                     sanitized(&format!(
                         "{}\n\n{}",
                         artifact.frontmatter.title, artifact.body
@@ -321,9 +322,10 @@ fn reindex_inner(
             // MEMORY.md are index-only pointers, no body column) — one 'memory' search_fts row
             // per fact, title+body, so extracted facts are finally searchable like idea_body.
             tx.execute(
-                "INSERT INTO search_fts (idea_id, kind, content) VALUES (?1, 'memory', ?2)",
+                "INSERT INTO search_fts (idea_id, kind, ref, content) VALUES (?1, 'memory', ?2, ?3)",
                 params![
                     idea_id,
+                    fact.frontmatter.slug,
                     sanitized(&format!("{}\n\n{}", fact.frontmatter.title, fact.body))
                 ],
             )?;
@@ -762,8 +764,8 @@ mod tests {
              ORDER BY s.slug, d.slug, e.type",
         );
         push_query(
-            "SELECT 'fts', i.slug, s.kind, s.content FROM search_fts s
-             JOIN ideas i ON i.id = s.idea_id ORDER BY i.slug, s.kind",
+            "SELECT 'fts', i.slug, s.kind, s.ref, s.content FROM search_fts s
+             JOIN ideas i ON i.id = s.idea_id ORDER BY i.slug, s.kind, s.ref",
         );
         out
     }
@@ -1838,6 +1840,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kind, "artifact");
+        let artifact_ref: String = conn
+            .query_row(
+                "SELECT ref FROM search_fts WHERE search_fts MATCH 'flywheel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifact_ref, "20260708-193045-key-decisions");
 
         // The artifact's [[beta]] link is NOT a backlink (alpha's only targets come from its
         // body and facts: beta + ghost-idea).
@@ -1923,6 +1933,33 @@ mod tests {
             .unwrap();
         assert!(edges > 0);
         assert!(!check_drift(&conn, tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn reindex_upgrades_a_search_table_without_the_ref_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE search_fts USING fts5(
+                 idea_id UNINDEXED, kind UNINDEXED, content);
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        schema::apply_schema(&conn).unwrap();
+        assert!(check_drift(&conn, tmp.path()).unwrap());
+
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert!(!crate::index::queries::search(&conn, "flywheel")
+            .unwrap()
+            .is_empty());
+        let hits = crate::index::queries::vault_search(&conn, "refines", Some("alpha"), 5).unwrap();
+        let got: Vec<_> = hits
+            .iter()
+            .map(|h| (h.idea_slug.as_str(), h.fact_slug.as_str()))
+            .collect();
+        assert_eq!(got, [("beta", "durable-two")]);
     }
 
     #[test]

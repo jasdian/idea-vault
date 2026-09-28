@@ -155,8 +155,8 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Conversation text | `conversation.md` | `search_fts` (`kind = 'conversation'`) |
 | Compacted rolling summary | `compacted.md` | *(none — derived sidecar, never indexed; ADR-0012)* |
 | Memory fact (frontmatter) | `memory/<fact>.md` | `memory_facts` |
-| Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
-| Knowledge-extraction artifact (finding or synthesis) or quarantined store-time facts | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`) |
+| Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact, `ref` = the fact's frontmatter slug — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
+| Knowledge-extraction artifact (finding or synthesis) or quarantined store-time facts | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
 | `[[slug]]` links | inside bodies (idea/conversation/memory only — **not** mined from artifact bodies) | `backlinks` |
 | Timestamps | frontmatter `created:`/`updated:` | `ideas.created_at`/`updated_at` |
@@ -294,6 +294,7 @@ erDiagram
         integer idea_id
         text kind "title | tags | idea_body | conversation | memory | artifact"
         text content
+        text ref "fact slug (memory) | artifact slug (artifact) | empty otherwise"
     }
 ```
 
