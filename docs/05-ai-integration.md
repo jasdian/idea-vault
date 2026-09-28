@@ -35,7 +35,16 @@ Submodules:
   `Arc<RwLock<LlmSettings>>`; every call re-reads the current settings to pick the backend and its
   tuned parameters (Ollama temperature; claude-code model + effort), so the Settings page
   (`GET`/`POST /settings`) can retoggle/retune with no restart
-  ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)).
+  ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)). A role-bearing call runs on a scoped
+  clone from `ai::backend::LlmBackend::for_role`: while `LlmSettings::role_tuning` is on, it
+  overlays that role's `ai::backend::RoleProfile` (Ollama temperature; a claude model and effort
+  that inherit the global value when blank) on the one snapshot it reads, so the backend choice
+  and its params still come from a single read. `ai` keys the profiles by plain role-name strings
+  and never imports `concepts`; `concepts::agents::default_role_profiles` seeds them at boot
+  ([ADR-0026](./adr/0026-per-role-call-profiles.md)). Prompts are sized from the global window
+  before any overlay, so with role tuning on the claude-code window is the smallest across the
+  global model and every per-role model override; the Ollama window is unchanged, because every
+  role shares the one Ollama model.
 - `ai::budget` — assembles a prompt within the model's context limit ([D21](./06-concepts/swarm.md));
   the limit itself is now derived live per backend/model rather than a fixed constant
   ([ADR-0014](./adr/0014-dynamic-context-budget.md)).

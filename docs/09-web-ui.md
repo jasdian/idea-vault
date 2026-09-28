@@ -11,7 +11,8 @@
 > [ADR-0017](./adr/0017-web-access-tools.md) (the Settings page's `web_access` checkbox),
 > [ADR-0018](./adr/0018-mcp-servers.md) (the `/mcp` server management page),
 > [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md) (the `/skills` skill book),
-> [ADR-0023](./adr/0023-verification-layer.md) (the Settings page's `audit` checkbox).
+> [ADR-0023](./adr/0023-verification-layer.md) (the Settings page's `audit` checkbox),
+> [ADR-0026](./adr/0026-per-role-call-profiles.md) (the Settings page's role-tuning table).
 
 ## Interaction model
 
@@ -37,7 +38,7 @@ flowchart LR
         R1["GET / — idea list + search"]
         R2["GET /idea/:slug — idea view (body, convo, memory)"]
         R12["GET /idea/:slug/history — read-only full thread + Fork control"]
-        R13["GET /settings — live LLM backend + params form (incl. web_access checkbox, ADR-0017; audit checkbox, ADR-0023)"]
+        R13["GET /settings — live LLM backend + params form (incl. web_access checkbox, ADR-0017; audit checkbox, ADR-0023; role-tuning table, ADR-0026)"]
         R19["GET /idea/:slug/artifact/:name — view one artifact (.md full page | .html served raw)"]
         R24["GET /mcp — MCP server management page (ADR-0018)"]
         R33["GET /skills — the skill book: every move by spine stage (ADR-0022)"]
@@ -56,7 +57,7 @@ flowchart LR
         R14["POST /idea/:slug/fork — branch to a new InDiscussion idea → HX-Redirect"]
         R15["POST /idea/:slug/turn/:index/delete — remove one turn → transcript"]
         R16["POST /idea/:slug/memory/:fact/delete — remove one memory fact → memory panel"]
-        R13b["POST /settings — apply live settings → settings form"]
+        R13b["POST /settings — apply live settings (incl. role_<name>_{temperature,model,effort}) → settings form"]
         R18["POST /idea/:slug/extract — run knowledge extraction (D30, job) → transcript + indicator"]
         R20["POST /idea/:slug/artifact/:name/delete — remove one artifact file → artifacts panel"]
         R21["POST /idea/:slug/compact — fold now (ADR-0012/0016, job) → transcript + indicator | notice"]

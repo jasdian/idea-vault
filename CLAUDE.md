@@ -49,7 +49,8 @@ wrong, raise it rather than working around it.
   cloud API call) for owners who want the foil to read their own notes/artifacts. The two backends
   sit behind a **live-switchable router** (`ai::backend::LlmBackend`): a Settings page
   (`GET`/`POST /settings`) toggles the active backend and tunes Ollama temperature / claude-code
-  model+effort with no restart. See [ADR-0009](docs/adr/0009-pluggable-llm-backend-claude-code.md)
+  model+effort — globally and per agent role ([ADR-0026](docs/adr/0026-per-role-call-profiles.md))
+  — with no restart. See [ADR-0009](docs/adr/0009-pluggable-llm-backend-claude-code.md)
   and [ADR-0011](docs/adr/0011-live-switchable-llm-backend.md). The subagent-swarm and skills
   concepts run against whichever backend is active — keep prompt/context budgets modest and degrade
   gracefully when a model is slow or unavailable.

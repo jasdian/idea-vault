@@ -29,6 +29,29 @@ orchestrator fans it out.
 | **Synthesizer** | Neutral: merge many agent outputs into one coherent view | the idea statement + labelled findings (with audit verdicts) | consolidated position, tensions surfaced |
 | **Auditor** | Sceptical by default, no stake in the findings | only the numbered findings + idea/memory/discussion | one `F<n>: CONFIRMED\|UNCERTAIN\|REFUTED — reason` line per finding ([ADR-0023](../adr/0023-verification-layer.md)) |
 
+### Call profiles
+
+Each role also carries a **call profile** (`ai::backend::RoleProfile`,
+[ADR-0026](../adr/0026-per-role-call-profiles.md)): an Ollama temperature plus an optional claude
+model and effort, where blank inherits the global setting. `concepts::agents::run_agent` (swarm
+fan-out, swarm synthesis, the audit, knowledge extraction), a workflow's chained step and
+`concepts::skills::invoke` (under the skill's own role) all call through
+`ai::backend::LlmBackend::for_role`. Free chat with the foil, compaction and store-time extraction
+have no role and keep the global settings. Role tuning is on by default and switchable on the
+Settings page, which also edits each row. The defaults (`concepts::agents::AgentRole::default_profile`):
+
+| Role | Temperature | Claude effort |
+|------|-------------|---------------|
+| Harvester | 0.2 | low |
+| Auditor | 0.2 | high |
+| Synthesizer | 0.5 | high |
+| Researcher | 0.7 | medium |
+| Critic | 0.9 | inherit |
+| Advocate | 0.9 | inherit |
+
+No default sets a claude model, so every role inherits the global one until the owner sets it.
+Temperature reaches only Ollama; the claude CLI has no temperature flag.
+
 Roles are prompt configurations, so adding one (an "estimator", an "ethicist") is additive in
 spirit. In code they form a closed enum: a new role means a new variant plus a persona, not a data
 file.
