@@ -129,6 +129,8 @@ flowchart TD
     ai --> mcp
     ai --> sources
     vault --> domain
+    mcp --> domain
+    sources --> domain
 
     classDef top fill:#1f6feb22,stroke:#1f6feb;
     classDef base fill:#2ea04322,stroke:#2ea043;
@@ -143,12 +145,13 @@ flowchart TD
 | Module | May depend on | Must **not** depend on |
 |--------|---------------|------------------------|
 | `domain` | (std/serde only) | anything internal |
-| `mcp` | (std/serde only) | anything internal, **especially `ai`** |
-| `vault` | `domain` | `index`, `ai`, `memory`, `concepts`, `web`, `mcp` |
+| `mcp` | `domain` | anything else internal, **especially `ai`** |
+| `sources` | `domain` | anything else internal, **especially `ai`** |
+| `vault` | `domain` | `index`, `ai`, `memory`, `concepts`, `web`, `mcp`, `sources` |
 | `ai` | `domain`, `mcp`, `sources` | `vault`, `index`, `memory`, `concepts`, `web` |
-| `index` | `vault`, `domain` | `ai`, `memory`, `concepts`, `web`, `mcp` |
-| `memory` | `vault`, `ai`, `index`, `domain` | `concepts`, `web`, `mcp` |
-| `concepts` | `ai`, `vault`, `domain` (read `index` via `memory` where needed) | `web`, `mcp` |
+| `index` | `vault`, `domain` | `ai`, `memory`, `concepts`, `web`, `mcp`, `sources` |
+| `memory` | `vault`, `ai`, `index`, `domain` | `concepts`, `web`, `mcp`, `sources` |
+| `concepts` | `ai`, `vault`, `domain` (read `index` via `memory` where needed) | `web`, `mcp`, `sources` |
 | `web` | everything below | (nothing may depend on `web`) |
 
 > Rationale for a couple of edges that might surprise: `index` depends on `vault` because reindex
@@ -156,6 +159,9 @@ flowchart TD
 > deliberately does **not** depend on `vault` — it is a pure model boundary; callers assemble prompts
 > and hand them in. **`mcp` is a leaf like `domain`**, not a peer of `ai::mcp`: `mcp` holds only the
 > owner's server registry (config/persistence, no protocol knowledge) and must never import `ai`;
+> `mcp` and `sources` may depend on `domain` alone, for the shared slug-alphabet check
+> (`mcp::is_valid_name` re-exporting `domain::slug::is_valid`; `sources`'s own `domain::slug` use)
+> ([ADR-0025](./adr/0025-registry-leaves-may-use-domain.md));
 > `ai::mcp` (the wire client) must never import `mcp`; `ai::backend` is the *only* module that imports
 > both, one-way, so combining "which servers are enabled" with "how to call one" never creates a
 > cycle ([ADR-0018](./adr/0018-mcp-servers.md)). `web` also depends on `mcp` directly (not only
