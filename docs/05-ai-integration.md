@@ -10,7 +10,9 @@
 > [ADR-0004](./adr/0004-sse-token-streaming.md)),
 > [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
 > [ADR-0014](./adr/0014-dynamic-context-budget.md) (dynamic per-backend/model context budget),
-> [ADR-0017](./adr/0017-web-access-tools.md) (live-toggleable web access on either backend).
+> [ADR-0017](./adr/0017-web-access-tools.md) (live-toggleable web access on either backend),
+> [ADR-0018](./adr/0018-mcp-servers.md) (MCP server tools on either backend),
+> [ADR-0021](./adr/0021-reference-sources.md) (per-idea reference sources, scoped per turn).
 
 ## The `ai` boundary
 
@@ -42,14 +44,48 @@ Submodules:
   env-overridable via `IDEA_VAULT_SEARCH_URL`) and `fetch_url` (GET + tag-strip, truncated to
   12,000 chars). Only consumed by the Ollama path — claude-code brings its own `WebSearch`/
   `WebFetch` tools, which the router allows/disallows instead of calling into this module.
+- `ai::mcp` — the MCP Streamable-HTTP wire client (initialize, session, `tools/list`,
+  `tools/call`). It never imports the `crate::mcp` registry. `ai::backend` is the only module that
+  combines the two ([ADR-0018](./adr/0018-mcp-servers.md)).
+- `ai::sources` — the deterministic reference-source tool leaves `source_list`, `source_grep` and
+  `source_read` ([ADR-0021](./adr/0021-reference-sources.md)). `ai::sources::tool_definitions`
+  offers the attached source names as a JSON-schema enum, so the model picks *which* source and
+  never a path. Every relative path goes through `resolve_rel`, the containment gate, which rejects
+  absolute paths, `..` and symlink escapes. `ai::sources::execute_tool` is infallible like
+  `ai::web::execute_tool`: an escape attempt or a missing file comes back as readable text. Output is
+  bounded (`MAX_LIST_ENTRIES` 200 entries, `MAX_GREP_FILES` 2,000 files scanned, `MAX_GREP_MATCHES`
+  40 lines, `READ_MAX_CHARS` 12,000 characters) and deterministic (sorted walks, hidden trees skipped).
+- `ai::contract` — pure output-contract checks for skill answers (`validate`, the repair that strips
+  chatter, `retry_note`, `items`, `trim_sections`; [ADR-0023](./adr/0023-verification-layer.md)).
+  The evaluator-optimizer loop lives with the callers.
 
-**Web access tool-calling loop ([ADR-0017](./adr/0017-web-access-tools.md)).** When `web_access` is
-on, `LlmBackend::chat` on the Ollama path runs a **bounded tool-calling loop** over `/api/chat`
-(`stream: false`, `tools: ai::web::tool_definitions()`): up to `MAX_TOOL_ROUNDS = 4` rounds of
-"model may call tools" (at most `MAX_CALLS_PER_ROUND = 3` executed calls per round, each dispatched
-through `ai::web::execute_tool`, which is infallible — every failure mode becomes readable
-tool-result text, never a turn failure), followed by one forced tool-free call so the loop always
-terminates in a plain answer. A model that rejects the `tools` field (`400 does not support tools`)
+**Per-turn source scoping ([ADR-0021](./adr/0021-reference-sources.md)).** The shared `state.llm`
+never carries sources. A web job that has an idea in scope builds a scoped clone with
+`web::routes::scoped_llm`. That function reads the idea's frontmatter `sources:` list, resolves it
+through `sources::SourceRegistry::resolve_attached` (unknown or unmounted names are dropped with a
+warning), and calls `LlmBackend::with_turn_sources`. The chat, skill, swarm, workflow and knowledge-extraction jobs do
+this. The idea and history pages also build one, but only so the usage meter counts the source tool
+schemas. Store, compaction and the health probe run on the shared instance and stay source-free by
+construction. A lookup failure degrades to the unscoped backend, so a turn never
+fails over its sources. One clone serves the whole turn, so the context budget, the usage meter
+(`LlmBackend::tool_context_bytes` counts the `source_*` schemas on Ollama) and the dispatch agree on
+what rides the window. On Ollama, `with_sources_note` prefixes the first message with the attached
+names so the model knows the tools exist. On claude-code, each resolved root becomes an `--add-dir`
+plus a system-prompt hint instead, never both.
+
+**Tool-calling loop ([ADR-0017](./adr/0017-web-access-tools.md), ADR-0018, ADR-0021).**
+`LlmBackend::chat` on the Ollama path runs a **bounded tool-calling loop** over `/api/chat`
+(`stream: false`) whenever there is anything to offer: `web_access` is on, **or** an MCP server is
+enabled, **or** the turn has attached sources. The `tools` field is
+`merged_tool_definitions(web, sources, mcp)`, merged in that order: `ai::web::tool_definitions()`
+when web access is on, `ai::sources::tool_definitions` for a scoped turn, and every enabled MCP
+server's tools mangled as `mcp__<server>__<tool>`. If the merge is empty (every MCP server degraded
+away, say), the call is a plain one. The loop runs up to `MAX_TOOL_ROUNDS = 4` rounds of "model may
+call tools". Each round executes at most `MAX_CALLS_PER_ROUND = 3` calls, each routed by name to
+`ai::web::execute_tool`, `ai::sources::execute_tool` or that server's MCP session. Every executor is
+infallible: every failure mode becomes readable tool-result text, never a turn failure. One forced
+tool-free call follows, so the loop always ends in a plain answer. `LlmBackend::chat_stream` never
+runs the loop. A model that rejects the `tools` field (`400 does not support tools`)
 falls back to the plain streaming call. Because a non-streaming round has no token-to-token gaps to
 bound, it gets its own wall-clock timeout, `token_timeout × TOOL_ROUND_TIMEOUT_FACTOR` (4×), instead
 of the usual inactivity timeout. On the claude-code path, the router instead allows the CLI's own
@@ -109,13 +145,19 @@ sequenceDiagram
     participant L as ai::backend::LlmBackend
 
     B->>H: POST /idea/:slug/chat (turn text)
-    H->>J: try_claim(slug) — one job per idea
-    H->>V: append user turn to conversation.md (persisted up front)
-    H->>V: set state=in_discussion/reopened (if transitioning)
-    H-->>B: 200 transcript + "thinking…" indicator (self-repolling)
-    H->>Task: tokio::spawn (detached — outlives the request)
+    H->>J: try_claim_idle(slug) — one job per idea
+    alt idea busy (Running, or an unshown outcome)
+        H->>J: enqueue(slug, text) — FIFO, cap MAX_QUEUED
+        H-->>B: 202 transcript + queue panel (400 when the queue is full)
+    else claimed
+        H->>V: append user turn to conversation.md (persisted up front)
+        H->>V: set state=in_discussion/reopened (if transitioning)
+        H-->>B: 200 transcript + "thinking…" indicator (self-repolling)
+        H->>Task: tokio::spawn (detached — outlives the request)
+    end
+    Task->>L: scoped_llm(slug) — per-turn clone with the idea's attached sources (ADR-0021)
     Task->>Bud: assemble prompt (foil instruction + ≤1 KB skill book + body + memory + trimmed convo)
-    Task->>L: chat(prompt) [acquires semaphore; dispatches to the active backend]
+    Task->>L: acquire semaphore, then chat(prompt) [dispatches to the active backend]
     L-->>Task: reply (or AiError)
     alt success, non-empty reply
         Task->>V: append full assistant turn to conversation.md
@@ -125,6 +167,7 @@ sequenceDiagram
     end
     loop every ~1.5s until Idle
         B->>H: GET /idea/:slug/pending
+        H->>J: start_next_queued — if idle and a message waits, claim + start it
         H->>J: peek(slug)
         J-->>H: Running(elapsed_secs) | Failed(msg) | Idle
         H-->>B: re-emit "thinking…" | error block | finished transcript
@@ -136,8 +179,16 @@ Key obligations:
 - **Persist boundaries:** user turn appended *before* the job is spawned (survives navigation);
   assistant turn appended *only after* a complete, non-empty reply (a partial or empty reply must
   never become truth — on failure nothing is written, `mark_failed` just records a message).
-- **One job per idea:** `try_claim` refuses a second concurrent job for the same idea; a second
-  "Send" while busy just re-shows the in-flight state.
+- **One job per idea, and chat queues:** an idea runs at most one job at a time. A chat "Send" while
+  the idea is busy is not dropped. `jobs::enqueue` puts it on the idea's in-memory FIFO (capped at
+  `web::jobs::MAX_QUEUED` = 20; past that the send is a `400`), and the route answers `202`. Each
+  `GET /idea/:slug/pending` poll calls `chat::start_next_queued`, which claims the freed slot with
+  `jobs::try_claim_idle` and starts the next message. `try_claim_idle` refuses a slot still holding an
+  unshown `Failed`/`Notice` outcome, so the owner sees an error before the queue moves on. A restart
+  loses the queue, just as it loses an in-flight job. The other AI routes (skill, swarm, workflow,
+  extract, compact, store) don't queue. They claim with `jobs::try_claim`, which refuses only a
+  `Running` slot and may take over a consumed `Failed`/`Notice` one. On a busy idea they re-show
+  the in-flight state.
 - **Poll, don't hold a connection open:** the indicator is a self-repolling HTMX fragment
   (`hx-get="/idea/:slug/pending" hx-trigger="load delay:1500ms"`) carrying a server-computed
   elapsed-seconds count — there is no long-lived connection to manage or a client disconnect to
@@ -273,3 +324,5 @@ Principles: **truth-preserving** (index errors never lose vault data — reindex
 - [ADR-0011](./adr/0011-live-switchable-llm-backend.md) — live backend router + Settings page.
 - [ADR-0014](./adr/0014-dynamic-context-budget.md) — dynamic per-backend/model context budget (`/api/show`, `num_ctx`, overrides).
 - [ADR-0017](./adr/0017-web-access-tools.md) — live `web_access` setting, `ai::web` tool loop (Ollama), WebSearch/WebFetch allow-deny (claude-code).
+- [ADR-0018](./adr/0018-mcp-servers.md) — MCP server registry + `ai::mcp` wire client, bridged by `ai::backend`.
+- [ADR-0021](./adr/0021-reference-sources.md) — reference sources: `ai::sources` leaves (Ollama), `--add-dir` (claude-code), per-turn `with_turn_sources` scoping.
