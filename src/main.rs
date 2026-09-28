@@ -212,6 +212,8 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         claude_ctx_tokens: config.claude_ctx_tokens,
         web_access: config.web_access,
         audit_findings: config.audit_findings,
+        role_tuning: false,
+        role_profiles: Default::default(),
     };
     Ok(LlmBackend::new(ollama, claude_base, settings))
 }

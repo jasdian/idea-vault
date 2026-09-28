@@ -16,7 +16,7 @@
 //! `mcp__<server>__<tool>` (the claude CLI's convention, equally valid as an Ollama function
 //! name) so one flat definitions array can route back to the right server.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -107,6 +107,22 @@ pub struct LlmSettings {
     /// Factored audit (docs/adr/0023): swarms and workflows run one Auditor call that labels each
     /// finding CONFIRMED / UNCERTAIN / REFUTED before synthesis. Costs one model call per run.
     pub audit_findings: bool,
+    /// Per-role call profiles (docs/adr/0026): when on, a call scoped with
+    /// [`LlmBackend::for_role`] overlays its role's [`RoleProfile`] on this snapshot.
+    pub role_tuning: bool,
+    /// Role name → profile. Plain string keys: `ai` never knows the role set (D4); `concepts`
+    /// seeds the defaults.
+    pub role_profiles: BTreeMap<String, RoleProfile>,
+}
+
+/// One agent role's call parameters (docs/adr/0026). A blank `claude_model` or `claude_effort`
+/// inherits the global setting; `temperature` always applies (Ollama only — the claude CLI has
+/// no temperature flag).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleProfile {
+    pub temperature: f32,
+    pub claude_model: String,
+    pub claude_effort: String,
 }
 
 /// The live LLM router: both backends available, dispatch chosen per-call from [`LlmSettings`].
@@ -136,6 +152,10 @@ pub struct LlmBackend {
     /// [`with_turn_sources`](Self::with_turn_sources), so `ai` never reads app state (D4).
     /// `Arc` keeps the clone cheap; the shared instance is immutable-by-construction.
     turn_sources: Arc<Vec<ResolvedSource>>,
+    /// The agent role this scoped clone calls as ([`for_role`](Self::for_role)); `None` on the
+    /// shared instance, so role-less calls (free chat, compaction, extraction) read the global
+    /// settings.
+    call_role: Option<Arc<str>>,
 }
 
 /// Per-server cached tool list: fetch instant (TTL anchor) + the tools, keyed `name@url`.
@@ -154,6 +174,7 @@ impl LlmBackend {
             mcp: None,
             mcp_tools_cache: Arc::new(RwLock::new(HashMap::new())),
             turn_sources: Arc::new(Vec::new()),
+            call_role: None,
         }
     }
 
@@ -165,6 +186,14 @@ impl LlmBackend {
     pub fn with_turn_sources(&self, sources: Vec<ResolvedSource>) -> Self {
         let mut scoped = self.clone();
         scoped.turn_sources = Arc::new(sources);
+        scoped
+    }
+
+    /// A scoped view that calls as agent role `role` (docs/adr/0026): same settings, caches and
+    /// registries, with that role's [`RoleProfile`] overlaid per call while role tuning is on.
+    pub fn for_role(&self, role: &str) -> Self {
+        let mut scoped = self.clone();
+        scoped.call_role = Some(Arc::from(role));
         scoped
     }
 
@@ -235,6 +264,10 @@ impl LlmBackend {
                 // On, as in production: tests see the same swarm/workflow call shape the owner
                 // gets by default.
                 audit_findings: true,
+                // Off with no profiles: tests keep the single-temperature request shape unless
+                // they opt in.
+                role_tuning: false,
+                role_profiles: BTreeMap::new(),
             },
         )
     }
@@ -245,6 +278,28 @@ impl LlmBackend {
             .read()
             .expect("llm settings lock poisoned")
             .clone()
+    }
+
+    /// The settings one call runs with: the live snapshot, overlaid by this clone's role profile
+    /// when role tuning is on and the role has one (docs/adr/0026).
+    fn effective_settings(&self) -> LlmSettings {
+        let mut s = self.settings();
+        let Some(role) = self.call_role.as_deref() else {
+            return s;
+        };
+        if !s.role_tuning {
+            return s;
+        }
+        if let Some(p) = s.role_profiles.get(role).cloned() {
+            s.temperature = p.temperature;
+            if !p.claude_model.trim().is_empty() {
+                s.claude_model = p.claude_model;
+            }
+            if !p.claude_effort.trim().is_empty() {
+                s.claude_effort = p.claude_effort;
+            }
+        }
+        s
     }
 
     /// Replace the settings (the Settings page save) — effective on the next call.
@@ -259,14 +314,20 @@ impl LlmBackend {
     /// — and hand the enabled MCP servers to the CLI as an `--mcp-config` JSON blob plus a
     /// `mcp__<name>` tool-prefix allow per server (the CLI expands a bare prefix to every tool
     /// the server offers).
-    fn claude(&self) -> ClaudeCodeClient {
-        ClaudeCodeClient::new(self.claude_config())
+    fn claude(&self, s: &LlmSettings) -> ClaudeCodeClient {
+        ClaudeCodeClient::new(self.claude_config_from(s))
     }
 
-    /// The per-call config [`claude`](Self::claude) wraps — split out so the settings→config
-    /// composition (model/effort/web/MCP) is assertable in unit tests without spawning a CLI.
+    /// [`claude_config_from`](Self::claude_config_from) over a fresh effective snapshot.
+    #[cfg(test)]
     fn claude_config(&self) -> ClaudeCodeConfig {
-        let s = self.settings();
+        self.claude_config_from(&self.effective_settings())
+    }
+
+    /// The per-call config [`claude`](Self::claude) wraps, composed from the caller's snapshot so
+    /// the backend choice and its params come from one read — split out so the settings→config
+    /// composition (model/effort/web/MCP) is assertable in unit tests without spawning a CLI.
+    fn claude_config_from(&self, s: &LlmSettings) -> ClaudeCodeConfig {
         let mut cfg = self.claude_base.clone();
         if !s.claude_model.trim().is_empty() {
             cfg.model = Some(s.claude_model.trim().to_string());
@@ -337,15 +398,16 @@ impl LlmBackend {
 
     /// Health probe for the degraded-AI UI (D20) — probes whichever backend is active.
     pub async fn probe(&self) -> AiHealth {
-        match self.settings().backend {
+        let s = self.effective_settings();
+        match s.backend {
             LlmBackendKind::Ollama => self.ollama.probe().await,
-            LlmBackendKind::ClaudeCode => self.claude().probe().await,
+            LlmBackendKind::ClaudeCode => self.claude(&s).probe().await,
         }
     }
 
     /// A human-facing model label for the active backend (degraded hint, meter, logs).
     pub fn model(&self) -> String {
-        let s = self.settings();
+        let s = self.effective_settings();
         match s.backend {
             LlmBackendKind::Ollama => self.ollama.model().to_string(),
             LlmBackendKind::ClaudeCode => {
@@ -393,7 +455,18 @@ impl LlmBackend {
                 if s.claude_ctx_tokens > 0 {
                     return s.claude_ctx_tokens;
                 }
-                claude_window_tokens(&s.claude_model)
+                // Prompts are sized from the global snapshot before any role overlay, so the
+                // window must fit the smallest model a role call may land on (docs/adr/0026).
+                let global = claude_window_tokens(&s.claude_model);
+                if !s.role_tuning {
+                    return global;
+                }
+                s.role_profiles
+                    .values()
+                    .map(|p| p.claude_model.trim())
+                    .filter(|m| !m.is_empty())
+                    .map(claude_window_tokens)
+                    .fold(global, usize::min)
             }
         }
     }
@@ -513,7 +586,7 @@ impl LlmBackend {
     /// any MCP server enabled, the Ollama path runs the bounded tool loop instead of a plain
     /// one-shot call.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
-        let s = self.settings();
+        let s = self.effective_settings();
         match s.backend {
             LlmBackendKind::Ollama => {
                 // Cold cache: this very call refreshes the window while the prompt was assembled
@@ -531,7 +604,7 @@ impl LlmBackend {
                     self.ollama.chat_with(options, messages).await
                 }
             }
-            LlmBackendKind::ClaudeCode => self.claude().chat(messages).await,
+            LlmBackendKind::ClaudeCode => self.claude(&s).chat(messages).await,
         }
     }
 
@@ -731,14 +804,14 @@ impl LlmBackend {
     /// Streaming completion (D11). Terminal on error; aborts its backend when dropped, so a partial
     /// reply is never persisted.
     pub async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<TokenStream, AiError> {
-        let s = self.settings();
+        let s = self.effective_settings();
         match s.backend {
             LlmBackendKind::Ollama => {
                 self.refresh_ollama_ctx().await;
                 let options = self.ollama_options(&s, &messages);
                 self.ollama.chat_stream_with(options, messages).await
             }
-            LlmBackendKind::ClaudeCode => self.claude().chat_stream(messages).await,
+            LlmBackendKind::ClaudeCode => self.claude(&s).chat_stream(messages).await,
         }
     }
 }
@@ -1242,5 +1315,122 @@ mod tests {
         s.claude_ctx_tokens = 64_000;
         b.set_settings(s);
         assert_eq!(b.context_window_tokens(), 64_000, "override wins");
+    }
+
+    fn profile(temperature: f32, claude_model: &str, claude_effort: &str) -> RoleProfile {
+        RoleProfile {
+            temperature,
+            claude_model: claude_model.to_string(),
+            claude_effort: claude_effort.to_string(),
+        }
+    }
+
+    fn role_tuned_backend() -> LlmBackend {
+        let b = test_backend();
+        let mut s = b.settings();
+        s.temperature = 0.7;
+        s.claude_model = "sonnet".to_string();
+        s.claude_effort = "low".to_string();
+        s.role_tuning = true;
+        s.role_profiles = BTreeMap::from([
+            ("harvester".to_string(), profile(0.2, "", "")),
+            ("auditor".to_string(), profile(0.3, "opus", "high")),
+        ]);
+        b.set_settings(s);
+        b
+    }
+
+    fn user_turn() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }]
+    }
+
+    #[test]
+    fn a_role_scoped_call_samples_at_its_role_temperature() {
+        let b = role_tuned_backend();
+        let harvester = b.for_role("harvester");
+        let opts = harvester.ollama_options(&harvester.effective_settings(), &user_turn());
+        assert_eq!(opts.temperature, Some(0.2));
+        assert_eq!(
+            opts.num_ctx,
+            Some(b.context_window_tokens()),
+            "a role call's window equals the budget prompts were sized against"
+        );
+
+        let opts = b.ollama_options(&b.effective_settings(), &user_turn());
+        assert_eq!(
+            opts.temperature,
+            Some(0.7),
+            "the shared instance stays global"
+        );
+    }
+
+    #[test]
+    fn role_tuning_off_or_an_unprofiled_role_keeps_the_global_settings() {
+        let b = role_tuned_backend();
+        assert_eq!(b.for_role("critic").effective_settings().temperature, 0.7);
+
+        let mut s = b.settings();
+        s.role_tuning = false;
+        b.set_settings(s);
+        assert_eq!(
+            b.for_role("harvester").effective_settings().temperature,
+            0.7
+        );
+    }
+
+    #[test]
+    fn a_role_profile_sets_the_claude_model_and_effort_and_blank_inherits() {
+        let b = role_tuned_backend();
+        let mut s = b.settings();
+        s.backend = LlmBackendKind::ClaudeCode;
+        b.set_settings(s);
+
+        let cfg = b.for_role("auditor").claude_config();
+        assert_eq!(cfg.model.as_deref(), Some("opus"));
+        assert!(cfg
+            .system_prompt
+            .as_deref()
+            .is_some_and(|p| p.contains("Reasoning effort: high")));
+
+        let cfg = b.for_role("harvester").claude_config();
+        assert_eq!(cfg.model.as_deref(), Some("sonnet"));
+        assert!(cfg
+            .system_prompt
+            .as_deref()
+            .is_some_and(|p| p.contains("Reasoning effort: low")));
+    }
+
+    #[test]
+    fn claude_window_is_the_smallest_across_role_model_overrides() {
+        let b = role_tuned_backend();
+        let mut s = b.settings();
+        s.backend = LlmBackendKind::ClaudeCode;
+        s.claude_model = "opus[1m]".to_string();
+        b.set_settings(s.clone());
+        assert_eq!(
+            b.context_window_tokens(),
+            200_000,
+            "the auditor's plain opus bounds the budget"
+        );
+
+        s.role_tuning = false;
+        b.set_settings(s.clone());
+        assert_eq!(b.context_window_tokens(), 1_000_000);
+
+        s.role_tuning = true;
+        s.role_profiles
+            .get_mut("auditor")
+            .unwrap()
+            .claude_model
+            .clear();
+        b.set_settings(s);
+        assert_eq!(
+            b.context_window_tokens(),
+            1_000_000,
+            "a blank-model profile inherits the global model, not the 200k default"
+        );
     }
 }
