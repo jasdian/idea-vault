@@ -1,0 +1,114 @@
+name: Claude review
+
+# Automatic code review by Claude, gated on green CI: fires when the `CI` workflow completes
+# successfully for a pull request authored by the repository owner, and posts one review comment.
+#
+# Setup (one-time):
+#   1. On your machine: `claude setup-token` (the same token the claude-code container uses,
+#      docs/12-deployment.md), then add it as the repository secret CLAUDE_CODE_OAUTH_TOKEN
+#      (Settings → Secrets and variables → Actions).
+#   2. Nothing else: the review is posted with this job's own GITHUB_TOKEN.
+#
+# Note: GitHub only runs `workflow_run` workflows from the default branch, so this takes effect
+# once it is merged into main.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+# One review per PR at a time; a newer green CI run for the same PR supersedes an older review.
+concurrency:
+  group: claude-review-${{ github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Green CI, from a same-repo pull request (forks are never "my PRs" and never get secrets).
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.pull_requests[0].number
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      # Only the owner's PRs, and only if the commit CI passed on is still the PR head — a newer
+      # push has its own CI run, which will trigger its own review.
+      - name: Gate on PR author and head
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          read -r author head state < <(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json author,headRefOid,state --jq '"\(.author.login) \(.headRefOid) \(.state)"')
+          if [ "$author" != "$OWNER" ]; then
+            echo "PR #$PR_NUMBER is by $author, not $OWNER — skipping."; echo "run=false" >> "$GITHUB_OUTPUT"
+          elif [ "$state" != "OPEN" ]; then
+            echo "PR #$PR_NUMBER is $state — skipping."; echo "run=false" >> "$GITHUB_OUTPUT"
+          elif [ "$head" != "$HEAD_SHA" ]; then
+            echo "PR head moved ($head != $HEAD_SHA) — its own CI run will trigger a review."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Base branch at the workspace root (the action expects a repo there and restores Claude
+      # config from it); the PR head goes into a subdirectory, per the action's security guidance
+      # for workflow_run.
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.run == 'true'
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.run == 'true'
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          path: pr-head
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.run == 'true'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ env.PR_NUMBER }}
+            HEAD SHA: ${{ env.HEAD_SHA }}
+
+            Review this pull request. CI (build, test, fmt, clippy -D warnings) has already
+            passed on this exact commit, so do not re-report anything a compiler, rustfmt, or
+            clippy would catch — look for what they cannot.
+
+            The PR's code is checked out in ./pr-head. Read ./pr-head/CLAUDE.md first: its
+            "Confirmed architecture decisions" are binding, and docs/ are the design the code is
+            built against. Get the change with `gh pr diff ${{ env.PR_NUMBER }}` and
+            `gh pr view ${{ env.PR_NUMBER }}`; read surrounding code in ./pr-head as needed.
+
+            Focus on, in order:
+            1. Correctness bugs: logic errors, broken invariants, unhandled edge cases, races.
+            2. Violations of CLAUDE.md decisions: markdown vault must stay the source of truth
+               and SQLite rebuildable by reindex; AI turns run as detached background jobs
+               (claim → spawn → poll), never blocking a request; no networked AI API calls; no
+               hardcoded localhost:11434 or localhost bind; state lives in frontmatter.
+            3. Doc/code drift: a change that makes docs/ or an ADR wrong (or vice versa).
+            4. Missing tests for new behaviour.
+            5. Rust idiom: prefer borrowing over cloning, immutable data, iterator pipelines —
+               only where it materially matters, not style nits.
+
+            Verify each finding against the code before reporting it; drop anything you are not
+            confident is real. Do not praise, summarize the PR, or list what is fine.
+
+            Post exactly ONE review with
+            `gh pr review ${{ env.PR_NUMBER }} --comment --body-file <file>` (write the body to a
+            file first). Format: a one-line verdict ("No blocking issues." or "N issues found."),
+            then each finding as a bullet: **[blocking|should-fix|nit]** `path:line` — the
+            problem, a concrete failure scenario, and the fix. Do not approve or request changes.
+          claude_args: |
+            --add-dir pr-head
+            --allowedTools "Read,Grep,Glob,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*)"
