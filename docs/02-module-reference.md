@@ -21,8 +21,9 @@ flowchart TB
             D_IDEA["idea.rs — Idea, IdeaState"]
             D_MEM["memory.rs — MemoryFact, MemoryIndex"]
             D_ART["artifact.rs — Artifact, ArtifactKind (docs/adr/0015)"]
-            D_FM["frontmatter.rs — parse/emit YAML"]
+            D_FM["frontmatter.rs — parse/emit YAML (incl. parse_skill)"]
             D_SLUG["slug.rs — slug + collisions (D22)"]
+            D_SKILL["skill.rs — SkillStage/SkillRole/OutputContract vocabulary (docs/adr/0022)"]
         end
 
         subgraph vault["vault/ (disk = truth)"]
@@ -44,6 +45,7 @@ flowchart TB
             A_BUDGET["budget.rs — context budgeting (D21)"]
             A_WEB["web.rs — keyless web_search/fetch_url + tool defs (ADR-0017)"]
             A_MCP["mcp.rs — MCP Streamable-HTTP wire client (init/session/tools-list/tools-call, ADR-0018)"]
+            A_CONTRACT["contract.rs — pure output-contract validate/repair/items/trim_sections (ADR-0023)"]
         end
 
         MCP["mcp.rs — owner-global MCP server registry: McpServerConfig, McpRegistry\npersisted .mcp-servers.json (ADR-0018)"]
@@ -55,15 +57,17 @@ flowchart TB
         end
 
         subgraph concepts["concepts/ (harness primitives)"]
-            C_SKILL["skills.rs — registry + invoke (D18)"]
+            C_SKILL["skills.rs — LiveSkills registry + invoke (D18); built-ins compiled in from\nskills/*.md via include_str! (ADR-0022), owner overrides from vault/.skills/"]
             C_AGENT["agents.rs — role prompts + I/O"]
-            C_WF["workflows.rs — deterministic DAG (D19)"]
+            C_WF["workflows.rs — deterministic staged pipelines (D19, D32)"]
             C_SWARM["swarm.rs — bounded fan-out/converge (D14, D21)"]
             C_KNOW["knowledge.rs — extraction: fan-out lenses + persist artifacts (D30, ADR-0015)"]
+            C_AUDIT["audit.rs — factored audit: findings, Auditor call, parse, appendix (ADR-0023)"]
+            C_COVER["coverage.rs — spine coverage + next-move + chat skill book (docs/06-concepts/skills.md)"]
         end
 
         subgraph web["web/ (HTTP surface)"]
-            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp"]
+            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources"]
             W_JOBS["jobs.rs — background job registry + poll (ADR-0010)"]
             W_TMPL["templates.rs — Askama structs"]
         end
@@ -173,8 +177,11 @@ flowchart TD
   configured and enabled ([ADR-0018](./adr/0018-mcp-servers.md)).
 - **`memory`** — the memory feature: extract facts at Store ([D12](./06-concepts/memory.md)), load
   them at Reopen ([D13](./06-concepts/memory.md)), resolve backlinks ([D23](./06-concepts/memory.md)).
-- **`concepts`** — skills, agents, workflows, the swarm orchestrator, and knowledge extraction
-  (`knowledge.rs`, [D30](./06-concepts/swarm.md)) ([06-concepts](./06-concepts/)).
+- **`concepts`** — skills (registry over built-in + owner `vault/.skills/` markdown files,
+  [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)), agents, workflows, the swarm
+  orchestrator, knowledge extraction (`knowledge.rs`, [D30](./06-concepts/swarm.md)), the factored
+  audit (`audit.rs`, [ADR-0023](./adr/0023-verification-layer.md)), and spine coverage (`coverage.rs`)
+  ([06-concepts](./06-concepts/)).
 - **`web`** — axum router, handlers, Askama rendering, and the background job registry (`web::jobs`,
   [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) that every AI-driven route (including
   `routes::artifacts`, [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)) spawns into and

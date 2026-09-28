@@ -6,7 +6,7 @@
 
 ## Conventions
 
-- **ID** — stable `D1`…`D31` (see Coverage below for why the range runs past D25). References
+- **ID** — stable `D1`…`D32` (see Coverage below for why the range runs past D25). References
   across docs use the ID.
 - **Tool** — all diagrams are **Mermaid** in `mermaid` fenced code blocks, rendering inline on GitHub with no
   build step (see [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md) ethos; escape hatches below).
@@ -44,13 +44,13 @@
 |----|------|---------|------|
 | **D10** | Sequence | New-idea creation | [07-flows](./07-flows.md) |
 | **D11** | Sequence | Chat turn → `LlmBackend` → detached background job → poll (`/pending`); no SSE (ADR-0010 supersedes ADR-0004) | [05-ai-integration](./05-ai-integration.md) |
-| **D12** | Sequence | Store → memory extraction | [06-concepts/memory](./06-concepts/memory.md) |
+| **D12** | Sequence | Store → memory extraction (consolidate then distil; evidence gate + quarantine; ADD/UPDATE/NOOP — ADR-0023) | [06-concepts/memory](./06-concepts/memory.md) |
 | **D13** | Sequence | Reopen → load memory as context | [06-concepts/memory](./06-concepts/memory.md) |
-| **D14** | Sequence | Subagent swarm fan-out → converge/synthesize, run as a background job (ADR-0010) | [06-concepts/swarm](./06-concepts/swarm.md) |
+| **D14** | Sequence | Subagent swarm fan-out → judge → factored audit → converge/synthesize, run as a background job (ADR-0010, ADR-0023) | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D30** | Sequence | Knowledge extraction — per-lens artifacts + synthesis, run as a background job (ADR-0015) | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D15** | Sequence | Reindex — rebuild SQLite from markdown | [03-data-model](./03-data-model.md) |
 | **D16** | Activity | HTTP request / middleware pipeline — AI-driven routes branch into a background job, not an SSE stream | [09-web-ui](./09-web-ui.md) |
-| **D18** | Sequence | Skill invocation, run as a background job when interactive (ADR-0010) | [06-concepts/skills](./06-concepts/skills.md) |
+| **D18** | Sequence | Skill invocation with output-contract validation + at most one retry, run as a background job when interactive (ADR-0010, ADR-0023) | [06-concepts/skills](./06-concepts/skills.md) |
 | **D25** | Sequence | Startup / boot | [01-architecture](./01-architecture.md) |
 
 ### Structure of the web + orchestration
@@ -58,7 +58,8 @@
 | ID | Type | Depicts | Home |
 |----|------|---------|------|
 | **D17** | Route graph | Every route (including `/settings`, `/pending`, `/history`, `/fork`, turn/memory delete) → response shape → template | [09-web-ui](./09-web-ui.md) |
-| **D19** | DAG (activity) | Workflow orchestration (fan-out → judge → synthesize) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D19** | DAG (activity) | The interrogate workflow (fan-out → judge → audit → synthesize) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D32** | Flowchart | Workflow stage model: FanOut / Chain (carried forward) / Audit / Synthesize, failure paths, persistence (ADR-0022, ADR-0023) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D20** | State machine | Ollama-unavailable degradation | [05-ai-integration](./05-ai-integration.md) |
 | **D21** | Sequence | Concurrency & context-budget model | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D22** | Activity | Slug lifecycle & collision handling | [03-data-model](./03-data-model.md) |
@@ -77,14 +78,16 @@
 
 ## Coverage
 
-- **31 IDs, D1–D31** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
-  were added for containerized deployment, D30 for knowledge extraction, and D31 for reference
-  sources, all without renumbering — the range is D1–D31 in practice, not D1–D25), each authored
-  exactly once.
+- **32 IDs, D1–D32** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
+  were added for containerized deployment, D30 for knowledge extraction, D31 for reference
+  sources, and D32 for the workflow stage model, all without renumbering — the range is D1–D32 in
+  practice, not D1–D25), each authored exactly once.
   **D1–D15** are the mandatory core (they cover every flow named in [CLAUDE.md](../CLAUDE.md));
   **D16–D25** complete the SOTA set; **D26–D29** cover containerized deployment; **D30** covers
   knowledge extraction ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)); **D31** covers
-  reference sources ([ADR-0021](./adr/0021-reference-sources.md)).
+  reference sources ([ADR-0021](./adr/0021-reference-sources.md)); **D32** covers the staged
+  workflow model ([ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md),
+  [ADR-0023](./adr/0023-verification-layer.md)).
 - The six core flows from CLAUDE.md map to: new idea **D10**, chat (background job + poll, not SSE
   — ADR-0010) **D11**, store+memory **D12**, reopen+memory **D13**, swarm **D14**, reindex **D15**.
 

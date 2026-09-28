@@ -86,7 +86,9 @@ stateDiagram-v2
   "never persist a partial turn" rule, which still holds absolutely. Storing itself never truncates
   the file.
 - **Memory only grows or merges — with one deliberate exception.** Re-storing a `Reopened` idea
-  merges/dedupes facts; it does not silently drop prior conclusions. The owner can still explicitly
+  merges/dedupes facts; it does not silently drop prior conclusions. An `UPDATE` appends to an
+  existing fact and never replaces its text, and a fact that fails the evidence gate is written to a
+  quarantine artifact rather than memory ([ADR-0023](./adr/0023-verification-layer.md)). The owner can still explicitly
   delete one accumulated fact (`vault::store::delete_memory_fact`, rebuilds `MEMORY.md`) to shrink
   the context a future reopen reloads — again a human cleanup action, never automatic.
 - **`Draft` has no memory.** `memory/` and `MEMORY.md` first appear on the transition to `Stored`

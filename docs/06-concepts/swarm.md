@@ -9,7 +9,8 @@
 > [ADR-0014](../adr/0014-dynamic-context-budget.md) (the budget `Bud` derives from is now
 > live-derived per backend/model, not a fixed constant),
 > [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md) (extraction persists per-agent findings —
-> a deliberate, scoped divergence from the rule below).
+> a deliberate, scoped divergence from the rule below),
+> [ADR-0023](../adr/0023-verification-layer.md) (the factored audit between fan-out and converge).
 
 ## Why swarm
 
@@ -47,42 +48,83 @@ sequenceDiagram
     participant S as semaphore (K slots)
     participant W as agent workers
     participant Jg as judge
+    participant A as auditor
     participant Y as synthesizer
     participant L as ai::backend::LlmBackend
 
     U->>J: POST /idea/:slug/swarm — claim job, return indicator immediately
-    J->>D: swarm(idea, angles=[premortem, disproof, constraints, 2nd-order])
-    D->>D: build N AgentTasks (role + skill + budgeted context)
+    J->>D: swarm(idea, angles=[premortem, disproof, constraints, 2nd-order], audit)
+    D->>D: build N AgentTasks (skill's role + skill lens + budgeted context)
     par bounded fan-out (only K run at once)
         D->>S: acquire
         S-->>W: slot
         W->>L: run agent role prompt
-        L-->>W: AgentResult
+        L-->>W: AgentResult (lens kept; answer repaired to the skill's contract)
         W->>S: release
     and queued tasks wait for a slot
         Note over S,W: N-K tasks queue (backpressure, D21)
     end
     W-->>Jg: all AgentResults
-    Jg->>Jg: rank / dedupe findings
-    Jg-->>Y: shortlisted findings
+    Jg->>Jg: drop failed/empty; split into findings; interleave lenses; merge near-duplicates (≤20)
+    opt audit toggle on (default)
+        Jg-->>A: numbered findings only (no critic framing) + idea/memory/discussion
+        A->>L: one Auditor call [own permit]
+        L-->>A: F1: CONFIRMED|UNCERTAIN|REFUTED — reason …
+        A->>A: parse; missing → UNCERTAIN; garbled → all UNCERTAIN ("unverified")
+    end
+    Jg-->>Y: idea statement + findings (lens · role [verdict])
     Y->>L: synthesize into one position
     L-->>Y: converged result
-    Y-->>J: single result — appended as assistant turn only if non-empty
+    Y-->>J: result + audit tally + "Disproven objections" — one turn "## assistant (swarm: angles)", only if non-empty
     J-->>U: mark_done; next poll returns the finished transcript
     Note over W,Jg: a failed agent → null result, skipped by judge (degrade, don't abort)
 ```
 
+**What each stage does:**
+
+- **Judge.** Deterministic code, not a model call. It drops failed and empty answers, then splits
+  each answer into atomic **findings** (its list items, `ai::contract::items`). Findings are
+  interleaved round-robin so every lens keeps its top items under the cap of 20, and near-duplicates
+  (≥80% word overlap) are merged, keeping every lens that raised them.
+- **Audit** (`concepts::audit`, on by default, live toggle, [ADR-0023](../adr/0023-verification-layer.md)).
+  Factored: the auditor sees only the numbered claims and the source material, and is told to prefer
+  UNCERTAIN over CONFIRMED.
+- **Synthesizer.** Sees the idea statement and each finding's provenance and verdict, and is told
+  not to build on REFUTED findings.
+- **Code-appended appendix** (the model doesn't write it):
+  - the tally;
+  - a warning when more than 90% of at least 4 findings were confirmed ("a uniform pass is a
+    warning sign");
+  - every refuted finding, struck through with the auditor's reason — downgraded, never dropped.
+
+**Angles and heading:**
+
+- Each angle runs under its skill's `role` (a `constraints` lens researches, a `premortem` attacks).
+- A capstone skill (`build-prompt`) is rejected as an angle (400).
+- The turn heading names the angles: `## assistant (swarm: premortem, constraints)`. The legacy
+  bare `## assistant (swarm)` still parses.
+
 ## Knowledge extraction — persisting per-agent findings
 
 `concepts::knowledge::extract_knowledge` (`POST /idea/:slug/extract`, R18) is a second
-orchestration that reuses this same machinery — one `AgentRole::Researcher` per lens, the shared
-bounded `fan_out`, `judge`, `synthesize` — but makes one deliberate, scoped departure from the D14
-rule above: **it persists every non-empty per-lens finding**, not just the converged synthesis. The
-lenses are five built-in skills reserved with an `extract-` prefix in `SkillRegistry::builtin()`
-(`extract-key-decisions`, `extract-durable-facts`, `extract-open-questions`,
-`extract-risks-assumptions`, `extract-next-actions`); `SkillRegistry::move_names()` hides them from
-the interactive moves chip row (they are orchestrator-only lenses) while leaving them registered and
-resolvable — usable as ordinary swarm angles too. See [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md).
+orchestration that reuses this same machinery — one `AgentRole::Harvester` per lens (the lens's own
+`role`), the shared bounded `fan_out`, `judge`, `synthesize` — but makes one deliberate, scoped
+departure from the D14 rule above: **it persists every non-empty per-lens finding**, not just the
+converged synthesis.
+
+The lenses are five built-in skills with the reserved `extract-` prefix, all marked `hidden`:
+
+- `extract-key-decisions`
+- `extract-durable-facts`
+- `extract-open-questions`
+- `extract-risks-assumptions`
+- `extract-next-actions`
+
+`hidden` keeps them off the interactive moves chip row (they are orchestrator-only lenses) while
+leaving them registered and resolvable, so they are usable as ordinary swarm angles too.
+
+Extraction is not audited: its findings are harvests kept per lens, and the synthesis digests up to
+60 of them. See [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md).
 
 ### D30 — Knowledge extraction: fan-out → converge → persist artifacts
 
@@ -99,7 +141,7 @@ sequenceDiagram
     participant J as web::jobs (background job)
     participant K as concepts::knowledge
     participant S as semaphore (K slots)
-    participant W as Researcher workers (one per lens)
+    participant W as Harvester workers (one per lens)
     participant Jg as judge
     participant Y as synthesizer
     participant L as ai::backend::LlmBackend
@@ -108,18 +150,18 @@ sequenceDiagram
     U->>J: POST /idea/:slug/extract — claim job, return indicator immediately
     J->>K: extract_knowledge(idea, lenses=[key-decisions, durable-facts, open-questions, risks-assumptions, next-actions])
     K->>K: fail fast if any lens is unknown (before any model call)
-    K->>K: build N AgentTasks (Researcher role + lens skill + budgeted context)
+    K->>K: build N AgentTasks (Harvester role + lens skill + budgeted context)
     par bounded fan-out (only K run at once)
         K->>S: acquire
         S-->>W: slot
-        W->>L: run Researcher prompt for one lens
+        W->>L: run Harvester prompt for one lens
         L-->>W: AgentResult
         W->>S: release
     and queued lenses wait for a slot
         Note over S,W: N-K tasks queue (backpressure, D21)
     end
     W-->>Jg: all AgentResults
-    Jg->>Jg: rank / dedupe findings
+    Jg->>Jg: drop failed/empty; split + dedupe findings
     alt every lens failed or empty
         Jg-->>K: empty shortlist
         K-->>J: NothingToSynthesize — zero writes
@@ -188,7 +230,10 @@ cap; the owner then owns the VRAM tradeoff).
   the semaphore).
 - **Bounded latency, not unbounded fan-out:** N tasks complete in ⌈N/K⌉ waves, not all-at-once
   meltdown.
-- **Degrade, don't abort:** a failed/timed-out agent yields a null result the judge skips.
+- **Degrade, don't abort:** a failed/timed-out agent yields a null result the judge skips; a failed
+  or garbled audit leaves every finding UNCERTAIN and the synthesis still runs.
+- **Judged, not just merged:** with the audit on, every finding reaches the owner with a verdict,
+  and refuted objections stay visible.
 - **Reproducibility:** fixed K + budget + fixed angle set → comparable runs.
 
 ## Mapping to code
@@ -196,6 +241,8 @@ cap; the owner then owns the VRAM tradeoff).
 | Piece | Location |
 |-------|----------|
 | Dispatcher, workers, judge, synthesizer | `concepts::swarm` |
+| Findings, Auditor call, verdict parsing, appendix | `concepts::audit` |
+| Audit toggle (live) | `LlmSettings::audit_findings` (`ai::backend`), Settings page |
 | Semaphore (shared, process-wide) | `AppState` / `config.rs` |
 | Per-agent budgeting | `ai::budget` |
 | Agent roles applied | `concepts::agents` + `concepts::skills` |

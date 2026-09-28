@@ -9,7 +9,9 @@
 > [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
 > [ADR-0016](./adr/0016-forced-compact-folds-fully.md) (the compact route's `Notice` pending state),
 > [ADR-0017](./adr/0017-web-access-tools.md) (the Settings page's `web_access` checkbox),
-> [ADR-0018](./adr/0018-mcp-servers.md) (the `/mcp` server management page).
+> [ADR-0018](./adr/0018-mcp-servers.md) (the `/mcp` server management page),
+> [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md) (the `/skills` skill book),
+> [ADR-0023](./adr/0023-verification-layer.md) (the Settings page's `audit` checkbox).
 
 ## Interaction model
 
@@ -35,19 +37,21 @@ flowchart LR
         R1["GET / — idea list + search"]
         R2["GET /idea/:slug — idea view (body, convo, memory)"]
         R12["GET /idea/:slug/history — read-only full thread + Fork control"]
-        R13["GET /settings — live LLM backend + params form (incl. web_access checkbox, ADR-0017)"]
+        R13["GET /settings — live LLM backend + params form (incl. web_access checkbox, ADR-0017; audit checkbox, ADR-0023)"]
         R19["GET /idea/:slug/artifact/:name — view one artifact (.md full page | .html served raw)"]
         R24["GET /mcp — MCP server management page (ADR-0018)"]
+        R33["GET /skills — the skill book: every move by spine stage (ADR-0022)"]
     end
     subgraph partials["HTMX partials"]
         R3["POST /ideas — create (D10) → idea row / redirect"]
         R4["POST /idea/:slug/store — Store (D12, job) → transcript + indicator"]
         R5["POST /idea/:slug/reopen — Reopen (D13) → discussion view"]
         R6["POST /idea/:slug/skill/:name — run skill (D18, job) → transcript + indicator"]
-        R7["POST /idea/:slug/swarm — run swarm (D14, job) → transcript + indicator"]
+        R7["POST /idea/:slug/swarm — run swarm (D14, job; angles= from the picker) → transcript + indicator"]
         R8["GET /search?q= — results fragment (ranked FTS: weighted bm25 + backlink prior + highlight)"]
-        R9["POST /idea/:slug/chat — chat turn (D11, job) → transcript + indicator"]
-        R9b["GET /idea/:slug/pending — poll target → transcript (indicator | error | final)"]
+        R9["POST /idea/:slug/chat — chat turn (D11, job) → 200 transcript + indicator | 202 queued if busy"]
+        R9b["GET /idea/:slug/pending — poll target; drains the next queued message → transcript (indicator | error | final)"]
+        R32["POST /idea/:slug/queue/:id/delete — drop one queued chat message before it sends → #queue panel"]
         R14["POST /idea/:slug/fork — branch to a new InDiscussion idea → HX-Redirect"]
         R15["POST /idea/:slug/turn/:index/delete — remove one turn → transcript"]
         R16["POST /idea/:slug/memory/:fact/delete — remove one memory fact → memory panel"]
@@ -64,6 +68,7 @@ flowchart LR
         R29["POST /mcp/:name/toggle — flip enabled → #mcp panel"]
         R30["POST /mcp/:name/delete — remove a server → #mcp panel"]
         R31["POST /mcp/:name/probe — connect + tools/list, inline (not a job) → status slot"]
+        R34["POST /skills/reload — re-read vault/.skills/, inline (not a job) → #skills panel (ADR-0022)"]
     end
     subgraph admin["Admin"]
         R10["POST /admin/reindex — rebuild index (D15)"]
@@ -101,24 +106,31 @@ flowchart LR
     R29 --> T_MCPLIST
     R30 --> T_MCPLIST
     R31 --> T_MCPSTATUS["templates/_mcp_status.html"]
+    R32 --> T_QUEUE["templates/_queue.html"]
+    R33 --> T_SKILLS["templates/skills.html"]
+    R34 --> T_SKILLSLIST["templates/_skills_list.html"]
 ```
 
 Route groups map to `web::routes` submodules: `ideas` (R1, R2, R3, R8, R9b, R12, R14, R23), `chat`
-(R9), `memory`/idea-actions (R4–R7, R15, R16, R22 — the module name predates the delete/workflow
+(R9, R32 — the send path and its pending-message queue), `memory`/idea-actions (R4–R7, R15, R16, R22 — the module name predates the delete/workflow
 routes but still owns them; R22 (`run_workflow`) runs the D19 deterministic workflow DAG behind the
 same claim → spawn → poll job shape as R6/R7), `settings` (R13, R13b), `admin` (R10, R11, R17),
 `artifacts` (R18, R19, R20 — knowledge extraction and its per-idea artifact files,
 [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)), `compact` (R21 — the manual "compact
 now" fold, [ADR-0012](./adr/0012-auto-compact.md)/[ADR-0016](./adr/0016-forced-compact-folds-fully.md)),
-`mcp` (R24–R31 — the MCP server management page, [ADR-0018](./adr/0018-mcp-servers.md)).
+`mcp` (R24–R31 — the MCP server management page, [ADR-0018](./adr/0018-mcp-servers.md)), `skills`
+(R33, R34 — the skill book and its live reload, [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)).
 R23 (`rename_idea`) is deliberately **not** a job route (D11) — it is a synchronous frontmatter
 edit, not an AI call, so it returns its partial directly like R3/R14/R15/R16 rather than going
 through claim → spawn → poll. **R24–R31 are idea-agnostic** — they manage the owner-global MCP
 server registry, not any one idea, so they carry no `:slug` and sit outside the per-idea job
-registry entirely. R31 (`probe_server`) is likewise **not** a job route despite touching the
+registry entirely. R32 (`remove_queued`) is not a job route either: it edits the in-memory queue and
+returns the refreshed `#queue` panel directly. R31 (`probe_server`) is likewise **not** a job route despite touching the
 network: an MCP probe is one bounded HTTP round trip already capped by `ai::mcp`'s own connect/request
 timeouts, not a model call that can run for minutes, so the handler awaits it inline
-([ADR-0018](./adr/0018-mcp-servers.md)).
+([ADR-0018](./adr/0018-mcp-servers.md)). R34 (`reload_skills`) is not a job route either: it re-reads
+a handful of small files under `vault/.skills/` synchronously, no model call, and returns the
+refreshed `#skills` panel directly — the same shape as R23/R32.
 
 ## D16 — HTTP request / middleware pipeline
 
@@ -128,7 +140,7 @@ diverge. Error mapping here implements the taxonomy [D24](./05-ai-integration.md
 ```mermaid
 flowchart TD
     REQ["incoming request"] --> TRACE["tower: tracing / request log"]
-    TRACE --> STATE["inject AppState (config, index, LlmBackend, semaphore, jobs registry)"]
+    TRACE --> STATE["inject AppState (config, index, LlmBackend, semaphore, jobs registry, chat queues)"]
     STATE --> ROUTE["axum router match (D17)"]
     ROUTE --> HANDLER["handler"]
     HANDLER --> BRANCH{"AI-driven route?"}
@@ -156,8 +168,11 @@ templates/
   _idea_title.html        # partial — the idea page's h1 + inline rename disclosure (R23); also
                           #   {% include %}-d by idea.html so the page and the rename swap match
   _turn.html             # partial — one conversation turn (user/assistant); also the poll-target shape
-  _discussion.html       # partial — the discussion pane (compose box + transcript/poll target)
-  _actions.html          # partial — the #idea-actions block (moves/swarm/store); also sent OOB
+  _discussion.html       # partial — the discussion pane (compose box + transcript/poll target + queue)
+  _queue.html            # partial — the #queue panel: chat messages waiting for the foil, each
+                          #   removable (R32); also sent OOB with every transcript response
+  _actions.html          # partial — the #idea-actions block (moves/swarm + angle picker/store);
+                          #   also sent OOB
   _stored.html           # partial — stored view (consolidated body + memory facts); delivered by
                           #   the R9b poll once a store job (R4) lands truth as Stored, via
                           #   HX-Retarget #discussion (respond_discussion_or_stored)
@@ -173,6 +188,10 @@ templates/
   _mcp_row.html            # partial — one server's normal view row (R27)
   _mcp_edit_row.html       # partial — one server's url/token edit form (R26)
   _mcp_status.html         # partial — one row's probe status slot (R31)
+  skills.html               # extends base — the skill book page shell (R33, ADR-0022)
+  _skills_list.html         # partial — the #skills panel: every move grouped by spine stage,
+                            #   with use_when/avoid_when/source/role/contract, plus load issues;
+                            #   re-rendered by reload (R34)
 ```
 
 Convention: files prefixed `_` are HTMX partials (never a full page); everything else `extends
@@ -198,9 +217,52 @@ base.html`.
   `## assistant (workflow: {name})` turn — intermediate fan-out/judge steps are not written to
   `conversation.md`, mirroring the swarm's discard-intermediates rule — and the finished turn's
   label keeps the workflow kind (`foil · workflow {name}`, distinguishing it from a same-named
-  skill turn's `foil · {name}`). The store route (R4, D12) is the one exception to "finished
+  skill turn's `foil · {name}`). A running workflow's indicator note reports live per-stage
+  progress rather than one fixed string. The swarm route (R7) writes its converged turn as
+  `## assistant (swarm: a, b, …)` (`vault::store::parse_turn_heading` → `TurnSource::Swarm`, label
+  "foil · swarm (a, b)"); the legacy bare `## assistant (swarm)` still parses as an empty angle
+  list. The store route (R4, D12) is the one exception to "finished
   transcript with no further trigger": when its job lands, truth has already flipped to `Stored`,
   so the poll response instead widens to the stored view — see the next bullet.
+- **Chat queue — a send while busy is queued, not dropped:** each idea still holds one in-flight
+  job, but R9 no longer re-shows the busy state and throws the message away. If the slot is free
+  (`jobs::try_claim_idle` — empty, with no unshown `Failed`/`Notice` outcome) the turn starts at
+  once (`200`). Otherwise the message joins a per-idea FIFO (`jobs::enqueue`, capped at
+  `jobs::MAX_QUEUED` = 20; past that R9 returns `400`) and R9 answers `202 Accepted` with the
+  current transcript. The composer resets on any 2xx, so a queued message clears the box just like
+  a sent one. The drain point is the poll: every R9b request first calls
+  `chat::start_next_queued`, which claims the slot with the same `try_claim_idle` gate (a racing
+  poll can't double-start, and an error the owner hasn't seen yet holds the queue), pops the oldest
+  message, and starts it through the same `spawn_chat_turn` path as a direct send. One message runs
+  per completion. A message whose idea was stored or deleted while it waited is dropped. When the
+  idea is idle or showing an error/notice but messages are still waiting, `transcript_inner`
+  appends a bare `queue_poller` (same `hx-get`/`hx-target` as the indicator) so polling survives
+  the gap between jobs. The `#queue` panel (`_queue.html`) lists each waiting message as an
+  80-char one-line preview with a ✕ that posts R32. It renders on page load (queue state lives in
+  the process, so it survives navigation) and refreshes out-of-band on every transcript response.
+  The queue is in-memory like the job slots: a restart loses unsent messages. It covers chat
+  only. Skill/swarm/workflow buttons on a busy idea still just re-show the in-flight state.
+- **Swarm angle picker:** the swarm chip in `_actions.html` carries an `angles ▾` disclosure with
+  one checkbox per visible, non-capstone skill (`SkillRegistry::visible()` minus the `Capstone`
+  stage) — that's seven today (steelman, premortem, cheapest-disproof, devils-advocate,
+  constraints, second-order-effects, market-size); the hidden `extract-*` lenses stay off the
+  picker because they are `hidden`, not because of any swarm-specific filter. The canonical four
+  `concepts::swarm::DEFAULT_ANGLES` are pre-checked. The checkboxes deliberately have no `name`: an
+  `hx-on::config-request` hook joins the checked values into the single comma-separated `angles`
+  field R7 already accepted. That keeps the picker additive: with JS off, or nothing checked, the
+  form posts no `angles` and `memory::run_swarm` falls back to `DEFAULT_ANGLES`. R7 still
+  validates synchronously before claiming the slot: an unknown angle, more than `MAX_ANGLES` (8),
+  or a capstone-stage angle (e.g. `build-prompt`) is a `400`, not an error turn.
+- **The spine strip:** `_actions.html` also renders a `spine` strip above the move chips
+  (`concepts::coverage::coverage`, derived purely from `conversation.md`'s turn headings — nothing
+  new is persisted): a ✓/○ per ideation-spine stage (steelman → attack → consequence → converge →
+  capstone), a `next ›` chip (posts the suggested skill, or the swarm once only convergence is
+  missing), soft "wrong turn" warnings (e.g. a build prompt generated before any attack move, or
+  the same move run three times in a row), and — by the Store button — a "no attack move has run
+  yet" note when the foil has answered but nothing has tried to break the idea. Warnings never
+  block anything; they read like the skill book's own guidance. The move chips themselves render
+  from every visible, non-capstone skill, with a tooltip built from its description plus
+  `use_when`, and the caption under them links to `/skills`.
 - **Store's finish path — poll widens to the stored view:** because only the store job can leave an
   idea `Stored` (every other job route guards on the discussion states), the shared poll handler
   (`web::routes::ideas::respond_discussion_or_stored`, serving both R9b and cancel) checks the
@@ -209,7 +271,13 @@ base.html`.
   reopen control only — see the next bullet for why the consolidated writeup isn't in it) plus the
   OOB `state--stored` badge, and sends `HX-Retarget: #discussion` / `HX-Reswap: innerHTML` response
   headers so HTMX swaps the *whole* discussion panel (composer and actions included) instead of just
-  `#transcript` — the same swap the old synchronous store response used to perform directly.
+  `#transcript` — the same swap the old synchronous store response used to perform directly. A store
+  that held back facts behind the evidence gate (quarantined to an artifact) or read a truncated
+  discussion during memory extraction leaves a one-shot `stored_outcome` notice under the stored
+  panel (`web::routes::ideas::stored_outcome`) — the quiet `notice_block` styling, consumed on read
+  like the compact route's `NothingToFold` notice; while the store job is still wrapping up,
+  `stored_outcome` instead emits a short follow-up poller targeting `#discussion` so the widened
+  swap still lands once truth catches up.
 - **`_stored.html` no longer carries the consolidated body.** The store job rewrites `idea.md`'s
   body to the consolidated writeup, which is *already* rendered once in the page's top
   `<div class="statement" id="idea-statement">` ([D8](./03-data-model.md) frontmatter, memory
@@ -220,9 +288,12 @@ base.html`.
   consolidated markdown — the one `.statement` block on the page updates in place instead of being
   duplicated.
 - **Out-of-band state refresh:** transcript responses (chat, poll, cancel, skill, swarm, workflow,
-  store, extract, compact, delete-turn) append two top-level `hx-swap-oob="true"` fragments after the
-  `#transcript` inner HTML: the `#idea-state` subhead badge and the `#idea-actions` block
-  (`_actions.html`, an always-present container so a Draft page still has the OOB target). This is
+  store, extract, compact, delete-turn) append four top-level `hx-swap-oob="true"` fragments after the
+  `#transcript` inner HTML: the `#idea-state` subhead badge, the `#idea-actions` block
+  (`_actions.html`, an always-present container so a Draft page still has the OOB target), the
+  artifacts panel (so a finished extraction shows up without a reload), and the `#queue` panel (so
+  a queued send, a drain, or a removal shows live; the discussion pane renders it `hidden` when
+  empty rather than omitting it, so the OOB target exists). This is
   how the first chat turn's Draft → InDiscussion flip becomes visible — badge and moves/store
   controls update without a reload, while the composer (outside `#transcript`) survives a poll
   completing mid-typing. Store's own immediate response follows this same shape (transcript +
@@ -254,14 +325,24 @@ base.html`.
   the compose box is rendered disabled with the banner from [D20](./05-ai-integration.md);
   read-only browsing is unaffected. Which backend counts as "active" follows the live Settings
   toggle ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)).
+- **The skill book (`/skills`, ADR-0022):** `GET /skills` (R33) renders every registered skill
+  grouped by ideation-spine stage (steelman → attack → consequence → converge → capstone, plus the
+  off-spine `extract` lenses shown but never offered as moves), each card carrying its
+  `use_when`/`avoid_when` guidance, role, output contract, and source (`built-in` / `vault
+  override` / `vault`), plus any owner file under `vault/.skills/` that failed to load. `POST
+  /skills/reload` (R34) re-reads that folder live and swaps in the refreshed `#skills` panel — no
+  restart needed to pick up an edited or new owner skill.
 
 ## Mapping to code
 
 | Piece | Location |
 |-------|----------|
 | Router + AppState + middleware | `app.rs` |
-| Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts,compact,mcp}` |
+| Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts,compact,mcp,skills,sources}` |
 | Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, workflow R22, store R4, extract R18, compact R21, and the R9b poll endpoint — **not** R31's inline MCP probe, [ADR-0018](./adr/0018-mcp-servers.md)) |
+| Pending chat-message queue | `web::jobs` queue half (`Queues`, `enqueue`/`dequeue`/`remove_queued`/`list_queued`, `MAX_QUEUED`); drained by `web::routes::chat::start_next_queued` from R9b; rendered by `web::routes::ideas::render_queue_panel` |
+| Swarm angle defaults | `concepts::swarm::DEFAULT_ANGLES` (picker pre-check + R7's empty-request fallback) |
+| Skill registry (skill book + move chips + angle picker) | `concepts::skills::LiveSkills` (`AppState.skills`; `load`/`snapshot`/`reload`), `SkillRegistry` (`load`/`visible`), spine coverage `concepts::coverage::coverage` |
 | Template structs | `web::templates` |
 | Template sources | `templates/*.html` |
 
@@ -270,8 +351,11 @@ base.html`.
 - [05-ai-integration](./05-ai-integration.md) — D11 background-job flow, D20 degradation, D24 errors.
 - [06-concepts/swarm](./06-concepts/swarm.md) — D30, the extraction flow R18/R19/R20 drive.
 - [06-concepts/workflows](./06-concepts/workflows.md) — D19, the deterministic DAG R22 runs.
+- [06-concepts/skills](./06-concepts/skills.md) — the ideation spine, the skill book (R33/R34), and
+  the move/angle-picker filter (`SkillRegistry::visible()`).
 - [07-flows](./07-flows.md) — the flows that enter through these routes.
 - [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md), [ADR-0011](./adr/0011-live-switchable-llm-backend.md),
   [ADR-0012](./adr/0012-auto-compact.md), [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md),
   [ADR-0016](./adr/0016-forced-compact-folds-fully.md), [ADR-0017](./adr/0017-web-access-tools.md),
-  [ADR-0018](./adr/0018-mcp-servers.md).
+  [ADR-0018](./adr/0018-mcp-servers.md), [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md),
+  [ADR-0023](./adr/0023-verification-layer.md).

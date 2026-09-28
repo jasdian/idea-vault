@@ -79,11 +79,46 @@
 - **Memory (concept)** — the feature of extracting facts on Store and reloading them on Reopen.
   Doc: [06-concepts/memory](./06-concepts/memory.md).
 - **Skill** — a named, reusable ideation move (a parameterized prompt template) applied to an idea.
-  Doc: [06-concepts/skills](./06-concepts/skills.md).
+  Skills are markdown files (`domain::frontmatter::parse_skill`), not code: built-ins ship compiled
+  into the binary (`concepts::skills::BUILTIN`, `include_str!`), and the owner may add or override
+  any of them under `vault/.skills/` (**owner skills**). See
+  [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md) and
+  [06-concepts/skills](./06-concepts/skills.md).
+- **Spine / stage** (the ideation spine) — the order an idea is best run through: `steelman` →
+  `attack` → `consequence` → `converge` → `capstone`, plus the off-spine `extract` stage
+  (orchestrator-only knowledge-harvest lenses, never an offered move). Each skill declares its
+  `stage` (`domain::skill::SkillStage`); `concepts::coverage::coverage` derives which stages a
+  discussion has actually covered from its turn headings, purely from `conversation.md`, and
+  suggests the next move.
+- **Skill book** — the `GET /skills` page: every registered skill grouped by spine stage, with its
+  `use_when`/`avoid_when` guidance, role, output contract, and source (`built-in` / `vault
+  override` / `vault`), plus any owner file that failed to load; `POST /skills/reload` refreshes it
+  live. See [09-web-ui](./09-web-ui.md).
+- **Output contract** — the shape a skill's output must take (`domain::skill::OutputContract`:
+  `Free`, `BulletsOrEmpty`, `RankedList`, `FencedMarkdown`), validated and, for a single
+  interactive call, repaired by `ai::contract`. See
+  [ADR-0023](./adr/0023-verification-layer.md).
+- **Factored audit** — the verification pass a swarm's or workflow's converge step runs over every
+  candidate finding before synthesis (`concepts::audit`): each finding is labeled `CONFIRMED`,
+  `UNCERTAIN`, or `REFUTED` against the idea, its memory, and the discussion, preferring
+  `UNCERTAIN` over `CONFIRMED` when in doubt. Refuted findings are kept, struck through, under
+  **Disproven objections**; a **uniform pass** (over 90% of at least 4 findings confirmed) is flagged
+  as a warning sign; a garbled or failed audit leaves every finding `UNCERTAIN` and marks the run
+  "unverified" rather than aborting it. Toggled by `IDEA_VAULT_AUDIT_FINDINGS` / the Settings page's
+  audit checkbox. See [ADR-0023](./adr/0023-verification-layer.md).
+- **Quarantined facts** (evidence gate) — durable facts memory extraction holds back rather than
+  writing to `memory/`, because they lack a `QUOTE` from the discussion supporting them; written
+  instead to an `artifacts/<stamp>-quarantined-facts.md` file the owner can read and promote by
+  hand (`memory::extract`).
 - **Agent** — a scoped subagent role (e.g. critic, researcher, synthesizer) with a specific prompt
-  and I/O contract. Doc: [06-concepts/agents](./06-concepts/agents.md).
-- **Workflow** — a deterministic, multi-step orchestration over an idea (fan-out → judge →
-  synthesize). Contrast with free-form chat. Doc: [06-concepts/workflows](./06-concepts/workflows.md).
+  and I/O contract. `domain::skill::SkillRole` — `Critic`, `Researcher`, **Advocate**,
+  **Harvester**, `Synthesizer` — maps 1:1 onto `concepts::agents::AgentRole` for skills fanned out
+  by an orchestrator (swarm, workflow, extraction); a direct interactive skill run ignores it.
+  `AgentRole` adds the **Auditor**, which only the factored audit uses. Doc:
+  [06-concepts/agents](./06-concepts/agents.md).
+- **Workflow** — a deterministic, staged orchestration over an idea (fan-out / chained step /
+  audit / synthesize; a chained step's output is carried forward). Contrast with free-form chat.
+  Doc: [06-concepts/workflows](./06-concepts/workflows.md).
 - **Swarm / swarming** — running many agents concurrently against one idea, under **bounded
   concurrency**, then converging their outputs. Doc: [06-concepts/swarm](./06-concepts/swarm.md).
 - **Bounded concurrency** — the hard cap (a semaphore) on how many AI calls (to whichever backend is
@@ -105,6 +140,6 @@
 
 ## Diagram vocabulary
 
-- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D30`, catalogued in
+- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D32`, catalogued in
   [08-diagrams](./08-diagrams.md). References elsewhere use the ID.
 - **Home doc** — the single document a diagram is authored in; the registry only links to it.

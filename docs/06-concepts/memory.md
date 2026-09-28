@@ -43,20 +43,22 @@ sequenceDiagram
     H-->>U: 200 transcript + "thinking…" indicator (self-repolling)
     H->>Task: tokio::spawn (detached — outlives the request)
     Task->>Ex: extract_and_store(idea, conversation)
+    Ex->>V: read existing memory/*.md (empty on a first store)
     Ex->>AI: prompt: consolidate best statement
-    AI-->>Ex: updated idea body
-    Ex->>AI: prompt: extract durable facts (bounded set)
-    AI-->>Ex: N candidate facts
-    alt idea was Reopened (existing memory)
-        Ex->>V: read existing memory/*.md
-        Ex->>Ex: merge + dedupe against existing
-    end
+    AI-->>Ex: consolidated statement
+    Ex->>AI: prompt: extract facts from the CONSOLIDATED statement + transcript, shown existing facts as [[slug]] — title
+    AI-->>Ex: FACT / OP (ADD | UPDATE slug | NOOP) / QUOTE / body blocks
+    Ex->>Ex: evidence gate — each QUOTE must occur (normalized) in conversation.md or the pre-store body
+    Ex->>Ex: NOOP skipped; UPDATE → append to that fact; ADD with an existing slug → skipped (backstop)
     alt both AI calls succeed
         Ex->>V: write idea.md body (consolidated), state=stored
-        Ex->>V: write memory/<fact-slug>.md (one per fact)
+        Ex->>V: write new memory/<fact-slug>.md + appended UPDATEs
         Ex->>V: rebuild MEMORY.md index
+        opt any fact failed the gate
+            Ex->>V: write artifacts/<stamp>-quarantined-facts.md (kind: quarantine)
+        end
         Ex->>Idx: upsert ideas, memory_facts, backlinks, search_fts
-        Task->>J: mark_done(slug)
+        Task->>J: mark_done(slug) — or mark_notice(slug, "Stored — but N facts quarantined / context truncated")
     else failure (either AI call)
         Task->>J: mark_failed(slug, message)
     end
@@ -65,7 +67,7 @@ sequenceDiagram
         H->>J: peek(slug)
         H->>V: read idea state
         alt state == Stored
-            H-->>B: Stored view (partial) + OOB badge, HX-Retarget #discussion
+            H-->>B: Stored view (partial) + one-shot notice (if any) + OOB badge, HX-Retarget #discussion
         else still running / failed
             H-->>B: re-emit "thinking…" | error block
         end
@@ -75,11 +77,31 @@ sequenceDiagram
 Rules:
 
 - **Consolidate then distil:** the idea body is rewritten to the current best statement *before*
-  facts are extracted, so facts reflect conclusions, not raw chat.
-- **Bounded set:** extraction targets a small number of high-value facts, not a transcript dump
-  (respects context/readability; the conversation already holds the full detail).
-- **Merge on re-store:** a `Reopened→Stored` merges and dedupes against existing `memory/` — memory
-  only grows or consolidates, never silently drops ([D9](../04-state-machine.md) invariant).
+  facts are extracted. The extraction call reads that consolidated statement, so facts reflect
+  conclusions, not the idea as first pitched.
+- **Bounded set:** extraction targets a small number of high-value facts (at most 7), not a
+  transcript dump. That respects context and readability; the conversation already holds the full
+  detail.
+- **Evidence gate** ([ADR-0023](../adr/0023-verification-layer.md)): every fact must carry a
+  `QUOTE:` copied word for word from the discussion — at least 3 words. A `…` may elide a few
+  words, but the segments must appear in order and close together, so two unrelated true fragments
+  can't vouch for a spliced claim.
+  - Code checks the quote against the raw `conversation.md` and the pre-store idea body, after
+    folding case, typographic quotes and dashes, markdown marks and whitespace. The consolidated
+    body doesn't count: the model just wrote it.
+  - A fact that fails the gate is **quarantined**, not remembered. It goes into
+    `artifacts/<stamp>-quarantined-facts.md` (artifact kind `quarantine`, labelled "quarantined
+    facts · unverified"), which the owner can read and copy from by hand.
+  - The stored view carries a one-shot notice saying how many facts were quarantined, and whether
+    the discussion was too long for the model to read in full.
+- **Merge on re-store:** the extractor is shown the facts already in memory and answers per fact:
+  - `ADD` — a new fact;
+  - `UPDATE <slug>` — **appended** to that fact under an `_Updated <date>:_` line; the existing
+    text, which the owner may have edited, is never replaced;
+  - `NOOP` — already captured.
+
+  An `ADD` whose title slugifies to an existing fact is still skipped as a backstop. Memory only
+  grows or consolidates, never silently drops ([D9](../04-state-machine.md) invariant).
 - **Truth first:** markdown written before index upsert ([ADR-0002](../adr/0002-markdown-source-of-truth-sqlite-index.md)).
 - **Nothing partial on failure/cancel:** truth is only touched after both AI calls succeed — an
   aborted or failed job leaves the idea in its prior state, still `InDiscussion`/`Reopened`

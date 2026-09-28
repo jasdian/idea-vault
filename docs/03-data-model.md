@@ -31,9 +31,17 @@ vault/
       <run-stamp>-<lens-short>.md  # one persisted knowledge-extraction finding (frontmatter + body)
       <run-stamp>-synthesis.md    # the converged synthesis of a run (frontmatter + body)
       <run-stamp>-report.html     # optional derived export of a run (opt-in, unindexed; ADR-0015)
+      <run-stamp>-quarantined-facts.md  # store-time facts the evidence gate kept out of memory
+                                        #   (kind: quarantine; ADR-0023)
 index.db             # derived index (may be deleted + rebuilt)
 .mcp-servers.json    # owner-global MCP server registry — APP CONFIG, not vault truth (ADR-0018)
+.skills/             # owner-authored skill files <name>.md — APP CONFIG, not vault truth (ADR-0022)
 ```
+
+> **`.skills/` is app configuration too.** Each file is one ideation move — frontmatter + prompt
+> template ([skills](./06-concepts/skills.md)) — that adds to or overrides a built-in. Like the
+> registries below, it is invisible to reindex (no `idea.md`, so `vault::walk` never enters it) and
+> never indexed; deleting it restores the built-ins. Path: `IDEA_VAULT_SKILLS_DIR`.
 
 > **`.mcp-servers.json` is not part of the vault contract above.** It lives beside `index.db` at the
 > vault root only because the vault directory is the one host-persistent path in a containerized run
@@ -83,8 +91,8 @@ erDiagram
         markdown lines "one pointer per fact"
     }
     ARTIFACT_MD {
-        yaml frontmatter "slug, title, kind (finding|synthesis), lens, created, model"
-        markdown body "one lens's finding, or the converged synthesis"
+        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine), lens, created, model"
+        markdown body "one lens's finding, the converged synthesis, or quarantined store-time facts"
     }
     ARTIFACT_HTML {
         html body "derived, self-contained report export; not domain-typed"
@@ -127,7 +135,7 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Compacted rolling summary | `compacted.md` | *(none — derived sidecar, never indexed; ADR-0012)* |
 | Memory fact (frontmatter) | `memory/<fact>.md` | `memory_facts` |
 | Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
-| Knowledge-extraction artifact (finding or synthesis) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`) |
+| Knowledge-extraction artifact (finding or synthesis) or quarantined store-time facts | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`) |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
 | `[[slug]]` links | inside bodies (idea/conversation/memory only — **not** mined from artifact bodies) | `backlinks` |
 | Timestamps | frontmatter `created:`/`updated:` | `ideas.created_at`/`updated_at` |
@@ -182,6 +190,7 @@ classDiagram
         <<enumeration>>
         Finding
         Synthesis
+        Quarantine
     }
     IdeaFrontmatter --> IdeaState
     ArtifactFrontmatter --> ArtifactKind

@@ -114,7 +114,7 @@ sequenceDiagram
     H->>V: set state=in_discussion/reopened (if transitioning)
     H-->>B: 200 transcript + "thinking…" indicator (self-repolling)
     H->>Task: tokio::spawn (detached — outlives the request)
-    Task->>Bud: assemble prompt (body + memory + trimmed convo)
+    Task->>Bud: assemble prompt (foil instruction + ≤1 KB skill book + body + memory + trimmed convo)
     Task->>L: chat(prompt) [acquires semaphore; dispatches to the active backend]
     L-->>Task: reply (or AiError)
     alt success, non-empty reply
@@ -144,6 +144,10 @@ Key obligations:
   detect.
 - **State transition:** the first turn moves `Draft→InDiscussion` (or keeps `Reopened`) per
   [D9](./04-state-machine.md).
+- **The foil knows the moves:** the prompt carries a compact skill book (`concepts::coverage::skill_book`
+  — every visible move, one "name — use when" line, capped at 1 KB and taken out of the context
+  budget) so the foil can recommend a move by name
+  ([ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)).
 
 Skills (`POST /idea/:slug/skill/:name`) and swarm (`POST /idea/:slug/swarm`) use the identical
 claim → spawn → poll shape; see [06-concepts/skills](./06-concepts/skills.md) D18 and
@@ -160,7 +164,7 @@ flowchart TB
         DISP["dispatcher — builds K agent tasks"]
         SEM["concurrency limiter (semaphore)"]
         WORK["agent worker (per task)"]
-        SYNTH["synthesizer / judge — converge"]
+        SYNTH["judge → auditor (ADR-0023) → synthesizer — converge"]
     end
     subgraph aimod["ai"]
         BUD["ai::budget"]

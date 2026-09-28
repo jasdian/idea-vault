@@ -54,17 +54,17 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [04-state-machine](./04-state-machine.md) | Idea lifecycle | D9 |
 | [05-ai-integration](./05-ai-integration.md) | Ollama + claude-code boundary (live router), background-job flow, degradation, errors | D3, D11, D20, D24 |
 | [06-concepts/memory](./06-concepts/memory.md) | Extract on Store, load on Reopen, backlinks | D12, D13, D23 |
-| [06-concepts/skills](./06-concepts/skills.md) | Reusable ideation moves | D18 |
+| [06-concepts/skills](./06-concepts/skills.md) | Reusable ideation moves as markdown files, the skill book, the spine | D18 |
 | [06-concepts/agents](./06-concepts/agents.md) | Subagent roles + I/O contract | — |
-| [06-concepts/workflows](./06-concepts/workflows.md) | Deterministic orchestration | D19 |
+| [06-concepts/workflows](./06-concepts/workflows.md) | Deterministic staged orchestration | D19, D32 |
 | [06-concepts/swarm](./06-concepts/swarm.md) | Bounded fan-out/converge, budgets, knowledge extraction | D14, D21, D30 |
 | [07-flows](./07-flows.md) | Runtime flow index | D10 |
 | [09-web-ui](./09-web-ui.md) | Routes, middleware, templates, HTMX (background-job polling) | D16, D17 |
 | [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers, reference sources | D26, D27, D28, D29, D31 |
-| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D31) | (catalog) |
+| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D32) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0021 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0023 | — |
 
 ## Locked decisions (at a glance)
 
@@ -83,6 +83,9 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Web access:** one live `web_access` setting (default on) lets either backend crawl the internet — a bounded `ai::web` tool-calling loop on Ollama, allow/deny of the CLI's own WebSearch/WebFetch on claude-code; off restores a fully offline run ([ADR-0017](./adr/0017-web-access-tools.md)).
 - **MCP servers:** an owner-managed registry of MCP Streamable-HTTP endpoints (`crate::mcp`, persisted app config at `<vault>/.mcp-servers.json`, not vault truth) is bridged to either backend by `ai::backend` alone, keeping the `mcp`/`ai::mcp` split one-way and acyclic; managed live from the `/mcp` page, with probes run inline rather than as background jobs ([ADR-0018](./adr/0018-mcp-servers.md)).
 - **Reference sources:** an owner-managed registry of named read-only source dirs (`crate::sources`, app config at `<vault>/.sources.json`, no enabled flag — per-idea frontmatter `sources: [name]` is the opt-in) generates a compose override (`<vault>/.docker-compose.sources.yml`, ro binds at `/mnt/sources/<name>`) that the **owner** applies with `docker compose up -d` — the app never runs docker; attached sources reach the model per turn as deterministic `source_list`/`source_grep`/`source_read` leaves (Ollama) or `--add-dir` roots (claude-code), never as model-authored paths ([ADR-0021](./adr/0021-reference-sources.md)).
+
+- **Skills as markdown + the skill book:** every ideation move is a markdown file (frontmatter: stage, role, output contract, use_when/avoid_when, hidden; body: the prompt) — built-ins compiled in from `src/concepts/skills/*.md`, owner additions/overrides in `vault/.skills/` (app config, not truth) reloaded live from the `/skills` skill book, which groups moves along the spine (steelman → attack → consequence → converge → capstone); coverage of the spine is derived from transcript headings, never stored ([ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)).
+- **Verification layer:** skill answers are held to an output contract (repair, then at most one retry for a single interactive call); swarms and workflows run a factored audit by default (one Auditor call, CONFIRMED/UNCERTAIN/REFUTED, refuted findings kept as "disproven objections", live toggle); store-time facts must quote the discussion verbatim or go to a quarantined-facts artifact, and UPDATE appends rather than rewrites ([ADR-0023](./adr/0023-verification-layer.md)).
 
 ## Beyond these docs
 

@@ -56,7 +56,8 @@ returned by `index::reindex` ([D15](./03-data-model.md)) as a first-line asserti
   ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)).
 - **Concurrency (`concepts::swarm`)** — instrument the semaphore; fan out N ≫ K tasks against the
   mock and assert max concurrent calls == K and all N complete; a failing agent yields null
-  and the judge proceeds (degrade-don't-abort, D14).
+  and the judge proceeds (degrade-don't-abort, D14); with the audit on, the Auditor call is one more
+  permit-holding call and the bound still holds (`swarm_flow` keystone runs with the audit on).
 - **Web (`web`)** — handler tests over the router: create (D10) produces a `Draft`; store (D12)
   transitions to `Stored` and writes memory; reopen (D13) loads context and sets `Reopened`; the
   chat/skill/swarm routes claim a job and the `/pending` poll reflects job state; error mapping

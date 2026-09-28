@@ -79,7 +79,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D30), and ADRs 0001–0017. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D32), and ADRs 0001–0023. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -107,12 +107,18 @@ small single-fact files, a loaded index, `[[slug]]` cross-links.
 When implementing these, keep the mental model close to a real agent harness:
 
 - **Memory** — per-idea durable facts extracted at "store" time and reloaded on reopen. Files,
-  not a monolith. This is what makes an idea resumable.
+  not a monolith. This is what makes an idea resumable. A fact must quote the discussion verbatim
+  to be remembered; the rest are quarantined in an artifact ([ADR-0023](docs/adr/0023-verification-layer.md)).
 - **Skills** — reusable, named ideation moves the AI can apply to an idea (e.g. "premortem",
-  "find the cheapest disproof", "market-size it", "devil's advocate"). Loadable/composable.
-- **Agents** — specialized subagent roles (critic, researcher, synthesizer) with scoped prompts.
-- **Workflows** — deterministic multi-step orchestrations over an idea (fan-out → judge →
-  synthesize), as opposed to free-form chat.
+  "find the cheapest disproof", "market-size it", "devil's advocate"). Each is a markdown file
+  (built-ins in `src/concepts/skills/*.md`, owner overrides in `vault/.skills/`) with a spine
+  stage, role, output contract and use-when guidance, browsed on the `/skills` skill book
+  ([ADR-0022](docs/adr/0022-skills-as-markdown-and-the-skill-book.md)).
+- **Agents** — specialized subagent roles (critic, researcher, advocate, harvester, synthesizer,
+  auditor) with scoped prompts.
+- **Workflows** — deterministic staged orchestrations over an idea (fan-out / chained step /
+  audit / synthesize), as opposed to free-form chat. Swarm and workflow findings are audited by
+  default (CONFIRMED/UNCERTAIN/REFUTED) before they are synthesized.
 - **Subagent swarming** — fan out N agents in parallel to attack one idea from independent angles,
   then converge/synthesize. Against local Ollama models this means bounded concurrency and careful
   context budgeting — do not naively spawn unbounded parallel calls.
