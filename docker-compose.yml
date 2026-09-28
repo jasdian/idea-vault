@@ -29,6 +29,9 @@ services:
       # Named-sources mount root (ADR-0021): the generated vault/.docker-compose.sources.yml
       # override bind-mounts each registered source read-only under this dir.
       IDEA_VAULT_SOURCES_DIR: "/mnt/sources"
+      # Inbound MCP server gate (ADR-0024): forwarded from .env so the containerized run can
+      # enable /api/mcp too. Empty (the default) keeps the route unmounted — see config.rs.
+      IDEA_VAULT_MCP_TOKEN: "${IDEA_VAULT_MCP_TOKEN:-}"
       RUST_LOG: "${RUST_LOG:-info}"
     ports:
       # Loopback by default: open http://localhost:<IDEA_VAULT_HOST_PORT> on the host,
