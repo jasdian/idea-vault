@@ -3,14 +3,14 @@
 //! `state.llm.set_settings` and re-renders the form with a saved confirmation. Effective on the
 //! next message — the router reads settings per call (`ai::backend`).
 
-use axum::extract::State;
-use axum::Form;
+use axum::extract::{RawForm, State};
 use serde::Deserialize;
 
-use crate::ai::LlmSettings;
+use crate::ai::{LlmSettings, RoleProfile};
 use crate::app::AppState;
+use crate::concepts::agents::AgentRole;
 use crate::config::LlmBackendKind;
-use crate::web::templates::{SettingsForm, SettingsPage};
+use crate::web::templates::{RoleRow, SettingsForm, SettingsPage};
 use crate::web::WebError;
 
 fn form_view(state: &AppState, saved: bool) -> SettingsForm {
@@ -28,7 +28,65 @@ fn form_view(state: &AppState, saved: bool) -> SettingsForm {
         effective_ctx: state.llm.context_window_tokens().to_string(),
         web_access: s.web_access,
         audit_findings: s.audit_findings,
+        role_tuning: s.role_tuning,
+        roles: AgentRole::ALL
+            .iter()
+            .map(|role| {
+                let p = role_profile(&s, *role);
+                RoleRow {
+                    name: role.as_str(),
+                    temperature: format!("{:.2}", p.temperature),
+                    claude_model: p.claude_model,
+                    effort: p.claude_effort,
+                }
+            })
+            .collect(),
         saved,
+    }
+}
+
+/// The role's live profile, or its built-in default when the map has none.
+fn role_profile(s: &LlmSettings, role: AgentRole) -> RoleProfile {
+    s.role_profiles
+        .get(role.as_str())
+        .cloned()
+        .unwrap_or_else(|| role.default_profile())
+}
+
+/// A submitted temperature, finite and clamped into the Ollama band; `None` keeps the current value.
+fn parse_temperature(raw: &str) -> Option<f32> {
+    raw.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|t| t.is_finite())
+        .map(|t| t.clamp(0.0, 2.0))
+}
+
+/// Apply the `role_<name>_{temperature,model,effort}` fields to every role's profile: an absent
+/// or invalid field keeps the current value; a blank model or effort means "inherit the global".
+fn apply_role_fields(s: &mut LlmSettings, pairs: &[(String, String)]) {
+    let field = |key: String| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.trim())
+    };
+    for role in AgentRole::ALL {
+        let name = role.as_str();
+        let mut p = role_profile(s, role);
+        if let Some(t) = field(format!("role_{name}_temperature")).and_then(parse_temperature) {
+            p.temperature = t;
+        }
+        if let Some(model) = field(format!("role_{name}_model")) {
+            p.claude_model = model.to_string();
+        }
+        if let Some(effort) = field(format!("role_{name}_effort")) {
+            if matches!(effort, "" | "low" | "medium" | "high") {
+                p.claude_effort = effort.to_string();
+            }
+        }
+        s.role_profiles.insert(name.to_string(), p);
     }
 }
 
@@ -67,6 +125,10 @@ pub struct SettingsUpdate {
     pub ollama_ctx_tokens: Option<usize>,
     #[serde(default)]
     pub claude_ctx_tokens: Option<usize>,
+    /// Per-role call profiles (docs/adr/0026) — checkbox, same omitted-means-off contract. The
+    /// per-role fields are read from the raw pairs by [`apply_role_fields`].
+    #[serde(default)]
+    pub role_tuning: bool,
 }
 
 /// Normalize a submitted context-window override: `0` stays `0` (auto), anything else is clamped
@@ -79,11 +141,17 @@ fn clamp_ctx_tokens(raw: usize) -> usize {
     }
 }
 
-/// `POST /settings` — apply the change to the runtime settings and re-render the form.
+/// `POST /settings` — apply the change to the runtime settings and re-render the form. The body
+/// is read raw and parsed twice (typed fields, then the `role_*` pairs), so a malformed body is a
+/// `400`, like the other `RawForm` routes.
 pub async fn update_settings(
     State(state): State<AppState>,
-    Form(form): Form<SettingsUpdate>,
+    RawForm(body): RawForm,
 ) -> Result<SettingsForm, WebError> {
+    let form: SettingsUpdate = serde_urlencoded::from_bytes(&body)
+        .map_err(|e| WebError::BadRequest(format!("settings form: {e}")))?;
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(&body)
+        .map_err(|e| WebError::BadRequest(format!("settings form: {e}")))?;
     let mut s = state.llm.settings();
     s.backend = match form.backend.as_str() {
         "claude-code" => LlmBackendKind::ClaudeCode,
@@ -120,6 +188,8 @@ pub async fn update_settings(
     if let Some(n) = form.claude_ctx_tokens {
         s.claude_ctx_tokens = clamp_ctx_tokens(n);
     }
+    s.role_tuning = form.role_tuning;
+    apply_role_fields(&mut s, &pairs);
     state.llm.set_settings(LlmSettings { ..s });
     tracing::info!(backend = ?state.llm.settings().backend, "llm settings updated");
 

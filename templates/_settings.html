@@ -82,5 +82,37 @@
     </label>
   </fieldset>
 
+  <fieldset class="settings__group">
+    <legend>role tuning</legend>
+    <label class="opt">
+      <input type="checkbox" name="role_tuning" value="true" {% if role_tuning %}checked{% endif %} />
+      <span>Run each swarm, workflow and skill role with its own profile — harvesters and the
+        auditor cold, critics hot. Off = every role uses the settings above. Free chat always does.</span>
+    </label>
+    <table class="roles">
+      <thead>
+        <tr><th>role</th><th>local temp</th><th>claude model</th><th>claude effort</th></tr>
+      </thead>
+      <tbody>
+        {% for r in roles %}
+        <tr>
+          <th scope="row">{{ r.name }}</th>
+          <td><input type="number" name="role_{{ r.name }}_temperature" min="0" max="2" step="0.05" value="{{ r.temperature }}" aria-label="{{ r.name }} temperature" /></td>
+          <td><input type="text" name="role_{{ r.name }}_model" value="{{ r.claude_model }}" placeholder="(inherit)" aria-label="{{ r.name }} claude model" /></td>
+          <td>
+            <select name="role_{{ r.name }}_effort" aria-label="{{ r.name }} claude effort">
+              <option value=""{% if r.effort == "" %} selected{% endif %}>inherit</option>
+              <option value="low"{% if r.effort == "low" %} selected{% endif %}>low</option>
+              <option value="medium"{% if r.effort == "medium" %} selected{% endif %}>medium</option>
+              <option value="high"{% if r.effort == "high" %} selected{% endif %}>high</option>
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="field__hint">blank model / inherit effort use the claude settings above · temperature applies to the local model only</p>
+  </fieldset>
+
   <button type="submit" class="btn">Save settings</button>
 </form>

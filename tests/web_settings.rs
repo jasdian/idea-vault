@@ -241,3 +241,72 @@ async fn unchecked_auto_compact_box_turns_it_off() {
         "omitting the checkbox disables auto-compact"
     );
 }
+
+#[tokio::test]
+async fn settings_page_lists_every_agent_role() {
+    let (state, _vault) = test_state();
+    let (_, body) = get(state, "/settings").await;
+    assert!(body.contains("name=\"role_tuning\""));
+    for role in [
+        "critic",
+        "researcher",
+        "advocate",
+        "harvester",
+        "synthesizer",
+        "auditor",
+    ] {
+        assert!(
+            body.contains(&format!("name=\"role_{role}_temperature\"")),
+            "{role} row missing"
+        );
+        assert!(body.contains(&format!("name=\"role_{role}_model\"")));
+        assert!(body.contains(&format!("name=\"role_{role}_effort\"")));
+    }
+}
+
+#[tokio::test]
+async fn role_profiles_round_trip_through_the_form() {
+    let (state, _vault) = test_state();
+    post_form(
+        state.clone(),
+        "/settings",
+        "backend=ollama&role_advocate_temperature=1.35",
+    )
+    .await;
+    let (status, body) = post_form(
+        state.clone(),
+        "/settings",
+        "backend=ollama&role_tuning=true\
+         &role_harvester_temperature=0.1\
+         &role_auditor_model=opus%5B1m%5D&role_auditor_effort=medium\
+         &role_critic_temperature=5\
+         &role_advocate_temperature=nan\
+         &role_researcher_effort=extreme",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("name=\"role_tuning\" value=\"true\" checked"));
+
+    let s = state.llm.settings();
+    assert!(s.role_tuning);
+    let p = |r: &str| s.role_profiles.get(r).cloned().expect(r);
+    assert!((p("harvester").temperature - 0.1).abs() < 1e-6);
+    assert_eq!(p("auditor").claude_model, "opus[1m]");
+    assert_eq!(p("auditor").claude_effort, "medium");
+    assert_eq!(p("critic").temperature, 2.0, "clamped into 0.0..=2.0");
+    assert!(
+        (p("advocate").temperature - 1.35).abs() < 1e-6,
+        "NaN keeps the prior value"
+    );
+    assert!(
+        matches!(
+            p("researcher").claude_effort.as_str(),
+            "" | "low" | "medium" | "high"
+        ),
+        "an unknown effort is ignored"
+    );
+    assert!(body.contains("value=\"opus[1m]\""));
+
+    let (_, _) = post_form(state.clone(), "/settings", "backend=ollama").await;
+    assert!(!state.llm.settings().role_tuning, "omitted checkbox = off");
+}

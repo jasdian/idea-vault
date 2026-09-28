@@ -644,6 +644,15 @@ a.tagchip:hover { border-color: var(--accent); }
 }
 .settings input:focus, .settings select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .settings .btn { align-self: flex-start; }
+.roles { width: 100%; border-collapse: collapse; margin-top: .5rem; font-size: .9rem; }
+.roles th, .roles td { padding: .3rem .35rem; text-align: left; vertical-align: middle; }
+.roles thead th {
+  font-family: var(--mono); font-size: .68rem; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--faint); font-weight: normal;
+}
+.roles tbody th { font-family: var(--mono); font-size: .8rem; color: var(--muted); font-weight: normal; }
+.settings .roles input, .settings .roles select { width: 100%; max-width: none; padding: .3rem .4rem; font-size: .85rem; }
+.roles td:nth-child(2) { width: 5.5rem; }
 .settings__diag {
   font-family: var(--mono); font-size: .74rem; color: var(--faint);
   margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid var(--rule); max-width: 34rem;

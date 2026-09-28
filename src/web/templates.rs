@@ -127,7 +127,18 @@ pub struct SettingsForm {
     pub claude_ctx_tokens: String,
     /// The window the active backend resolves to right now (tokens) — the "effective" hint.
     pub effective_ctx: String,
+    /// Per-role call profiles toggle (docs/adr/0026) and one row per agent role.
+    pub role_tuning: bool,
+    pub roles: Vec<RoleRow>,
     pub saved: bool,
+}
+
+/// One agent role's row in the settings role table (docs/adr/0026); blank model/effort inherit.
+pub struct RoleRow {
+    pub name: &'static str,
+    pub temperature: String,
+    pub claude_model: String,
+    pub effort: String,
 }
 
 /// Partial: a single idea row in the list (R3, `templates/_idea_row.html`).
