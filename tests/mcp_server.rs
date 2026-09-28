@@ -402,3 +402,163 @@ async fn spawn_store_ready_mock() -> support::MockOllama {
     )
     .await
 }
+
+/// Regression for the Task↔Job bridge's terminal-state cache: `web::jobs::peek` is a one-shot
+/// consuming read, so without caching, the first `tasks/get` after a failure would consume the
+/// `Failed` slot and every later call (a second `tasks/get`, or `tasks/result`) would see `Idle`
+/// and fabricate a false success — for `chat` specifically, the user's own last message read back
+/// as if it were the assistant's reply.
+#[tokio::test]
+async fn chat_task_failure_is_reported_as_failed_not_a_false_success() {
+    // test_state()'s default Ollama URL is a refused port — the chat call fails fast and
+    // deterministically, with no mock server to script.
+    let (state, vault_dir) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Doomed Chat" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 50, "method": "tools/call",
+        "params": { "name": "chat", "arguments": { "slug": slug, "message": "hi" }, "task": {} }
+    });
+    let (_, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut status_str = "working".to_string();
+    for _ in 0..300 {
+        let get = json!({
+            "jsonrpc": "2.0", "id": 51, "method": "tasks/get",
+            "params": { "taskId": task_id }
+        });
+        let (_, _, body) = send(&app, mcp_request(get, Some(&session), Some(TOKEN))).await;
+        status_str = body["result"]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if status_str != "working" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        status_str, "failed",
+        "expected the chat job to fail against a refused Ollama port"
+    );
+
+    // A SECOND tasks/get on the same task id must report the SAME terminal status — this is the
+    // exact call that used to roll a consumed Failed slot over to a false "completed".
+    let get_again = json!({
+        "jsonrpc": "2.0", "id": 52, "method": "tasks/get",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(&app, mcp_request(get_again, Some(&session), Some(TOKEN))).await;
+    assert_eq!(
+        body["result"]["status"], "failed",
+        "second tasks/get must not roll a Failed job over to completed: {body}"
+    );
+
+    let result_req = json!({
+        "jsonrpc": "2.0", "id": 53, "method": "tasks/result",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(&app, mcp_request(result_req, Some(&session), Some(TOKEN))).await;
+    assert_eq!(
+        body["result"]["isError"], true,
+        "a failed chat task must surface as a tool-result error, not a false success: {body}"
+    );
+
+    // No fabricated assistant turn ever landed in conversation.md.
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert!(
+        !conversation.contains("## assistant"),
+        "a failed turn must not persist an assistant reply: {conversation}"
+    );
+}
+
+/// Regression: `tasks/cancel` must record a terminal outcome of its own, so a later `tasks/get`
+/// or `tasks/result` on the same task id reports `cancelled` forever after — not `completed` with
+/// a fabricated success payload re-derived from whatever the vault happens to look like once the
+/// aborted job's slot is gone.
+#[tokio::test]
+async fn cancelled_task_is_reported_as_cancelled_not_a_false_success() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::TokensAfterDelay {
+            tokens: vec!["late reply".into()],
+            delay_ms: 2_000,
+        },
+    )
+    .await;
+    let (state, _vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Cancel Me" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 60, "method": "tools/call",
+        "params": { "name": "chat", "arguments": { "slug": slug, "message": "hi" }, "task": {} }
+    });
+    let (_, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(body["result"]["task"]["status"], "working");
+
+    // Cancel while the (2s-delayed) job is still running.
+    let cancel = json!({
+        "jsonrpc": "2.0", "id": 61, "method": "tasks/cancel",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(&app, mcp_request(cancel, Some(&session), Some(TOKEN))).await;
+    assert_eq!(
+        body["result"]["status"], "cancelled",
+        "tasks/cancel response: {body}"
+    );
+
+    let get = json!({
+        "jsonrpc": "2.0", "id": 62, "method": "tasks/get",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(&app, mcp_request(get, Some(&session), Some(TOKEN))).await;
+    assert_eq!(
+        body["result"]["status"], "cancelled",
+        "tasks/get after cancel must still say cancelled, not completed: {body}"
+    );
+
+    let result_req = json!({
+        "jsonrpc": "2.0", "id": 63, "method": "tasks/result",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(&app, mcp_request(result_req, Some(&session), Some(TOKEN))).await;
+    assert_eq!(
+        body["result"]["isError"], true,
+        "a cancelled task must not report a false success: {body}"
+    );
+}

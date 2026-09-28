@@ -3,10 +3,18 @@
 //! slug-keyed background-job machinery (`web::jobs`, ADR-0010), without any change to `jobs.rs`
 //! itself — every job-state read/write below goes through its existing public functions.
 //!
-//! `web::jobs::Job` carries no return payload (only a status), so [`TaskRegistry::result`]
-//! re-derives the tool's result from the vault once the job goes idle — the vault is truth
-//! anyway (markdown-is-truth), so re-reading it after completion is the correct source, not a
-//! workaround.
+//! `web::jobs::peek` is a **one-shot, consuming** read of a terminal (`Failed`/`Notice`) slot —
+//! correct for its one HTTP poll endpoint, but the MCP Task lifecycle asks about the same task
+//! through two separate RPC methods (`tasks/get` then `tasks/result`), and a client MAY poll
+//! `tasks/get` more than once. Reading `peek` from more than one of those calls would consume the
+//! terminal slot on the first read and roll every later read over to `Idle`, silently reporting a
+//! failed or cancelled task as a false success. [`TaskEntry::terminal`] is the fix: the first time
+//! a terminal state is observed (by *either* `tasks/get` or `tasks/result`), it is cached on the
+//! entry, and every later call reads the cache instead of `web::jobs` again.
+//!
+//! `web::jobs::Job` also carries no return payload (only a status), so a `Completed`/`Notice`
+//! result is re-derived from the vault once cached — the vault is truth anyway (markdown-is-truth),
+//! so re-reading it after completion is the correct source, not a workaround.
 //!
 //! [`TaskRegistry`] itself lives on [`super::handler::IdeaVaultMcpServer`] behind an `Arc`, one
 //! instance for the whole mounted route (not per rmcp session) — a task minted on one session
@@ -15,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use chrono::Utc;
 use rmcp::model::{
@@ -40,13 +48,44 @@ enum TaskKind {
     Store,
 }
 
+/// A terminal outcome for an MCP task, cached the first time it's observed — see the module doc.
+#[derive(Clone)]
+enum Terminal {
+    Completed,
+    Failed(String),
+    Notice(String),
+    Cancelled,
+}
+
+fn translate_terminal(terminal: &Terminal) -> (TaskStatus, Option<String>) {
+    match terminal {
+        Terminal::Completed => (TaskStatus::Completed, None),
+        Terminal::Failed(msg) => (TaskStatus::Failed, Some(msg.clone())),
+        Terminal::Notice(msg) => (TaskStatus::Completed, Some(msg.clone())),
+        Terminal::Cancelled => (TaskStatus::Cancelled, None),
+    }
+}
+
 struct TaskEntry {
     slug: String,
     kind: TaskKind,
+    terminal: Option<Terminal>,
 }
 
-/// In-memory task_id → (idea slug, tool) map. Never persisted: a task id is meaningless across a
-/// process restart, exactly like `web::jobs`' own in-memory job map.
+/// What one `observe()` call resolved, carrying everything a caller needs without re-locking.
+struct Observed {
+    slug: String,
+    kind: TaskKind,
+    status: TaskStatus,
+    message: Option<String>,
+    terminal: Option<Terminal>,
+}
+
+/// In-memory task_id → task-entry map. Never persisted: a task id is meaningless across a process
+/// restart, exactly like `web::jobs`' own in-memory job map. A poisoned lock (a panic while an
+/// entry was being mutated, which none of the mutations here can actually trigger) is recovered
+/// from rather than propagated — see [`TaskRegistry::lock`] — so one bad task can't take down
+/// `tasks/get`/`tasks/result`/`tasks/cancel` for every other idea for the rest of the process.
 #[derive(Default)]
 pub(super) struct TaskRegistry(Mutex<HashMap<String, TaskEntry>>);
 
@@ -55,10 +94,16 @@ impl TaskRegistry {
         Self::default()
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, TaskEntry>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// `enqueue_task`: validate + claim + spawn, then mint a task id. Fails fast (a protocol
     /// error, not a minted task) on a bad slug/state/busy-idea — matching the HTTP routes' own
     /// synchronous guards, so a doomed call never produces a task the client has to poll to learn
-    /// it was doomed.
+    /// it was doomed. (This is a deliberate asymmetry with the five synchronous tools, which
+    /// surface the same class of business error as a `CallToolResult`-level tool error instead —
+    /// see docs/adr/0024's Consequences.)
     pub(super) async fn enqueue(
         &self,
         state: &AppState,
@@ -124,22 +169,69 @@ impl TaskRegistry {
 
         let task_id = next_task_id();
         let now = Utc::now().to_rfc3339();
-        self.0
-            .lock()
-            .unwrap()
-            .insert(task_id.clone(), TaskEntry { slug, kind });
+        self.lock().insert(
+            task_id.clone(),
+            TaskEntry {
+                slug,
+                kind,
+                terminal: None,
+            },
+        );
         let task =
             Task::new(task_id, TaskStatus::Working, now.clone(), now).with_poll_interval(1_500);
         Ok(CreateTaskResult::new(task))
     }
 
+    /// Resolve a task's current status, caching a terminal outcome the first time it's seen — see
+    /// the module doc for why this cache exists instead of reading `web::jobs::peek` directly from
+    /// both `info` and `result`.
+    fn observe(&self, state: &AppState, task_id: &str) -> Result<Observed, McpError> {
+        let mut map = self.lock();
+        let entry = map
+            .get_mut(task_id)
+            .ok_or_else(|| McpError::invalid_params(format!("unknown task '{task_id}'"), None))?;
+
+        if let Some(terminal) = &entry.terminal {
+            let (status, message) = translate_terminal(terminal);
+            return Ok(Observed {
+                slug: entry.slug.clone(),
+                kind: entry.kind,
+                status,
+                message,
+                terminal: Some(terminal.clone()),
+            });
+        }
+
+        let (status, message, terminal) = match jobs::peek(&state.jobs, &entry.slug) {
+            Pending::Running { note, .. } => (TaskStatus::Working, non_empty(note), None),
+            Pending::Idle => (TaskStatus::Completed, None, Some(Terminal::Completed)),
+            Pending::Failed(msg) => (
+                TaskStatus::Failed,
+                Some(msg.clone()),
+                Some(Terminal::Failed(msg)),
+            ),
+            Pending::Notice(msg) => (
+                TaskStatus::Completed,
+                Some(msg.clone()),
+                Some(Terminal::Notice(msg)),
+            ),
+        };
+        entry.terminal = terminal.clone();
+        Ok(Observed {
+            slug: entry.slug.clone(),
+            kind: entry.kind,
+            status,
+            message,
+            terminal,
+        })
+    }
+
     /// `tasks/get`.
     pub(super) fn info(&self, state: &AppState, task_id: &str) -> Result<GetTaskResult, McpError> {
-        let slug = self.slug_of(task_id)?;
-        let (status, message) = translate(jobs::peek(&state.jobs, &slug));
+        let observed = self.observe(state, task_id)?;
         let now = Utc::now().to_rfc3339();
-        let mut task = Task::new(task_id.to_string(), status, now.clone(), now);
-        if let Some(m) = message {
+        let mut task = Task::new(task_id.to_string(), observed.status, now.clone(), now);
+        if let Some(m) = observed.message {
             task = task.with_status_message(m);
         }
         Ok(GetTaskResult { meta: None, task })
@@ -152,59 +244,57 @@ impl TaskRegistry {
         state: &AppState,
         task_id: &str,
     ) -> Result<GetTaskPayloadResult, McpError> {
-        let (slug, kind) = {
-            let map = self.0.lock().unwrap();
-            let entry = map.get(task_id).ok_or_else(|| {
-                McpError::invalid_params(format!("unknown task '{task_id}'"), None)
-            })?;
-            (entry.slug.clone(), entry.kind)
-        };
-        match jobs::peek(&state.jobs, &slug) {
-            Pending::Running { .. } => Err(McpError::invalid_request(
+        let observed = self.observe(state, task_id)?;
+        let Some(terminal) = observed.terminal else {
+            return Err(McpError::invalid_request(
                 "task is still running — poll tasks/get first",
                 None,
-            )),
-            Pending::Failed(msg) => Ok(as_payload(CallToolResult::error(vec![Content::text(msg)]))),
-            Pending::Notice(msg) => Ok(as_payload(finish_result(state, &slug, kind, Some(msg)))),
-            Pending::Idle => Ok(as_payload(finish_result(state, &slug, kind, None))),
-        }
+            ));
+        };
+        let result = match terminal {
+            Terminal::Failed(msg) => CallToolResult::error(vec![Content::text(msg)]),
+            Terminal::Cancelled => CallToolResult::error(vec![Content::text("task was cancelled")]),
+            Terminal::Notice(msg) => finish_result(state, &observed.slug, observed.kind, Some(msg)),
+            Terminal::Completed => finish_result(state, &observed.slug, observed.kind, None),
+        };
+        Ok(as_payload(result))
     }
 
-    /// `tasks/cancel`.
+    /// `tasks/cancel`. If the task already reached a terminal outcome before this call, that
+    /// outcome is reported as-is (cancel cannot retroactively relabel a task that already
+    /// completed, failed, or was cancelled) rather than always claiming `Cancelled`.
     pub(super) fn cancel(
         &self,
         state: &AppState,
         task_id: &str,
     ) -> Result<CancelTaskResult, McpError> {
-        let slug = self.slug_of(task_id)?;
+        let (slug, reported_status) = {
+            let mut map = self.lock();
+            let entry = map.get_mut(task_id).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown task '{task_id}'"), None)
+            })?;
+            let status = match &entry.terminal {
+                Some(terminal) => translate_terminal(terminal).0,
+                None => {
+                    entry.terminal = Some(Terminal::Cancelled);
+                    TaskStatus::Cancelled
+                }
+            };
+            (entry.slug.clone(), status)
+        };
+        // Best-effort abort of the underlying job; a no-op if it already finished (mark_done
+        // already removed the slot, in which case the terminal state recorded above stands).
         jobs::cancel(&state.jobs, &slug);
         let now = Utc::now().to_rfc3339();
         Ok(CancelTaskResult {
             meta: None,
-            task: Task::new(task_id.to_string(), TaskStatus::Cancelled, now.clone(), now),
+            task: Task::new(task_id.to_string(), reported_status, now.clone(), now),
         })
-    }
-
-    fn slug_of(&self, task_id: &str) -> Result<String, McpError> {
-        self.0
-            .lock()
-            .unwrap()
-            .get(task_id)
-            .map(|e| e.slug.clone())
-            .ok_or_else(|| McpError::invalid_params(format!("unknown task '{task_id}'"), None))
     }
 }
 
-fn translate(pending: Pending) -> (TaskStatus, Option<String>) {
-    match pending {
-        Pending::Running { note, .. } => (
-            TaskStatus::Working,
-            if note.is_empty() { None } else { Some(note) },
-        ),
-        Pending::Idle => (TaskStatus::Completed, None),
-        Pending::Failed(msg) => (TaskStatus::Failed, Some(msg)),
-        Pending::Notice(msg) => (TaskStatus::Completed, Some(msg)),
-    }
+fn non_empty(s: String) -> Option<String> {
+    (!s.is_empty()).then_some(s)
 }
 
 fn as_payload(result: CallToolResult) -> GetTaskPayloadResult {

@@ -45,6 +45,17 @@ impl IntoResponse for AuthError {
     }
 }
 
+/// Constant-time byte comparison — a plain `==` on the presented token would let response timing
+/// leak how many leading bytes matched. The length check short-circuits (lengths aren't secret),
+/// but every byte of an equal-length guess is compared regardless of an earlier mismatch.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 fn authenticate(headers: &HeaderMap, token: &str) -> Result<(), AuthError> {
     let header = headers
         .get(header::AUTHORIZATION)
@@ -53,7 +64,7 @@ fn authenticate(headers: &HeaderMap, token: &str) -> Result<(), AuthError> {
     let presented = header
         .strip_prefix("Bearer ")
         .ok_or(AuthError::InvalidFormat)?;
-    if presented == token {
+    if constant_time_eq(presented, token) {
         Ok(())
     } else {
         Err(AuthError::InvalidToken)

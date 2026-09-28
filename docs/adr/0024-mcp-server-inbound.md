@@ -64,11 +64,17 @@ dispatch layer itself rejects a plain (non-task) `tools/call` for either with `-
 handler ever runs, so a client is forced onto the Task lifecycle for exactly the two tools that
 run a model call. A new `web::mcp_server::tasks::TaskRegistry` bridges an MCP task id to an idea
 slug and a tool kind, and translates `web::jobs::peek`'s `Pending` states into MCP `TaskStatus`
-(`Running → Working`, `Idle → Completed`, `Failed → Failed`). `web::jobs::Job` carries no return
-payload, so `tasks/result` re-derives the tool's result by re-reading the vault once the job goes
-idle (the newest conversation turn for `chat`, the fresh frontmatter for `store_idea`) — the vault
-is truth anyway, so this is the correct source, not a workaround. No changes were made to
-`web::jobs.rs` itself; the bridge consumes it purely through its existing public functions.
+(`Running → Working`, `Idle → Completed`, `Failed → Failed`). `web::jobs::peek` is a **one-shot,
+consuming** read of a terminal slot (correct for its one HTTP poll endpoint) — but the Task
+lifecycle asks about the same task through two separate RPC methods (`tasks/get` then
+`tasks/result`), and a client may poll `tasks/get` more than once, so `TaskRegistry` caches the
+terminal outcome the first time either method observes it (`TaskEntry::terminal`) rather than
+reading `web::jobs::peek` more than once per task. `web::jobs::Job` carries no return payload, so
+`tasks/result` re-derives the tool's result by re-reading the vault once the cached outcome is
+`Completed`/`Notice` (the newest conversation turn for `chat`, the fresh frontmatter for
+`store_idea`) — the vault is truth anyway, so this is the correct source, not a workaround. No
+changes were made to `web::jobs.rs` itself; the bridge consumes it purely through its existing
+public functions.
 
 The five remaining tools (`list_ideas`, `get_idea`, `search`, `create_idea`, `reopen_idea`) are
 plain synchronous `call_tool` handlers. `create_idea` and `reopen_idea` call small `pub(crate)`
@@ -89,6 +95,14 @@ divergent copy of it.
 - `IDEA_VAULT_MCP_TOKEN` is a new required piece of configuration for anyone who wants this
   feature; its absence is silent-by-design (no route mounted, no error), which downstream tooling
   (health checks, `doc-sync`'s env-var table check) must account for as "off," not "misconfigured."
+- A business-error asymmetry a client author must know about: the five synchronous tools
+  (`get_idea`, `search`, `create_idea`, `reopen_idea`, `list_ideas`) surface a bad request (unknown
+  slug, wrong state, …) as `CallToolResult::error` — a tool-result error, visible to the model
+  in-band. `chat`/`store_idea`'s `enqueue_task`, by contrast, surfaces the *same class* of error
+  (unknown slug, wrong state, idea already busy) as a JSON-RPC protocol error
+  (`McpError::invalid_params`), by design (fail fast — a doomed call should never mint a task the
+  client has to poll just to learn it was doomed). This is deliberate, not an oversight; a future
+  pass could unify the two shapes, but should not silently drift them further apart.
 - The MVP tool set is intentionally incomplete. A follow-up ADR (or an amendment here, since this
   is Accepted) is expected once skills/swarm/workflow/extract/compact tools and MCP resources are
   added — do not silently expand `web::mcp_server::tools::catalog()` without updating this ADR's
