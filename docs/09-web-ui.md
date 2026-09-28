@@ -41,6 +41,7 @@ flowchart LR
         R19["GET /idea/:slug/artifact/:name — view one artifact (.md full page | .html served raw)"]
         R24["GET /mcp — MCP server management page (ADR-0018)"]
         R33["GET /skills — the skill book: every move by spine stage (ADR-0022)"]
+        R36["GET /sources — named reference sources page (ADR-0021)"]
     end
     subgraph partials["HTMX partials"]
         R3["POST /ideas — create (D10) → idea row / redirect"]
@@ -69,6 +70,15 @@ flowchart LR
         R30["POST /mcp/:name/delete — remove a server → #mcp panel"]
         R31["POST /mcp/:name/probe — connect + tools/list, inline (not a job) → status slot"]
         R34["POST /skills/reload — re-read vault/.skills/, inline (not a job) → #skills panel (ADR-0022)"]
+        R37["POST /sources/add — register a source (ADR-0021) → #sources panel"]
+        R38["GET /sources/:name/edit — swap one row into its edit form → row"]
+        R39["GET /sources/:name/view — swap the edit form back to a view row → row"]
+        R40["POST /sources/:name/update — apply a host-path edit → #sources panel"]
+        R41["POST /sources/:name/delete — remove a source → #sources panel"]
+        R42["POST /idea/:slug/tags — replace the idea's tag set → tag row"]
+        R43["POST /idea/:slug/sources — replace the idea's attached-source set → sources row"]
+        R44["POST /idea/:slug/cancel — abort the running job, idempotent → transcript | stored view"]
+        R45["POST /idea/:slug/delete — permanently delete the idea (forced reindex) → HX-Redirect /"]
     end
     subgraph admin["Admin"]
         R10["POST /admin/reindex — rebuild index (D15)"]
@@ -112,9 +122,21 @@ flowchart LR
     R32 --> T_QUEUE["templates/_queue.html"]
     R33 --> T_SKILLS["templates/skills.html"]
     R34 --> T_SKILLSLIST["templates/_skills_list.html"]
+    R36 --> T_SOURCES["templates/sources.html"]
+    R37 --> T_SRCLIST["templates/_sources_list.html"]
+    R38 --> T_SRCEDIT["templates/_source_edit_row.html"]
+    R39 --> T_SRCROW["templates/_source_row.html"]
+    R40 --> T_SRCLIST
+    R41 --> T_SRCLIST
+    R42 --> T_TAGS["templates/_idea_tags.html"]
+    R43 --> T_IDEASRC["templates/_idea_sources.html"]
+    R44 --> T_TURN
+    R44 -.->|"store job lands"| T_STORED
+    R45 --> T_REDIRECT["HX-Redirect / (no template)"]
 ```
 
-Route groups map to `web::routes` submodules: `ideas` (R1, R2, R3, R8, R9b, R12, R14, R23), `chat`
+Route groups map to `web::routes` submodules: `ideas` (R1, R2, R3, R8, R9b, R12, R14, R23, R42–R45 —
+`set_tags`/`set_sources`/`cancel_job`/`delete_idea`), `chat`
 (R9, R32 — the send path and its pending-message queue), `memory`/idea-actions (R4–R7, R15, R16, R22 — the module name predates the delete/workflow
 routes but still owns them; R22 (`run_workflow`) runs the D19 deterministic workflow DAG behind the
 same claim → spawn → poll job shape as R6/R7), `settings` (R13, R13b), `admin` (R10, R11, R17),
@@ -124,7 +146,8 @@ now" fold, [ADR-0012](./adr/0012-auto-compact.md)/[ADR-0016](./adr/0016-forced-c
 `mcp` (R24–R31 — the MCP server management page, [ADR-0018](./adr/0018-mcp-servers.md)), `skills`
 (R33, R34 — the skill book and its live reload, [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)),
 `mcp_server` (R35 — the **inbound** MCP protocol endpoint, [ADR-0024](./adr/0024-mcp-server-inbound.md);
-the mirror image of `mcp`'s outbound registry).
+the mirror image of `mcp`'s outbound registry), `sources` (R36–R41 — the owner's named read-only
+reference-source registry, mirroring `mcp`'s shape, [ADR-0021](./adr/0021-reference-sources.md)).
 R23 (`rename_idea`) is deliberately **not** a job route (D11) — it is a synchronous frontmatter
 edit, not an AI call, so it returns its partial directly like R3/R14/R15/R16 rather than going
 through claim → spawn → poll. **R24–R31 are idea-agnostic** — they manage the owner-global MCP
@@ -140,6 +163,26 @@ endpoint, not a page or partial — it carries its own MCP-level `tools/call`/`t
 (`web::mcp_server`), and its two long-running tools (`chat`, `store_idea`) still go through the same
 `web::jobs` claim → spawn → poll machinery every other AI route uses, bridged onto the MCP Tasks
 primitive rather than exposed as HTML ([ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md)).
+**R36–R41 (`/sources`, ADR-0021) never run docker** (the app never invokes docker at all, ADR-0020). A mutation only rewrites the generated
+`vault/.docker-compose.sources.yml` override (`web::routes::sources::add_source`/`update_source`/
+`delete_source` → `crate::sources::SourceRegistry`); the saved-vs-applied gap surfaces as the
+panel's "you run: `docker compose up -d`" banner copy, same as `/mcp`'s pattern but with no probe
+route and no toggle — every `GET` render stat-probes the registry directly
+(`SourceRegistry::statuses`), so a source is either registered or removed, never "disabled". R42
+(`set_tags`) and R43 (`set_sources`) are whole-file read-modify-writes on `idea.md`, so — like R23
+— they claim the per-idea job slot before writing and return `400` ("a run is in progress for this
+idea") if a job is already `Running`, releasing the slot in every path (including a `404` on a
+missing idea) so the idea never reads as stuck busy. R42 slugifies each comma-separated token
+(dropping junk silently, capping at `MAX_IDEA_TAGS`); R43 reads the raw urlencoded body by hand
+(`axum::Form` can't collect a repeated `sources=` key) and only checks a newly-checked name against
+the registry — an already-attached name the registry no longer knows may persist, since frontmatter
+is truth. R44 (`cancel_job`) aborts the in-flight detached task (dropping the model future so
+nothing partial persists) and is idempotent: cancelling an idle idea just re-renders current state
+through the same `respond_discussion_or_stored` the R9b poll uses, including widening to the stored
+view if a store job won the race first. R45 (`delete_idea`) removes the whole idea folder and then
+runs a **forced** reindex (`web::routes::reindex_logged_forced`, bypassing the empty-vault guard
+[ADR-0019](./adr/0019-vault-mount-verified-not-created.md) would otherwise apply) before an `HX-Redirect`
+home, since deleting the last idea legitimately empties the vault.
 
 ## D16 — HTTP request / middleware pipeline
 
