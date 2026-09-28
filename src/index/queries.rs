@@ -350,6 +350,88 @@ pub fn fact_links_from(conn: &Connection, slug: &str) -> Result<Vec<FactLink>, I
     rows.collect::<Result<_, _>>().map_err(Into::into)
 }
 
+/// One idea related to a queried idea through the derived `edges` graph (D6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatedIdea {
+    pub slug: String,
+    pub title: String,
+    /// A pair of ideas weighs the sum of its edges' weights across all edge types. Direct
+    /// neighbours score their pair weight with the queried idea; two-hop candidates score 0.5
+    /// times their best path, where a path weighs as much as its weakest pair.
+    pub score: f64,
+    /// Shortest edge distance from the queried idea: 1 or 2.
+    pub hops: u32,
+    /// Sorted, distinct explanations of the pairs that reached this idea at `hops`: one
+    /// `type: detail` entry per edge type, `; `-joined, and two-hop reasons read
+    /// `via <slug> (<pair reason>)`.
+    pub reasons: Vec<String>,
+}
+
+const REASON_SEPARATOR: char = '\u{1f}';
+
+/// Ideas related to `slug` through `edges`, best first, at most `limit`.
+///
+/// A recursive CTE walks the undirected edges up to two hops out from `slug`. Each candidate is
+/// scored at its minimal hop count only (see [`RelatedIdea::score`]): a direct neighbour's
+/// two-hop paths never add to its score. The queried idea is never returned, including through a
+/// cycle back to itself. Ordered by score descending, hops ascending, slug ascending. An unknown
+/// `slug` yields an empty list.
+pub fn related_ideas(
+    conn: &Connection,
+    slug: &str,
+    limit: usize,
+) -> Result<Vec<RelatedIdea>, IndexError> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE
+         start(id) AS (SELECT id FROM ideas WHERE slug = ?1),
+         undirected(a, b, type, weight, detail) AS (
+             SELECT src_idea_id, dst_idea_id, type, weight, detail FROM edges
+             UNION ALL
+             SELECT dst_idea_id, src_idea_id, type, weight, detail FROM edges
+         ),
+         pair(a, b, weight, reason) AS (
+             SELECT a, b, SUM(weight), GROUP_CONCAT(type || ': ' || detail, '; ' ORDER BY type)
+             FROM undirected GROUP BY a, b
+         ),
+         walk(node, hops, path_weight, reason) AS (
+             SELECT p.b, 1, p.weight, p.reason
+             FROM pair p JOIN start ON p.a = start.id
+             WHERE p.b <> start.id
+             UNION ALL
+             SELECT p.b, w.hops + 1, MIN(w.path_weight, p.weight),
+                    'via ' || (SELECT slug FROM ideas WHERE id = w.node) || ' (' || p.reason || ')'
+             FROM walk w JOIN pair p ON p.a = w.node
+             WHERE w.hops < 2 AND p.b <> (SELECT id FROM start)
+         ),
+         nearest(node, hops) AS (SELECT node, MIN(hops) FROM walk GROUP BY node),
+         reasons(node, reason) AS (
+             SELECT DISTINCT w.node, w.reason
+             FROM walk w JOIN nearest n ON n.node = w.node AND n.hops = w.hops
+         )
+         SELECT i.slug, i.title, n.hops,
+                (SELECT CASE n.hops WHEN 1 THEN MAX(w.path_weight)
+                                    ELSE 0.5 * MAX(w.path_weight) END
+                 FROM walk w WHERE w.node = n.node AND w.hops = n.hops) AS score,
+                (SELECT GROUP_CONCAT(r.reason, char(31)) FROM reasons r WHERE r.node = n.node)
+         FROM nearest n JOIN ideas i ON i.id = n.node
+         ORDER BY score DESC, n.hops ASC, i.slug ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![slug, limit as i64], |row| {
+        let joined: String = row.get(4)?;
+        let mut reasons: Vec<String> = joined.split(REASON_SEPARATOR).map(str::to_string).collect();
+        reasons.sort();
+        Ok(RelatedIdea {
+            slug: row.get(0)?,
+            title: row.get(1)?,
+            hops: row.get(2)?,
+            score: row.get(3)?,
+            reasons,
+        })
+    })?;
+    rows.collect::<Result<_, _>>().map_err(Into::into)
+}
+
 /// Every idea carrying `tag` in its frontmatter, most-recently-updated first.
 pub fn ideas_with_tag(conn: &Connection, tag: &str) -> Result<Vec<IdeaSummary>, IndexError> {
     let mut stmt = conn.prepare(

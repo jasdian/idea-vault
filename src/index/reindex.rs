@@ -4,6 +4,7 @@
 //! reconstructable from markdown alone. It runs inside a single transaction and returns counts so
 //! callers (and the property test from docs/10-testing-strategy.md, below) can verify the rebuild.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -170,7 +171,8 @@ fn reindex_inner(
 
     // 2. Clear every derived table — full rebuild semantics.
     tx.execute_batch(
-        "DELETE FROM idea_tags;
+        "DELETE FROM edges;
+         DELETE FROM idea_tags;
          DELETE FROM fact_links;
          DELETE FROM memory_facts;
          DELETE FROM backlinks;
@@ -389,8 +391,86 @@ fn reindex_inner(
     )?;
     counts.fact_links = tx.query_row("SELECT COUNT(*) FROM fact_links", [], |row| row.get(0))?;
 
+    // 12. Derive the typed idea-to-idea `edges` from the now-resolved links.
+    derive_link_edges(&tx)?;
+
     tx.commit()?;
     Ok(counts)
+}
+
+// Derives the `type = 'link'` rows of `edges` (D6, D23) from resolved `backlinks` and resolved
+// cross-idea `fact_links`, at weight 1.0. One row per unordered idea pair, stored with
+// `src_idea_id < dst_idea_id`; self-pairs are excluded. `detail` names the linking direction by
+// slug (`a → b` one-way, `a ↔ b` in alphabetical order when both link each other), followed by the
+// sorted `idea#fact` targets of any fact-level refs, so it never depends on row or id order.
+fn derive_link_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
+    struct Pair {
+        forward: bool,
+        backward: bool,
+        facts: BTreeSet<String>,
+    }
+
+    let mut stmt = tx.prepare(
+        "SELECT s.id, s.slug, t.id, t.slug, NULL
+         FROM backlinks b
+         JOIN ideas s ON s.id = b.source_idea_id
+         JOIN ideas t ON t.id = b.target_idea_id
+         WHERE s.id <> t.id
+         UNION ALL
+         SELECT s.id, s.slug, t.id, t.slug, t.slug || '#' || df.slug
+         FROM fact_links fl
+         JOIN ideas s ON s.id = fl.src_idea_id
+         JOIN memory_facts df ON df.id = fl.dst_fact_id
+         JOIN ideas t ON t.id = df.idea_id
+         WHERE s.id <> t.id",
+    )?;
+    let mut pairs: BTreeMap<(i64, i64), (String, String, Pair)> = BTreeMap::new();
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let (src, src_slug, dst, dst_slug): (i64, String, i64, String) =
+            (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+        let fact_ref: Option<String> = row.get(4)?;
+        let (lo, hi, lo_slug, hi_slug, forward) = if src < dst {
+            (src, dst, src_slug, dst_slug, true)
+        } else {
+            (dst, src, dst_slug, src_slug, false)
+        };
+        let (_, _, pair) = pairs.entry((lo, hi)).or_insert_with(|| {
+            let pair = Pair {
+                forward: false,
+                backward: false,
+                facts: BTreeSet::new(),
+            };
+            (lo_slug, hi_slug, pair)
+        });
+        if forward {
+            pair.forward = true;
+        } else {
+            pair.backward = true;
+        }
+        pair.facts.extend(fact_ref);
+    }
+    drop(rows);
+    drop(stmt);
+
+    for ((lo, hi), (lo_slug, hi_slug, pair)) in pairs {
+        let mut detail = match (pair.forward, pair.backward) {
+            (true, true) if lo_slug > hi_slug => format!("{hi_slug} ↔ {lo_slug}"),
+            (true, true) => format!("{lo_slug} ↔ {hi_slug}"),
+            (true, false) => format!("{lo_slug} → {hi_slug}"),
+            _ => format!("{hi_slug} → {lo_slug}"),
+        };
+        if !pair.facts.is_empty() {
+            let facts: Vec<&str> = pair.facts.iter().map(String::as_str).collect();
+            detail.push_str(&format!(" ({})", facts.join(", ")));
+        }
+        tx.execute(
+            "INSERT INTO edges (src_idea_id, dst_idea_id, type, weight, detail)
+             VALUES (?1, ?2, 'link', 1.0, ?3)",
+            params![lo, hi, detail],
+        )?;
+    }
+    Ok(())
 }
 
 // Inserts one unresolved `fact_links` row; step 11 of `reindex` resolves or drops it.
@@ -598,6 +678,11 @@ mod tests {
              ORDER BY s.slug, sf.slug, fl.dst_idea_slug, fl.dst_fact_slug, fl.explicit",
         );
         push_query(
+            "SELECT 'edge', s.slug, d.slug, e.type, CAST(e.weight AS TEXT), e.detail FROM edges e
+             JOIN ideas s ON s.id = e.src_idea_id JOIN ideas d ON d.id = e.dst_idea_id
+             ORDER BY s.slug, d.slug, e.type",
+        );
+        push_query(
             "SELECT 'fts', i.slug, s.kind, s.content FROM search_fts s
              JOIN ideas i ON i.id = s.idea_id ORDER BY i.slug, s.kind",
         );
@@ -629,6 +714,287 @@ mod tests {
         let mut fresh = mem_conn();
         reindex(&mut fresh, tmp.path()).unwrap();
         assert_eq!(snap1, snapshot(&fresh));
+    }
+
+    fn write_linked_ideas(vault: &Path, ideas: &[(&str, &str)]) {
+        for (slug, body) in ideas {
+            store::write_idea(vault, &idea(slug, slug, IdeaState::InDiscussion, &[], body))
+                .unwrap();
+        }
+    }
+
+    type EdgeRow = (String, String, String, f64, String);
+
+    fn edge_rows(conn: &Connection) -> Vec<EdgeRow> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.slug, d.slug, e.type, e.weight, e.detail,
+                        e.src_idea_id < e.dst_idea_id
+                 FROM edges e
+                 JOIN ideas s ON s.id = e.src_idea_id JOIN ideas d ON d.id = e.dst_idea_id",
+            )
+            .unwrap();
+        let mut rows: Vec<EdgeRow> = stmt
+            .query_map([], |r| {
+                assert!(r.get::<_, bool>(5)?, "edge is not stored src < dst");
+                let (a, b): (String, String) = (r.get(0)?, r.get(1)?);
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                Ok((lo, hi, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows.sort_by(|x, y| (&x.0, &x.1, &x.2).cmp(&(&y.0, &y.1, &y.2)));
+        rows
+    }
+
+    fn edge(a: &str, b: &str, detail: &str) -> EdgeRow {
+        (a.into(), b.into(), "link".into(), 1.0, detail.into())
+    }
+
+    #[test]
+    fn edges_link_edges_are_undirected_canonical_and_exclude_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("alpha", "Builds on [[beta]] and, oddly, on [[alpha]]."),
+                ("beta", "Mentions [[alpha]] back."),
+                ("gamma", "Points at [[alpha]] only."),
+                ("delta", "Points at [[ghost-idea]], which does not exist."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            edge_rows(&conn),
+            vec![
+                edge("alpha", "beta", "alpha ↔ beta"),
+                edge("alpha", "gamma", "gamma → alpha"),
+            ]
+        );
+    }
+
+    #[test]
+    fn edges_fact_ref_yields_a_link_edge() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                (
+                    "alpha",
+                    "Rests on [[beta#durable-one]] and [[ghost#nothing]].",
+                ),
+                ("beta", "Standalone statement."),
+            ],
+        );
+        store::write_memory_fact(
+            tmp.path(),
+            "beta",
+            &fact("durable-one", "Durable one", &[], "A conclusion."),
+        )
+        .unwrap();
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            edge_rows(&conn),
+            vec![edge("alpha", "beta", "alpha → beta (beta#durable-one)")]
+        );
+    }
+
+    #[test]
+    fn edges_rebuild_from_disk_alone_is_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+        let before = edge_rows(&conn);
+        assert!(!before.is_empty());
+
+        let mut fresh = mem_conn();
+        reindex(&mut fresh, tmp.path()).unwrap();
+        assert_eq!(before, edge_rows(&fresh));
+
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(before, edge_rows(&conn));
+    }
+
+    #[test]
+    fn related_excludes_own_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("a", "Links [[b]] and itself [[a]]."),
+                ("b", "Links [[a]]."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let of_a = queries::related_ideas(&conn, "a", 10).unwrap();
+        assert_eq!(
+            of_a.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert_eq!(of_a[0].hops, 1);
+        let of_b = queries::related_ideas(&conn, "b", 10).unwrap();
+        assert_eq!(
+            of_b.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
+            ["a"]
+        );
+    }
+
+    #[test]
+    fn related_ideas_two_hop_ranks_below_direct() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("a", "Links [[b]] and [[d]]."),
+                ("b", "Links [[c]]."),
+                ("c", "Leaf."),
+                ("d", "Leaf."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let related = queries::related_ideas(&conn, "a", 10).unwrap();
+        assert_eq!(
+            related,
+            vec![
+                queries::RelatedIdea {
+                    slug: "b".into(),
+                    title: "b".into(),
+                    score: 1.0,
+                    hops: 1,
+                    reasons: vec!["link: a → b".into()],
+                },
+                queries::RelatedIdea {
+                    slug: "d".into(),
+                    title: "d".into(),
+                    score: 1.0,
+                    hops: 1,
+                    reasons: vec!["link: a → d".into()],
+                },
+                queries::RelatedIdea {
+                    slug: "c".into(),
+                    title: "c".into(),
+                    score: 0.5,
+                    hops: 2,
+                    reasons: vec!["via b (link: b → c)".into()],
+                },
+            ]
+        );
+        assert_eq!(queries::related_ideas(&conn, "a", 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn related_ideas_keeps_minimal_hop_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("a", "Links [[b]] and [[c]]."),
+                ("b", "Links [[c]]."),
+                ("c", "Leaf."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let related = queries::related_ideas(&conn, "a", 10).unwrap();
+        assert_eq!(
+            related
+                .iter()
+                .map(|r| (r.slug.as_str(), r.hops, r.score))
+                .collect::<Vec<_>>(),
+            [("b", 1, 1.0), ("c", 1, 1.0)]
+        );
+    }
+
+    #[test]
+    fn related_ideas_unknown_slug_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(tmp.path(), &[("a", "Links [[b]]."), ("b", "Leaf.")]);
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert!(queries::related_ideas(&conn, "no-such-idea", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    fn graph_conn(edges: &[(&str, &str, &str, f64)]) -> Connection {
+        let conn = mem_conn();
+        for slug in ["a", "b", "c", "d"] {
+            conn.execute(
+                "INSERT INTO ideas (slug, title, state, created_at, updated_at)
+                 VALUES (?1, ?1, 'draft', '', '')",
+                [slug],
+            )
+            .unwrap();
+        }
+        for (src, dst, kind, weight) in edges {
+            conn.execute(
+                "INSERT INTO edges (src_idea_id, dst_idea_id, type, weight, detail)
+                 SELECT s.id, d.id, ?3, ?4, ?1 || '-' || ?2
+                 FROM ideas s, ideas d WHERE s.slug = ?1 AND d.slug = ?2",
+                rusqlite::params![src, dst, kind, weight],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn scored(conn: &Connection, slug: &str, limit: usize) -> Vec<(String, u32, f64)> {
+        queries::related_ideas(conn, slug, limit)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.slug, r.hops, (r.score * 1000.0).round() / 1000.0))
+            .collect()
+    }
+
+    #[test]
+    fn related_ideas_scores_a_pair_by_the_sum_of_its_edge_types_at_both_hops() {
+        let conn = graph_conn(&[
+            ("a", "b", "link", 1.0),
+            ("a", "b", "tag", 0.3),
+            ("b", "c", "link", 1.0),
+            ("b", "c", "tag", 0.3),
+            ("a", "d", "tag", 0.2),
+        ]);
+
+        assert_eq!(
+            scored(&conn, "a", 10),
+            vec![
+                ("b".to_string(), 1, 1.3),
+                ("c".to_string(), 2, 0.65),
+                ("d".to_string(), 1, 0.2),
+            ]
+        );
+        let b = &queries::related_ideas(&conn, "a", 10).unwrap()[0];
+        assert_eq!(b.reasons, vec!["link: a-b; tag: a-b".to_string()]);
+        assert!(scored(&conn, "a", 0).is_empty());
+    }
+
+    #[test]
+    fn edges_schema_rejects_non_canonical_rows() {
+        let conn = graph_conn(&[]);
+        let insert = |src: &str, dst: &str| {
+            conn.execute(
+                "INSERT INTO edges (src_idea_id, dst_idea_id, type, weight, detail)
+                 SELECT s.id, d.id, 'tag', 1.0, 'x' FROM ideas s, ideas d
+                 WHERE s.slug = ?1 AND d.slug = ?2",
+                [src, dst],
+            )
+        };
+        assert!(insert("a", "a").is_err(), "self-pair");
+        assert!(insert("b", "a").is_err(), "reversed pair");
+        assert!(insert("a", "b").is_ok());
     }
 
     /// The ADR-0019 regression test: the 2026-07 ghost-mount incident in miniature. An empty vault

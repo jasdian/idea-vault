@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS fact_links (
     explicit      INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS edges (
+    src_idea_id INTEGER NOT NULL REFERENCES ideas(id),
+    dst_idea_id INTEGER NOT NULL REFERENCES ideas(id),
+    type        TEXT NOT NULL,
+    weight      REAL NOT NULL,
+    detail      TEXT NOT NULL,
+    PRIMARY KEY (src_idea_id, dst_idea_id, type),
+    CHECK (src_idea_id < dst_idea_id)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
     idea_id UNINDEXED,
     kind    UNINDEXED,
