@@ -34,9 +34,10 @@ impl SkillRegistry {
                     name: "premortem".to_string(),
                     description: "Assume the idea failed; enumerate the most likely causes."
                         .to_string(),
-                    // TODO(skills): see docs/06-concepts/skills.md — flesh out the full
-                    // premortem prompt template; {context} is filled by ai::budget (D21).
-                    prompt: "The idea below failed badly 12 months from now. Working backwards, list the most likely causes, ranked by probability × impact.\n{context}".to_string(),
+                    // Klein's premortem, carried through to a patch: causes alone are a list of
+                    // worries, so each one gets a warning sign + mitigation, and the move ends by
+                    // restating the idea defended against the worst of them.
+                    prompt: "The idea below failed badly 12 months from now. Work backwards from that failure.\n\n1. **The failure** — one sentence on what failure concretely looked like for THIS idea (not a generic \"it didn't take off\").\n2. **Causes** — the 5 most likely causes, ranked by probability × impact, most dangerous first. For each give:\n   - the cause, specific to this idea (a reason that would sink any idea is not an answer);\n   - the early warning sign that would show it happening while there is still time to act;\n   - the cheapest mitigation.\n3. **Patched idea** — restate the idea in one short paragraph, changed to defend against the top two causes. If a cause is fatal and cannot be patched, say so plainly instead.\n\nGround the causes in what the discussion below actually says; skip causes it has already convincingly resolved.\n{context}".to_string(),
                 },
                 Skill {
                     name: "cheapest-disproof".to_string(),
@@ -47,10 +48,12 @@ impl SkillRegistry {
                 },
                 Skill {
                     name: "devils-advocate".to_string(),
-                    description: "Argue against the idea as persuasively as possible.".to_string(),
-                    // TODO(skills): see docs/06-concepts/skills.md — flesh out the full
-                    // devils-advocate prompt template; {context} is filled by ai::budget (D21).
-                    prompt: "Argue against this idea as persuasively as you can.\n{context}".to_string(),
+                    description: "Say where the idea is genuinely wrong — committed dissent with confidence, not scripted objections.".to_string(),
+                    // Authentic dissent, not role-play: an assigned devil's advocate mostly makes
+                    // the owner rehearse rebuttals and leave MORE confident (Nemeth 2001). So the
+                    // model must commit to objections it holds, state confidence, and name what
+                    // would change its mind. The name stays for URL/transcript stability.
+                    prompt: "Give your honest, committed dissent on the idea below: where do YOU actually think it is wrong? This is not a debate exercise. Do not manufacture objections you do not believe — scripted objections are easy to rebut and only make the owner more confident in a weak idea. Real disagreement is what changes minds.\n\n- List at most 5 objections you genuinely hold, strongest first. For each give: the objection, argued as persuasively and specifically as you can; your confidence that it is right (low / medium / high); and what evidence would change your mind.\n- If you believe the idea is fundamentally sound, say so plainly and give only the single weakest point you would still attack.\n- End with a one-line verdict: would you pursue this idea as it stands? (yes / no / only if …)\n\nAttack the strongest version of the idea as the discussion below has developed it, not a strawman of the first draft.\n{context}".to_string(),
                 },
                 Skill {
                     name: "constraints".to_string(),

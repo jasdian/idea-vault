@@ -74,9 +74,9 @@ sequenceDiagram
 
 | Name | Move |
 |------|------|
-| `premortem` | Assume the idea failed; enumerate the most likely causes. |
+| `premortem` | Assume the idea failed 12 months out; rank the 5 most likely causes (each with an early warning sign and cheapest mitigation), then restate the idea patched against the top two. |
 | `cheapest-disproof` | Find the fastest, cheapest experiment that could disprove the idea. |
-| `devils-advocate` | Argue against the idea as persuasively as possible. |
+| `devils-advocate` | **Authentic** dissent, not role-play: at most 5 objections the model genuinely holds, each with a confidence and what evidence would change its mind, ending in a pursue / don't / only-if verdict. An *assigned* devil's advocate tends to make the owner rehearse rebuttals and leave more confident in a weak idea ([Nemeth 2001](https://onlinelibrary.wiley.com/doi/abs/10.1002/ejsp.58)); the prompt forbids manufactured objections for that reason. |
 | `constraints` | Map the practical constraints, prerequisites, and precedents bearing on the idea. |
 | `second-order-effects` | Assume the idea works; trace the second-order and knock-on effects. |
 | `build-prompt` | The **capstone move**: fold the entire discussion into a single, ready-to-paste build prompt for a coding agent (e.g. Claude Code) — settled decisions/constraints/disproofs extracted (not transcribed), an ordered plan, explicit fan-out-vs-sequential guidance, and acceptance criteria. |
