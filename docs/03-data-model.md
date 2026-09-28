@@ -34,9 +34,30 @@ vault/
       <run-stamp>-quarantined-facts.md  # store-time facts the evidence gate kept out of memory
                                         #   (kind: quarantine; ADR-0023)
 index.db             # derived index (may be deleted + rebuilt)
+.idea-vault-root     # vault-root marker — its presence says "this is the real vault" (ADR-0019)
 .mcp-servers.json    # owner-global MCP server registry — APP CONFIG, not vault truth (ADR-0018)
+.sources.json        # owner's named reference-source registry — APP CONFIG, not vault truth (ADR-0021)
+.docker-compose.sources.yml  # GENERATED compose override: ro binds per source (ADR-0021)
+.gitignore           # created/appended by the source registry to cover the two sources dotfiles
 .skills/             # owner-authored skill files <name>.md — APP CONFIG, not vault truth (ADR-0022)
 ```
+
+> **`.idea-vault-root` is the vault's identity, not content.** `vault::store::ensure_vault_dir`
+> writes it (`vault::store::VAULT_MARKER`) on a genuine first run (`VaultInit::Created`) or when it
+> adopts a pre-marker vault that already holds ideas (`VaultInit::Adopted`). An existing directory
+> with no marker and no ideas is `VaultInit::Suspect`: the app logs an error and writes nothing, since
+> blessing it would make a wrong or unmounted path look healthy
+> ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)). Don't delete the marker from a real,
+> empty vault.
+
+> **The sources dotfiles are app configuration too**, with the same "invisible to reindex" status as
+> `.mcp-servers.json` below. `sources::SourceRegistry` persists `.sources.json` (path:
+> `IDEA_VAULT_SOURCES_CONFIG`) and regenerates `.docker-compose.sources.yml`
+> (`sources::OVERRIDE_FILENAME`) beside it. It also makes sure the vault `.gitignore` lists both,
+> creating the file or appending only the missing lines, because host paths must not leak into an
+> ideas repo the owner might publish. Per-idea attachment lives in `idea.md` frontmatter
+> (`sources:`, see D8), never in these files
+> ([ADR-0021](./adr/0021-reference-sources.md)).
 
 > **`.skills/` is app configuration too.** Each file is one ideation move — frontmatter + prompt
 > template ([skills](./06-concepts/skills.md)) — that adds to or overrides a built-in. Like the
@@ -152,7 +173,14 @@ suspenders, not the only guard).
 
 The structured header of `idea.md` (and a lighter one for memory facts and artifacts). Field names
 and the serialized `state` values are part of the data contract and must match the `domain` types
-verbatim.
+verbatim. The diagram covers the vault's idea-scoped files. Two more frontmatter types live in
+`domain::frontmatter` but are not idea data: `CompactedFrontmatter` (the `compacted.md` sidecar, see
+D7) and `SkillFrontmatter` (skill files, which reject unknown keys; see
+[skills](./06-concepts/skills.md)).
+
+`sources` is optional: `domain::frontmatter::IdeaFrontmatter::sources` defaults to empty and is
+skipped on emit when empty, so an idea with no attached sources serializes exactly as it did
+before the field existed ([ADR-0021](./adr/0021-reference-sources.md)).
 
 ```mermaid
 classDiagram
@@ -161,6 +189,7 @@ classDiagram
         +string slug
         +IdeaState state
         +string[] tags
+        +string[] sources
         +datetime created
         +datetime updated
     }
@@ -285,9 +314,12 @@ sequenceDiagram
     participant Parse as domain::frontmatter
     participant DB as SQLite (txn)
 
-    Trig->>Reidx: reindex()
+    Trig->>Reidx: reindex() (or reindex_forced())
+    Reidx->>Walk: enumerate vault/*/ — BEFORE any transaction
+    alt walk empty AND index holds ideas AND not forced
+        Reidx-->>Trig: Err(RefusingEmptyRebuild) — nothing deleted (ADR-0019)
+    end
     Reidx->>DB: BEGIN; drop/clear derived tables
-    Reidx->>Walk: enumerate vault/*/
     loop each idea dir
         Walk-->>Reidx: idea.md, conversation.md, memory/*.md, artifacts/*.md
         Reidx->>Parse: parse frontmatter + bodies
@@ -300,6 +332,18 @@ sequenceDiagram
     Reidx->>DB: COMMIT
     Reidx-->>Trig: counts (ideas, facts, links) for verification
 ```
+
+**The empty-vault guard** ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)). At this
+layer, a walk that finds no ideas looks exactly like a wrong or unmounted `vault_dir`, and rebuilding
+from it would wipe every derived row. The UI lists ideas from the index, so the whole vault would
+vanish. `index::reindex::reindex` therefore walks first and returns
+`IndexError::RefusingEmptyRebuild` when the walk is empty but `ideas` is not. It is a precondition on
+the input; the rebuild itself is unchanged. `index::reindex::reindex_forced` skips the guard. Only
+two callers use it: the owner's explicit `POST /admin/reindex?force=1`, and
+`web::routes::reindex_logged_forced` after `POST /idea/:slug/delete`. That route has just deleted a
+real idea folder, which proves the vault is real, so deleting the last idea from the UI doesn't
+leave it stranded in the list. The web layer answers a refusal with `409`
+(`web::WebError`), not 500. At boot, `main` logs the refusal as an error and keeps the existing index.
 
 The returned counts back the property test in [10-testing-strategy](./10-testing-strategy.md):
 *reindex twice → identical index; index reconstructable from vault alone.*
@@ -335,7 +379,10 @@ still disambiguate instead of colliding ([ADR-0015](./adr/0015-knowledge-extract
 - **External edits:** the owner may edit `idea.md`/frontmatter by hand; the app tolerates this and
   re-derives on reindex ([ADR-0007](./adr/0007-state-in-frontmatter-not-db.md)).
 - **Deletion:** removing `vault/<slug>/` removes the idea; the next reindex drops its index rows and
-  nulls any inbound `backlinks.target_idea_id`.
+  nulls any inbound `backlinks.target_idea_id`. `POST /idea/:slug/delete` removes the folder and
+  immediately runs a forced rebuild (`web::routes::reindex_logged_forced`). If the owner deletes the
+  *last* folder by hand, the walk is empty while the index is not, so `reindex` refuses (the D15
+  empty-vault guard); the owner confirms with `POST /admin/reindex?force=1`.
 - **Extraction artifacts are all-or-nothing per run:** every finding `.md` plus the synthesis `.md`
   and its conversation turn are written in one await-free block, so a cancelled
   `POST /idea/:slug/extract` job can only persist the whole set or none of it
