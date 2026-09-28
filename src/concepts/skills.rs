@@ -29,12 +29,18 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("skills/cheapest-disproof.md"),
     ),
     ("devils-advocate", include_str!("skills/devils-advocate.md")),
+    ("pr-faq", include_str!("skills/pr-faq.md")),
+    (
+        "dialectical-inquiry",
+        include_str!("skills/dialectical-inquiry.md"),
+    ),
     ("constraints", include_str!("skills/constraints.md")),
     (
         "second-order-effects",
         include_str!("skills/second-order-effects.md"),
     ),
     ("market-size", include_str!("skills/market-size.md")),
+    ("triz", include_str!("skills/triz.md")),
     ("build-prompt", include_str!("skills/build-prompt.md")),
     (
         "extract-key-decisions",
@@ -510,7 +516,17 @@ mod tests {
         assert_eq!(names.len(), BUILTIN.len(), "duplicate built-in names");
         for skill in registry.list() {
             assert!(slug::is_valid(&skill.name), "{}", skill.name);
-            assert!(skill.prompt.contains("{context}"), "{}", skill.name);
+            assert_eq!(
+                skill.prompt.matches("{context}").count(),
+                1,
+                "{} must have exactly one {{context}} slot",
+                skill.name
+            );
+            assert!(
+                !skill.description.is_empty(),
+                "{} has no description",
+                skill.name
+            );
             assert!(
                 !skill.prompt.ends_with('\n'),
                 "{} keeps a trailing newline",
@@ -523,6 +539,17 @@ mod tests {
                 "{}",
                 skill.name
             );
+        }
+    }
+
+    #[test]
+    fn structured_dissent_skills_are_moves_but_not_default_swarm_angles() {
+        let registry = SkillRegistry::builtin();
+        let moves = registry.move_names();
+        for name in ["pr-faq", "dialectical-inquiry", "triz"] {
+            assert!(moves.iter().any(|n| n == name), "missing move: {name}");
+            // Opt-in via the swarm angle picker; the canonical four stay the default.
+            assert!(!crate::concepts::swarm::DEFAULT_ANGLES.contains(&name));
         }
     }
 

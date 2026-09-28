@@ -174,17 +174,28 @@ guidance in their tooltips.
 | Name | Stage · role | Move |
 |------|------|------|
 | `steelman` | steelman · advocate | Build the strongest honest case for the idea before anyone attacks it. |
-| `premortem` | attack · critic | Assume the idea failed; enumerate the most likely causes, ranked (contract: ranked list). |
+| `premortem` | attack · critic | Assume the idea failed 12 months out; rank 5–8 causes (each with an early warning sign and cheapest mitigation), then restate the idea patched against the top two (contract: ranked list). |
 | `cheapest-disproof` | attack · critic | Name the load-bearing assumption and the fastest, cheapest test that could kill it. |
-| `devils-advocate` | attack · critic | Argue against the idea as persuasively as possible. |
+| `devils-advocate` | attack · critic | **Authentic** dissent, not role-play: at most 5 objections the model genuinely holds, each with a confidence and what evidence would change its mind, ending in a pursue / don't / only-if verdict. |
+| `pr-faq` | attack · critic | Amazon-style working backwards: a launch-day press release, the 6 hardest FAQ questions answered honestly, then the claims that resisted being written concretely — the idea's soft spots. |
+| `dialectical-inquiry` | attack · critic | Dissent as a rival, not a list of objections: name the load-bearing assumptions, build the strongest counter-plan on their negation, weigh the two head to head, and say what to keep, drop, or steal. |
 | `constraints` | consequence · researcher | Map the practical constraints, prerequisites, and precedents bearing on the idea. |
 | `second-order-effects` | consequence · critic | Assume the idea works; trace the second-order and knock-on effects. |
 | `market-size` | consequence · researcher | Bottom-up size of the opportunity, every assumption visible, with the swing factor. |
+| `triz` | consequence · researcher | Name the idea's core contradiction (improving X worsens Y), describe the ideal final result, and resolve it **without** a trade-off via at least 3 separation/inversion principles. |
 | `build-prompt` | capstone · synthesizer | The **capstone move**: fold the entire discussion into one ready-to-paste build prompt for a coding agent (e.g. Claude Code). It extracts the settled decisions, constraints and disproofs rather than transcribing them, and gives an ordered plan, explicit fan-out-vs-sequential guidance, and acceptance criteria. Contract: one fenced block, and only that block is persisted. |
 
 `premortem`, `cheapest-disproof`, `constraints`, and `second-order-effects` are also the default
 angle set a swarm run uses when the owner doesn't specify angles ([D14](./swarm.md)). The swarm
-picker offers every visible, non-capstone move.
+picker offers every visible, non-capstone move, each label carrying the same tooltip as its chip.
+
+`devils-advocate`, `pr-faq`, `dialectical-inquiry`, and `triz` are the **structured-dissent** moves.
+An assigned devil's advocate that merely role-plays objections tends to *bolster* the owner's
+original view rather than test it ([Nemeth 2001](https://onlinelibrary.wiley.com/doi/abs/10.1002/ejsp.58)),
+so each of these either demands dissent the model actually holds or forces a concrete artifact
+(a press release, a rival plan, a named contradiction) the idea has to survive. They are opt-in
+swarm angles: listed, unchecked, in the swarm picker. `devils-advocate` keeps its name for
+transcript and route stability.
 
 ### Orchestrator-only lenses (`extract-*`)
 

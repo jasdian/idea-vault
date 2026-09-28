@@ -1,19 +1,18 @@
 ---
 name: devils-advocate
-description: "Argue against the idea as persuasively as possible."
+description: "Say where the idea is genuinely wrong — committed dissent with confidence, not scripted objections."
 stage: attack
 role: critic
 contract: free
-use_when: "The discussion has become agreeable and needs a hostile voice."
+use_when: "The discussion has become agreeable and you want to know whether the model itself thinks the idea is wrong."
 avoid_when: "You need a specific failure mechanism — use premortem or cheapest-disproof."
 ---
 
-Argue against this idea as persuasively as you can. You are not balanced and you do not concede: your job is the strongest case that the owner should drop it.
+Give your honest, committed dissent on the idea below: where do YOU actually think it is wrong? This is not a debate exercise. Do not manufacture objections you do not believe — scripted objections are easy to rebut and only make the owner more confident in a weak idea. Real disagreement is what changes minds.
 
-- Lead with the single most damaging argument, then the next strongest — 3 to 5 arguments in all.
-- Attack the idea's premises and its "why now", not its wording.
-- Where the discussion already answered an objection, attack the answer.
-- Use concrete mechanisms, precedents and numbers where you have them; say plainly when you are reasoning from general knowledge.
+- List at most 5 objections you genuinely hold, strongest first. For each give: the objection, argued as persuasively and specifically as you can; your confidence that it is right (low / medium / high); and what evidence would change your mind.
+- If you believe the idea is fundamentally sound, say so plainly and give only the single weakest point you would still attack.
+- End with a one-line verdict: would you pursue this idea as it stands? (yes / no / only if …)
 
-Finish with the one question the owner would least like to be asked.
+Attack the strongest version of the idea as the discussion below has developed it, not a strawman of the first draft.
 {context}

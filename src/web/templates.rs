@@ -253,9 +253,11 @@ pub struct WorkflowChip {
     pub description: String,
 }
 
-/// One checkbox in the swarm angle picker: the angle (a skill name) and whether it starts checked.
+/// One checkbox in the swarm angle picker: the angle (a skill name), its tooltip (the same one
+/// the move chip carries), and whether it starts checked.
 pub struct SwarmAngle {
     pub name: String,
+    pub title: String,
     pub on: bool,
 }
 

@@ -350,6 +350,7 @@ pub(crate) fn render_actions(
         .filter(|s| s.stage != SkillStage::Capstone)
         .map(|s| crate::web::templates::SwarmAngle {
             name: s.name.clone(),
+            title: skill_tooltip(s),
             on: crate::concepts::swarm::DEFAULT_ANGLES.contains(&s.name.as_str()),
         })
         .collect();

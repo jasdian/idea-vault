@@ -41,7 +41,7 @@
         <summary class="swarm-picker__summary" title="Choose which angles this swarm attacks from — uncheck all to fall back to the canonical four">angles ▾</summary>
         <div class="swarm-picker__menu">
           {% for a in swarm_angles %}
-          <label class="swarm-picker__opt"><input type="checkbox" class="swarm-angle" value="{{ a.name }}"{% if a.on %} checked{% endif %}> {{ a.name }}</label>
+          <label class="swarm-picker__opt" title="{{ a.title }}"><input type="checkbox" class="swarm-angle" value="{{ a.name }}"{% if a.on %} checked{% endif %}> {{ a.name }}</label>
           {% endfor %}
         </div>
       </details>
