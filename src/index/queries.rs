@@ -432,6 +432,54 @@ pub fn related_ideas(
     rows.collect::<Result<_, _>>().map_err(Into::into)
 }
 
+/// Two distinct tag names that [`crate::domain::tag::near_duplicate`] judges to be drift of one
+/// another, with the slugs of the ideas carrying each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagNearDuplicate {
+    pub a: String,
+    pub b: String,
+    pub a_ideas: Vec<String>,
+    pub b_ideas: Vec<String>,
+}
+
+/// Every pair of tag names in `tags` that look like drift of one another, ordered by `(a, b)` with
+/// `a < b`. A read-side report only: the edges derivation matches tag names exactly and never
+/// merges these.
+pub fn tag_near_duplicates(conn: &Connection) -> Result<Vec<TagNearDuplicate>, IndexError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.name, i.slug FROM tags t
+         LEFT JOIN idea_tags it ON it.tag_id = t.id
+         LEFT JOIN ideas i ON i.id = it.idea_id
+         ORDER BY t.name, i.slug",
+    )?;
+    let mut carriers: Vec<(String, Vec<String>)> = Vec::new();
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        let slug: Option<String> = row.get(1)?;
+        if carriers.last().map(|(n, _)| n != &name).unwrap_or(true) {
+            carriers.push((name, Vec::new()));
+        }
+        if let (Some(slug), Some((_, ideas))) = (slug, carriers.last_mut()) {
+            ideas.push(slug);
+        }
+    }
+    let mut report = Vec::new();
+    for (i, (a, a_ideas)) in carriers.iter().enumerate() {
+        for (b, b_ideas) in &carriers[i + 1..] {
+            if crate::domain::tag::near_duplicate(a, b) {
+                report.push(TagNearDuplicate {
+                    a: a.clone(),
+                    b: b.clone(),
+                    a_ideas: a_ideas.clone(),
+                    b_ideas: b_ideas.clone(),
+                });
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Every idea carrying `tag` in its frontmatter, most-recently-updated first.
 pub fn ideas_with_tag(conn: &Connection, tag: &str) -> Result<Vec<IdeaSummary>, IndexError> {
     let mut stmt = conn.prepare(

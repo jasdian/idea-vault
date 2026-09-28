@@ -404,6 +404,7 @@ fn reindex_inner(
 
     // 12. Derive the typed idea-to-idea `edges` from the now-resolved links.
     derive_link_edges(&tx)?;
+    derive_tag_edges(&tx)?;
 
     tx.pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
     tx.commit()?;
@@ -480,6 +481,58 @@ fn derive_link_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
             "INSERT INTO edges (src_idea_id, dst_idea_id, type, weight, detail)
              VALUES (?1, ?2, 'link', 1.0, ?3)",
             params![lo, hi, detail],
+        )?;
+    }
+    Ok(())
+}
+
+// Derives the `type = 'tag'` rows of `edges` from exact shared tag names. A shared tag carried by
+// `df` of `n` ideas weighs `0.3 * ln(n / df) / ln(n)`, so a tag every idea carries weighs nothing;
+// a pair weighs the sum over its shared tags, capped at 1.0, and a zero-weight pair gets no row.
+// Tags are visited in name order so the float sum, and hence the stored weight, never depends on
+// row order. `detail` is the shared tag names, sorted.
+fn derive_tag_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
+    const TAG_WEIGHT: f64 = 0.3;
+    const MAX_WEIGHT: f64 = 1.0;
+
+    let idea_count: i64 = tx.query_row("SELECT COUNT(*) FROM ideas", [], |row| row.get(0))?;
+    if idea_count < 2 {
+        return Ok(());
+    }
+    let n = idea_count as f64;
+
+    let mut carriers: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    let mut stmt = tx.prepare(
+        "SELECT t.name, it.idea_id FROM idea_tags it JOIN tags t ON t.id = it.tag_id
+         ORDER BY t.name, it.idea_id",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        carriers.entry(row.get(0)?).or_default().push(row.get(1)?);
+    }
+    drop(rows);
+    drop(stmt);
+
+    let mut pairs: BTreeMap<(i64, i64), (f64, Vec<&str>)> = BTreeMap::new();
+    for (name, ideas) in &carriers {
+        let weight = TAG_WEIGHT * (n / ideas.len() as f64).ln() / n.ln();
+        if ideas.len() < 2 || weight <= 0.0 {
+            continue;
+        }
+        for (i, lo) in ideas.iter().enumerate() {
+            for hi in &ideas[i + 1..] {
+                let (sum, names) = pairs.entry((*lo, *hi)).or_default();
+                *sum += weight;
+                names.push(name);
+            }
+        }
+    }
+
+    for ((lo, hi), (sum, names)) in pairs {
+        tx.execute(
+            "INSERT INTO edges (src_idea_id, dst_idea_id, type, weight, detail)
+             VALUES (?1, ?2, 'tag', ?3, ?4)",
+            params![lo, hi, sum.min(MAX_WEIGHT), names.join(", ")],
         )?;
     }
     Ok(())
@@ -562,7 +615,9 @@ mod tests {
     /// including dangling and forward references, fact links (a resolving cross-idea
     /// `[[beta#durable-one]]` in alpha's body, a dangling `[[beta#no-such-fact]]` in an alpha fact,
     /// and a bare same-idea `[[durable-one]]` in a beta fact), plus a conversation transcript and
-    /// a knowledge-extraction artifact (docs/adr/0015).
+    /// a knowledge-extraction artifact (docs/adr/0015). A third idea, delta, keeps every shared tag
+    /// below full coverage, so the IDF-weighted tag edges (alpha–beta on `risk`, alpha–delta on
+    /// `markets`) are non-zero.
     fn build_fixture_vault(vault: &Path) {
         store::write_idea(
             vault,
@@ -600,6 +655,18 @@ mod tests {
             ),
         )
         .unwrap();
+        store::write_idea(
+            vault,
+            &idea(
+                "delta",
+                "Delta",
+                IdeaState::Draft,
+                &["markets"],
+                "Delta is a standalone statement.\n",
+            ),
+        )
+        .unwrap();
+
         store::write_memory_fact(
             vault,
             "beta",
@@ -823,7 +890,8 @@ mod tests {
         let mut conn = mem_conn();
         reindex(&mut conn, tmp.path()).unwrap();
         let before = edge_rows(&conn);
-        assert!(!before.is_empty());
+        assert!(before.iter().any(|edge| edge.2 == "link"));
+        assert!(before.iter().any(|edge| edge.2 == "tag"));
 
         let mut fresh = mem_conn();
         reindex(&mut fresh, tmp.path()).unwrap();
@@ -831,6 +899,158 @@ mod tests {
 
         reindex(&mut conn, tmp.path()).unwrap();
         assert_eq!(before, edge_rows(&conn));
+    }
+
+    fn write_tagged_ideas(vault: &Path, ideas: &[(&str, &[&str], &str)]) {
+        for (slug, tags, body) in ideas {
+            store::write_idea(
+                vault,
+                &idea(slug, slug, IdeaState::InDiscussion, tags, body),
+            )
+            .unwrap();
+        }
+    }
+
+    fn tag_edge_rows(conn: &Connection) -> Vec<(String, String, f64, String)> {
+        edge_rows(conn)
+            .into_iter()
+            .filter(|edge| edge.2 == "tag")
+            .map(|(a, b, _, weight, detail)| (a, b, (weight * 1000.0).round() / 1000.0, detail))
+            .collect()
+    }
+
+    fn tag_edge(a: &str, b: &str, weight: f64, detail: &str) -> (String, String, f64, String) {
+        (a.into(), b.into(), weight, detail.into())
+    }
+
+    #[test]
+    fn shared_tag_edge_weights_are_idf_scaled_and_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            tmp.path(),
+            &[
+                ("a", &["t1", "t2", "t3", "t4", "t5", "trio"], "Statement."),
+                ("b", &["t1", "t2", "t3", "t4", "t5"], "Statement."),
+                ("c", &["pair", "trio"], "Statement."),
+                ("d", &["pair"], "Statement."),
+                ("e", &["trio"], "Statement."),
+                ("f", &[], "Statement."),
+                ("g", &[], "Statement."),
+                ("h", &[], "Statement."),
+                ("i", &[], "Statement."),
+                ("j", &[], "Statement."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            tag_edge_rows(&conn),
+            vec![
+                tag_edge("a", "b", 1.0, "t1, t2, t3, t4, t5"),
+                tag_edge("a", "c", 0.157, "trio"),
+                tag_edge("a", "e", 0.157, "trio"),
+                tag_edge("c", "d", 0.21, "pair"),
+                tag_edge("c", "e", 0.157, "trio"),
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_tag_edge_ignores_a_tag_every_idea_carries() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            tmp.path(),
+            &[
+                ("a", &["everything", "niche"], "Statement."),
+                ("b", &["everything", "niche"], "Statement."),
+                ("c", &["everything"], "Statement."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(
+            tag_edge_rows(&conn),
+            vec![tag_edge("a", "b", 0.111, "niche")]
+        );
+
+        let only_universal = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            only_universal.path(),
+            &[
+                ("a", &["everything"], "Statement."),
+                ("b", &["everything"], "Statement."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, only_universal.path()).unwrap();
+        assert!(tag_edge_rows(&conn).is_empty());
+    }
+
+    #[test]
+    fn shared_tag_edge_is_exact_match_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            tmp.path(),
+            &[
+                ("a", &["system-design"], "Statement."),
+                ("b", &["systems-design"], "Statement."),
+                ("c", &["unrelated"], "Statement."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert!(tag_edge_rows(&conn).is_empty());
+    }
+
+    #[test]
+    fn tag_near_duplicates_reports_system_design_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            tmp.path(),
+            &[
+                ("a", &["system-design", "rust"], "Statement."),
+                ("b", &["systems-design"], "Statement."),
+                ("c", &["system-design", "trust"], "Statement."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            queries::tag_near_duplicates(&conn).unwrap(),
+            vec![queries::TagNearDuplicate {
+                a: "system-design".into(),
+                b: "systems-design".into(),
+                a_ideas: vec!["a".into(), "c".into()],
+                b_ideas: vec!["b".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn shared_tag_edge_and_link_sum_in_related_ideas() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            tmp.path(),
+            &[
+                ("a", &["shared"], "Builds on [[b]]."),
+                ("b", &["shared"], "Statement."),
+                ("c", &[], "Statement."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let related = queries::related_ideas(&conn, "a", 10).unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].slug, "b");
+        assert_eq!(related[0].hops, 1);
+        assert_eq!((related[0].score * 1000.0).round() / 1000.0, 1.111);
+        assert_eq!(
+            related[0].reasons,
+            vec!["link: a → b; tag: shared".to_string()]
+        );
     }
 
     #[test]
@@ -1097,7 +1317,7 @@ mod tests {
         assert_eq!(
             counts,
             ReindexCounts {
-                ideas: 2,
+                ideas: 3,
                 facts: 3,
                 links: 5,
                 fact_links: 3,
@@ -1722,7 +1942,7 @@ mod tests {
 
         let mut conn = mem_conn();
         let counts = reindex(&mut conn, tmp.path()).unwrap();
-        assert_eq!(counts.ideas, 2); // broken is skipped, the rest indexed
+        assert_eq!(counts.ideas, 3); // broken is skipped, the rest indexed
 
         // And the skip is stable: drift check ignores it the same way.
         assert!(!check_drift(&conn, tmp.path()).unwrap());

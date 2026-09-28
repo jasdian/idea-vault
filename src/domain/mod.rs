@@ -11,6 +11,7 @@ pub mod memory;
 pub mod name;
 pub mod skill;
 pub mod slug;
+pub mod tag;
 
 pub use artifact::{Artifact, ArtifactKind};
 pub use compacted::Compacted;
