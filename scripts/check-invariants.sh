@@ -72,4 +72,16 @@ done
 [ -z "$missing" ] || fail "$rule" "$missing"
 ok "$rule"
 
+# 7. Ratchet: clippy -D warnings counts none of these, so a grep holds the line.
+#    A rise needs a same-line justification and a floor bump in this block; a
+#    fall lowers the floor in the same commit. Floors measured 2026-09-28.
+CLIPPY_ALLOW_FLOOR=6
+UNSAFE_FLOOR=0
+rule="ratchet: #[allow(clippy::…)] <= $CLIPPY_ALLOW_FLOOR and unsafe blocks <= $UNSAFE_FLOOR in src/"
+allows=$({ grep -rn '#\[allow(clippy::' src --include='*.rs' || true; } | strip_rust_comments | wc -l)
+unsafes=$({ grep -rnE '\bunsafe[[:space:]]*(\{|fn\b|impl\b)' src --include='*.rs' || true; } | strip_rust_comments | wc -l)
+[ "$allows" -le "$CLIPPY_ALLOW_FLOOR" ] || fail "$rule" "  clippy allows: $allows (floor $CLIPPY_ALLOW_FLOOR)"
+[ "$unsafes" -le "$UNSAFE_FLOOR" ] || fail "$rule" "  unsafe blocks: $unsafes (floor $UNSAFE_FLOOR)"
+ok "$rule"
+
 printf '\033[32mall invariants hold.\033[0m\n'
