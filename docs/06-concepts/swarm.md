@@ -101,6 +101,12 @@ sequenceDiagram
 
 - Each angle runs under its skill's `role` (a `constraints` lens researches, a `premortem` attacks).
 - A capstone skill (`build-prompt`) is rejected as an angle (400).
+- One swarm names at most `web::routes::memory::MAX_ANGLES` (8) angles; more is a synchronous `400`
+  from `memory::run_swarm`, checked before the job slot is claimed. The semaphore bounds how many
+  agents run at once (K); this bounds a request's total work (N), so one swarm can't monopolize the
+  shared AI budget. The idea page's picker enforces the same cap in the browser
+  ([09-web-ui](../09-web-ui.md)). An empty or absent `angles` field falls back to
+  `concepts::swarm::DEFAULT_ANGLES`.
 - The turn heading names the angles: `## assistant (swarm: premortem, constraints)`. The legacy
   bare `## assistant (swarm)` still parses.
 
