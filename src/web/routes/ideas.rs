@@ -1072,7 +1072,7 @@ pub(crate) fn render_idea_sources(
         .map(|(cfg, status)| {
             let (flag, _) = flag_of(status);
             SourceOption {
-                name: cfg.name.clone(),
+                name: cfg.name.to_string(),
                 attached: attached.iter().any(|a| a == &cfg.name),
                 hint: flag.to_string(),
             }

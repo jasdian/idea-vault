@@ -175,7 +175,7 @@ mod tests {
         state
             .sources
             .add(SourceConfig {
-                name: "refs".into(),
+                name: crate::domain::Name::try_from("refs").unwrap(),
                 host_path: src_dir.path().to_path_buf(),
             })
             .unwrap();
@@ -199,7 +199,7 @@ mod tests {
         state
             .sources
             .add(SourceConfig {
-                name: "refs".into(),
+                name: crate::domain::Name::try_from("refs").unwrap(),
                 host_path: src_dir.path().to_path_buf(),
             })
             .unwrap();

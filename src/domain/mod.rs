@@ -8,6 +8,7 @@ pub mod frontmatter;
 pub mod idea;
 pub mod links;
 pub mod memory;
+pub mod name;
 pub mod skill;
 pub mod slug;
 
@@ -19,6 +20,7 @@ pub use frontmatter::{
 };
 pub use idea::{Idea, IdeaState};
 pub use memory::{MemoryFact, MemoryIndex};
+pub use name::{InvalidName, Name};
 pub use skill::{OutputContract, SkillRole, SkillStage};
 
 /// Errors produced while parsing/validating domain data (frontmatter + state).

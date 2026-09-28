@@ -8,7 +8,8 @@
 //! a re-add of server URLs, not ideas.
 //!
 //! **Deliberate dependency split (cycle avoidance):** this module is pure config/persistence —
-//! `std` + `serde` only. The MCP *wire client* lives in [`ai::mcp`](crate::ai::mcp), and the
+//! `std` + `serde`, plus the pure `domain` leaf for the shared name alphabet
+//! (`domain::slug::is_valid`, docs/adr/0025). The MCP *wire client* lives in [`ai::mcp`](crate::ai::mcp), and the
 //! *bridge* that combines "which servers are enabled" (here) with "connect and call their tools"
 //! (`ai::mcp`) is `ai::backend`'s tool loop. `mcp` must never import `ai`, and `ai` reaches this
 //! registry only through the `Option<Arc<McpRegistry>>` handed to `LlmBackend::with_mcp` — a
@@ -26,12 +27,14 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::Name;
+
 /// One configured MCP server endpoint. `name` doubles as the tool-name prefix on both backends
 /// (`mcp__<name>__<tool>` in the Ollama loop, `mcp__<name>` in the claude CLI allowlist), so it
-/// is restricted to a slug alphabet that survives tool-name mangling: `[a-z0-9-]`.
+/// is a [`Name`] — the slug alphabet `[a-z0-9-]` that survives tool-name mangling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
-    pub name: String,
+    pub name: Name,
     /// The server's Streamable-HTTP endpoint. Owner-supplied — never assumed to be localhost.
     pub url: String,
     /// Sent as `Authorization: Bearer <token>` when present; omitted entirely otherwise.
@@ -68,13 +71,6 @@ pub struct ToolSummary {
     pub description: String,
 }
 
-/// Validate a server name: non-empty `[a-z0-9-]`. Kept strict because the name is spliced into
-/// model-facing tool names — an `_` would collide with the `__` separators, spaces/uppercase
-/// would break the claude CLI's `mcp__<name>` allow-prefix convention. The predicate itself is
-/// [`crate::domain::slug::is_valid`] — the crate-wide registry-name/slug alphabet, shared with
-/// `sources` — re-exported here so this module's public surface is unchanged by the lift.
-pub use crate::domain::slug::is_valid as is_valid_name;
-
 /// The registry: an in-memory server list mirrored to `path` after every mutation. `Arc`'d into
 /// `AppState` and (optionally) into `ai::LlmBackend`, so a Settings-page edit is visible to the
 /// very next model turn with no restart — same live-tuning discipline as `LlmSettings`.
@@ -99,12 +95,27 @@ impl McpRegistry {
     /// Load the registry from `path` at boot. Missing file ⇒ empty list; unreadable/unparsable
     /// file ⇒ `tracing::warn` + empty list — a corrupt config file must never crash boot (the
     /// owner re-adds servers on the Settings page; the broken file is only overwritten on the
-    /// next mutation, so it stays inspectable until then).
+    /// next mutation, so it stays inspectable until then). A single entry that fails to parse
+    /// (e.g. a hand-edited invalid name) is skipped with a warning; its valid siblings still load,
+    /// so the next save can't erase them along with it.
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let servers = match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str::<Vec<McpServerConfig>>(&raw) {
-                Ok(list) => list,
+            Ok(raw) => match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                Ok(items) => items
+                    .into_iter()
+                    .filter_map(|item| {
+                        serde_json::from_value::<McpServerConfig>(item)
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    error = %e,
+                                    "skipping an invalid mcp server entry"
+                                )
+                            })
+                            .ok()
+                    })
+                    .collect(),
                 Err(e) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -173,20 +184,14 @@ impl McpRegistry {
         servers
             .iter()
             .filter(|s| s.enabled)
-            .filter_map(|s| sizes.get(&s.name))
+            .filter_map(|s| sizes.get(s.name.as_str()))
             .sum()
     }
 
-    /// Add a server: reject an invalid name, a non-http(s) URL, or a duplicate name (names are
-    /// the routing key for `mcp__<name>__<tool>` calls — two servers under one name would be
-    /// indistinguishable). Persists on success.
+    /// Add a server: reject a non-http(s) URL or a duplicate name (names are the routing key for
+    /// `mcp__<name>__<tool>` calls — two servers under one name would be indistinguishable; the
+    /// name alphabet itself is guaranteed by [`Name`]). Persists on success.
     pub fn add(&self, cfg: McpServerConfig) -> Result<(), String> {
-        if !is_valid_name(&cfg.name) {
-            return Err(format!(
-                "invalid server name '{}': use lowercase letters, digits and '-' only",
-                cfg.name
-            ));
-        }
         if !(cfg.url.starts_with("http://") || cfg.url.starts_with("https://")) {
             return Err(format!(
                 "invalid server url '{}': must start with http:// or https://",
@@ -334,7 +339,7 @@ mod tests {
 
     fn server(name: &str, enabled: bool) -> McpServerConfig {
         McpServerConfig {
-            name: name.to_string(),
+            name: Name::try_from(name).unwrap(),
             url: format!("http://mcp.example/{name}"),
             bearer_token: None,
             enabled,
@@ -360,6 +365,57 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("not json"));
     }
 
+    /// A registry file in the exact shape written before `name` became a [`Name`].
+    const LEGACY_MCP_JSON: &str = r#"[
+  {
+    "name": "tracker",
+    "url": "https://mcp.example/rpc",
+    "bearer_token": "tok",
+    "enabled": true
+  },
+  {
+    "name": "files-2",
+    "url": "http://mcp.example/files",
+    "bearer_token": null,
+    "enabled": false
+  }
+]"#;
+
+    #[test]
+    fn legacy_registry_file_loads_and_re_saves_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".mcp-servers.json");
+        std::fs::write(&path, LEGACY_MCP_JSON).unwrap();
+
+        let reg = McpRegistry::load(&path);
+        assert_eq!(
+            reg.list()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["tracker", "files-2"]
+        );
+        reg.set_enabled("files-2", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), LEGACY_MCP_JSON);
+    }
+
+    #[test]
+    fn invalid_name_on_disk_skips_only_that_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".mcp-servers.json");
+        let raw = LEGACY_MCP_JSON.replace("\"files-2\"", "\"Bad Name\"");
+        std::fs::write(&path, &raw).unwrap();
+
+        let reg = McpRegistry::load(&path);
+        let names: Vec<String> = reg.list().iter().map(|s| s.name.to_string()).collect();
+        assert_eq!(
+            names,
+            vec!["tracker"],
+            "the valid sibling must survive a bad entry"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    }
+
     #[test]
     fn add_toggle_remove_round_trips_through_disk() {
         let tmp = tempfile::tempdir().unwrap();
@@ -367,7 +423,7 @@ mod tests {
 
         let reg = McpRegistry::load(&path);
         reg.add(McpServerConfig {
-            name: "tracker".to_string(),
+            name: Name::try_from("tracker").unwrap(),
             url: "https://mcp.example/rpc".to_string(),
             bearer_token: Some("tok".to_string()),
             enabled: true,
@@ -410,11 +466,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let reg = McpRegistry::load(tmp.path().join(".mcp-servers.json"));
 
-        // Names outside the [a-z0-9-] slug alphabet (the tool-name prefix contract).
+        // Names outside the [a-z0-9-] slug alphabet (the tool-name prefix contract) cannot
+        // even be constructed, so they never reach `add`.
         for bad in ["", "Has Caps", "under_score", "dots.too", "mcp__x"] {
-            let mut cfg = server("ok", true);
-            cfg.name = bad.to_string();
-            assert!(reg.add(cfg).is_err(), "name '{bad}' must be rejected");
+            assert!(
+                Name::try_from(bad).is_err(),
+                "name '{bad}' must be rejected"
+            );
         }
         // Non-http(s) URLs.
         for bad in ["ftp://x", "file:///etc/passwd", "mcp.example/rpc", ""] {
@@ -448,7 +506,7 @@ mod tests {
         let path = tmp.path().join(".mcp-servers.json");
         let reg = McpRegistry::load(&path);
         reg.add(McpServerConfig {
-            name: "tracker".to_string(),
+            name: Name::try_from("tracker").unwrap(),
             url: "https://mcp.example/rpc".to_string(),
             bearer_token: Some("orig-token".to_string()),
             enabled: true,
@@ -546,22 +604,13 @@ mod tests {
     }
 
     #[test]
-    fn name_validation_alphabet() {
-        assert!(is_valid_name("a"));
-        assert!(is_valid_name("my-tracker-2"));
-        assert!(!is_valid_name(""));
-        assert!(!is_valid_name("A"));
-        assert!(!is_valid_name("a b"));
-        assert!(!is_valid_name("a_b"));
-    }
-    #[test]
     fn tools_bytes_cache_sums_enabled_only_and_clears_on_remove() {
         let dir = std::env::temp_dir().join(format!("mcp-cache-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let reg = McpRegistry::load(dir.join("cfg.json"));
         for (name, enabled) in [("on", true), ("off", false)] {
             reg.add(McpServerConfig {
-                name: name.into(),
+                name: Name::try_from(name).unwrap(),
                 url: "http://x/mcp".into(),
                 bearer_token: None,
                 enabled,

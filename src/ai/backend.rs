@@ -562,7 +562,7 @@ impl LlmBackend {
         let mut clients: Vec<(String, McpClient)> = Vec::new();
         for server in mcp_servers {
             match McpClient::new(server.url.clone(), server.bearer_token.clone()) {
-                Ok(client) => clients.push((server.name.clone(), client)),
+                Ok(client) => clients.push((server.name.to_string(), client)),
                 Err(e) => tracing::warn!(
                     server = %server.name,
                     error = %e,
@@ -808,7 +808,7 @@ pub(crate) fn claude_mcp_config_json(servers: &[McpServerConfig]) -> Option<Stri
         if let Some(token) = &server.bearer_token {
             entry["headers"] = serde_json::json!({ "Authorization": format!("Bearer {token}") });
         }
-        map.insert(server.name.clone(), entry);
+        map.insert(server.name.to_string(), entry);
     }
     Some(serde_json::json!({ "mcpServers": map }).to_string())
 }
@@ -816,6 +816,7 @@ pub(crate) fn claude_mcp_config_json(servers: &[McpServerConfig]) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Name;
 
     fn test_backend() -> LlmBackend {
         // Never dialled in these tests — resolution is lock/map reads only.
@@ -938,7 +939,7 @@ mod tests {
         let registry = McpRegistry::load(tmp.path().join(".mcp-servers.json"));
         registry
             .add(McpServerConfig {
-                name: "tracker".to_string(),
+                name: Name::try_from("tracker").unwrap(),
                 url: "http://mcp.example/rpc".to_string(),
                 bearer_token: None,
                 enabled: true,
@@ -946,7 +947,7 @@ mod tests {
             .unwrap();
         registry
             .add(McpServerConfig {
-                name: "dormant".to_string(),
+                name: Name::try_from("dormant").unwrap(),
                 url: "http://mcp.example/off".to_string(),
                 bearer_token: None,
                 enabled: false,
@@ -959,7 +960,7 @@ mod tests {
             .into_iter()
             .map(|server| {
                 (
-                    server.name,
+                    server.name.into(),
                     vec![
                         McpTool {
                             name: "list_issues".to_string(),
@@ -1020,7 +1021,7 @@ mod tests {
 
     fn turn_sources_fixture() -> Vec<ResolvedSource> {
         vec![ResolvedSource {
-            name: "rf-docs".to_string(),
+            name: Name::try_from("rf-docs").unwrap(),
             root: std::path::PathBuf::from("/mnt/sources/rf-docs"),
         }]
     }
@@ -1159,13 +1160,13 @@ mod tests {
 
         let servers = vec![
             McpServerConfig {
-                name: "open".to_string(),
+                name: Name::try_from("open").unwrap(),
                 url: "http://mcp.example/a".to_string(),
                 bearer_token: None,
                 enabled: true,
             },
             McpServerConfig {
-                name: "locked".to_string(),
+                name: Name::try_from("locked").unwrap(),
                 url: "https://mcp.example/b".to_string(),
                 bearer_token: Some("tok".to_string()),
                 enabled: true,
@@ -1191,7 +1192,7 @@ mod tests {
         let registry = McpRegistry::load(tmp.path().join(".mcp-servers.json"));
         registry
             .add(McpServerConfig {
-                name: "tracker".to_string(),
+                name: Name::try_from("tracker").unwrap(),
                 url: "http://mcp.example/rpc".to_string(),
                 bearer_token: None,
                 enabled: true,

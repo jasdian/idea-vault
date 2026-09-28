@@ -22,6 +22,7 @@ use serde::Deserialize;
 
 use crate::ai::mcp::McpClient;
 use crate::app::AppState;
+use crate::domain::Name;
 use crate::mcp::{McpServerConfig, TokenChange, ToolSummary};
 use crate::web::templates::{McpEditRow, McpList, McpPage, McpRow, McpServerRow, McpStatus};
 use crate::web::WebError;
@@ -55,7 +56,7 @@ fn server_row(state: &AppState, s: McpServerConfig) -> McpServerRow {
     McpServerRow {
         status_html: render(idle_status(state, &s.name)),
         has_token: s.bearer_token.is_some(),
-        name: s.name,
+        name: s.name.into(),
         url: s.url,
         enabled: s.enabled,
     }
@@ -122,10 +123,16 @@ pub async fn add_server(
         let trimmed = form.bearer_token.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
+    let name = Name::try_from(form.name.trim()).map_err(|e| {
+        WebError::BadRequest(format!(
+            "invalid server name '{}': use lowercase letters, digits and '-' only",
+            e.0
+        ))
+    })?;
     state
         .mcp
         .add(McpServerConfig {
-            name: form.name.trim().to_string(),
+            name,
             url: form.url.trim().to_string(),
             bearer_token,
             enabled: true,
@@ -168,7 +175,7 @@ pub async fn edit_server_form(
 ) -> Result<McpEditRow, WebError> {
     let s = find(&state, &name)?;
     Ok(McpEditRow {
-        name: s.name,
+        name: s.name.into(),
         url: s.url,
         has_token: s.bearer_token.is_some(),
     })
@@ -285,7 +292,7 @@ async fn probe(server: &McpServerConfig) -> Result<(Vec<crate::ai::mcp::McpTool>
     let client = McpClient::new(server.url.clone(), server.bearer_token.clone())?;
     let mut session = client.connect().await?;
     let tools = session.list_tools().await?;
-    let one = [(server.name.clone(), tools.clone())];
+    let one = [(server.name.to_string(), tools.clone())];
     let def_bytes = crate::ai::backend::merged_tool_definitions(None, None, &one)
         .to_string()
         .len();

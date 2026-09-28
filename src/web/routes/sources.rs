@@ -19,6 +19,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 use crate::app::AppState;
+use crate::domain::Name;
 use crate::sources::{SourceConfig, SourceStatus};
 use crate::web::templates::{
     ApplyState, SourceEditRow, SourceRow, SourceRowView, SourcesList, SourcesPage,
@@ -96,7 +97,7 @@ fn source_row(bare_mode: bool, cfg: SourceConfig, status: SourceStatus) -> Sourc
     let (status_text, status_kind, status_hint) = status_view(bare_mode, &status);
     let path_full = cfg.host_path.display().to_string();
     SourceRow {
-        name: cfg.name,
+        name: cfg.name.into(),
         path_display: truncate_path_middle(&path_full, PATH_DISPLAY_MAX),
         path_full,
         status_text,
@@ -181,10 +182,16 @@ pub async fn add_source(
     State(state): State<AppState>,
     Form(form): Form<AddSourceForm>,
 ) -> Result<SourcesList, WebError> {
+    let name = Name::try_from(form.name.trim()).map_err(|e| {
+        WebError::BadRequest(format!(
+            "invalid source name '{}': use lowercase letters, digits and '-' only",
+            e.0
+        ))
+    })?;
     state
         .sources
         .add(SourceConfig {
-            name: form.name.trim().to_string(),
+            name,
             host_path: PathBuf::from(form.host_path.trim()),
         })
         .map_err(WebError::BadRequest)?;
@@ -200,7 +207,7 @@ pub async fn edit_source_form(
 ) -> Result<SourceEditRow, WebError> {
     let s = find(&state, &name)?;
     Ok(SourceEditRow {
-        name: s.name,
+        name: s.name.into(),
         path: s.host_path.display().to_string(),
     })
 }

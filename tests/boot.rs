@@ -142,14 +142,14 @@ async fn health_counts_sources_without_moving_the_status_code() {
     state
         .sources
         .add(idea_vault::sources::SourceConfig {
-            name: "real".to_string(),
+            name: idea_vault::domain::Name::try_from("real").unwrap(),
             host_path: real.path().to_path_buf(),
         })
         .unwrap();
     state
         .sources
         .add(idea_vault::sources::SourceConfig {
-            name: "gone".to_string(),
+            name: idea_vault::domain::Name::try_from("gone").unwrap(),
             host_path: std::path::PathBuf::from("/nonexistent/idea-vault-health-test"),
         })
         .unwrap();

@@ -487,6 +487,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Name;
 
     /// A canonical tempdir with a small fixture tree: a root file with a known match line, a
     /// subdirectory, a hidden directory (must stay invisible), and a binary file whose bytes
@@ -511,7 +512,7 @@ mod tests {
 
     fn source(root: &Path) -> ResolvedSource {
         ResolvedSource {
-            name: "notes".to_string(),
+            name: Name::try_from("notes").unwrap(),
             root: root.to_path_buf(),
         }
     }
@@ -687,7 +688,7 @@ mod tests {
         let sources = vec![
             source(&root),
             ResolvedSource {
-                name: "extra".to_string(),
+                name: Name::try_from("extra").unwrap(),
                 root: root.clone(),
             },
         ];

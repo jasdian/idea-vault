@@ -13,7 +13,7 @@
 //! picks *which* source (by name) and *what* to look for; code resolves the name to a root via
 //! this registry ([`SourceRegistry::resolve_attached`]) and enforces containment. Names share
 //! the slug alphabet (`domain::slug::is_valid`) because they double as the mount target and the
-//! tool routing key.
+//! tool routing key; `domain` is the only internal module this one may import (docs/adr/0025).
 //!
 //! **The app never runs docker (ADR-0020).** Mutations here rewrite the override file; the owner
 //! applies it with `docker compose up -d`. The gap between "saved" and "applied" is surfaced as
@@ -33,7 +33,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::slug;
+use crate::domain::Name;
 
 /// Well-known basename of the generated compose override, beside the vault's `.sources.json`.
 /// The owner layers it with `docker compose -f docker-compose.yml -f vault/.docker-compose.sources.yml up -d`
@@ -41,12 +41,12 @@ use crate::domain::slug;
 pub const OVERRIDE_FILENAME: &str = ".docker-compose.sources.yml";
 
 /// One registered reference source: the owner's chosen `name` and the absolute host directory it
-/// points at. `name` is restricted to the slug alphabet `[a-z0-9-]` because it is used verbatim
+/// points at. `name` is a [`Name`] (the slug alphabet `[a-z0-9-]`) because it is used verbatim
 /// as the container mount target (`/mnt/sources/<name>`) and as the tool routing key the model
 /// picks sources by.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceConfig {
-    pub name: String,
+    pub name: Name,
     pub host_path: PathBuf,
 }
 
@@ -57,7 +57,7 @@ pub struct SourceConfig {
 /// [`SourceRegistry::resolve_attached`] only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSource {
-    pub name: String,
+    pub name: Name,
     /// Canonical root directory of the source (see the struct doc — this is an invariant, not a
     /// convention).
     pub root: PathBuf,
@@ -103,7 +103,9 @@ impl SourceRegistry {
     /// Load the registry from `config_path` at boot. Missing file ⇒ empty list;
     /// unreadable/unparsable file ⇒ `tracing::warn` + empty list — a corrupt config file must
     /// never crash boot (the owner re-adds sources on the Sources page; the broken file is only
-    /// overwritten on the next mutation, so it stays inspectable until then). Also regenerates
+    /// overwritten on the next mutation, so it stays inspectable until then). A single entry that
+    /// fails to parse (e.g. a hand-edited invalid name) is skipped with a warning; its valid
+    /// siblings still load, so the next save can't erase them along with it. Also regenerates
     /// the compose override once (so it is a pure function of the registry even if a previous
     /// run crashed between save and regen — a failed regen at boot is a warning, never a crash)
     /// and ensures the vault `.gitignore` covers both dotfiles.
@@ -115,8 +117,21 @@ impl SourceRegistry {
     ) -> Self {
         let config_path = config_path.into();
         let sources = match std::fs::read_to_string(&config_path) {
-            Ok(raw) => match serde_json::from_str::<Vec<SourceConfig>>(&raw) {
-                Ok(list) => list,
+            Ok(raw) => match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                Ok(items) => items
+                    .into_iter()
+                    .filter_map(|item| {
+                        serde_json::from_value::<SourceConfig>(item)
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    path = %config_path.display(),
+                                    error = %e,
+                                    "skipping an invalid source entry"
+                                )
+                            })
+                            .ok()
+                    })
+                    .collect(),
                 Err(e) => {
                     tracing::warn!(
                         path = %config_path.display(),
@@ -154,18 +169,12 @@ impl SourceRegistry {
         registry
     }
 
-    /// Add a source: reject an invalid name, an unsafe host path, or a duplicate name *or* host
-    /// path (two names for one directory would silently alias the same content under two tool
-    /// routing keys). Persists and regenerates the override on success; if the regen fails after
+    /// Add a source: reject an unsafe host path, or a duplicate name *or* host path (two names
+    /// for one directory would silently alias the same content under two tool routing keys; the
+    /// name alphabet itself is guaranteed by [`Name`]). Persists and regenerates the override on success; if the regen fails after
     /// a successful save the registry state is KEPT and the error returned — the next mutation
     /// or boot retries the regen.
     pub fn add(&self, cfg: SourceConfig) -> Result<(), String> {
-        if !slug::is_valid(&cfg.name) {
-            return Err(format!(
-                "invalid source name '{}': use lowercase letters, digits and '-' only",
-                cfg.name
-            ));
-        }
         validate_host_path(&cfg.host_path)?;
         {
             let mut sources = self.write_lock();
@@ -244,11 +253,15 @@ impl SourceRegistry {
     /// only. Anything handing a root to model-driven tool leaves must go through
     /// [`Self::resolve_attached`], which canonicalizes.
     pub fn resolve_one(&self, name: &str) -> Option<PathBuf> {
-        let cfg = self.get(name)?;
-        Some(match &self.mount_root {
-            Some(root) => root.join(&cfg.name),
+        self.get(name).map(|cfg| self.content_path(cfg))
+    }
+
+    /// [`Self::resolve_one`] for an already-looked-up entry.
+    fn content_path(&self, cfg: SourceConfig) -> PathBuf {
+        match &self.mount_root {
+            Some(root) => root.join(cfg.name.as_str()),
             None => cfg.host_path,
-        })
+        }
     }
 
     /// Resolve an idea's attached source names (its frontmatter `sources:` list) into canonical
@@ -261,18 +274,17 @@ impl SourceRegistry {
         names
             .iter()
             .filter_map(|name| {
-                let Some(path) = self.resolve_one(name) else {
+                let Some(cfg) = self.get(name) else {
                     tracing::warn!(
                         source = %name,
                         "attached source is not in the registry; dropping it from this turn"
                     );
                     return None;
                 };
+                let name = cfg.name.clone();
+                let path = self.content_path(cfg);
                 match std::fs::canonicalize(&path) {
-                    Ok(root) => Some(ResolvedSource {
-                        name: name.clone(),
-                        root,
-                    }),
+                    Ok(root) => Some(ResolvedSource { name, root }),
                     Err(e) => {
                         tracing::warn!(
                             source = %name,
@@ -330,7 +342,7 @@ impl SourceRegistry {
                 if !applied.contains(pair.as_str()) {
                     return SourceStatus::NeedsReup;
                 }
-                root.join(&cfg.name)
+                root.join(cfg.name.as_str())
             }
         };
         match std::fs::read_dir(&probe_path) {
@@ -560,7 +572,7 @@ mod tests {
 
     fn source(name: &str, host_path: &str) -> SourceConfig {
         SourceConfig {
-            name: name.to_string(),
+            name: Name::try_from(name).unwrap(),
             host_path: PathBuf::from(host_path),
         }
     }
@@ -582,6 +594,54 @@ mod tests {
         assert!(reg.list().is_empty());
         // The broken file survives until the first mutation overwrites it.
         assert!(std::fs::read_to_string(&path).unwrap().contains("not json"));
+    }
+
+    /// A registry file in the exact shape written before `name` became a [`Name`].
+    const LEGACY_SOURCES_JSON: &str = r#"[
+  {
+    "name": "docs",
+    "host_path": "/home/owner/docs"
+  },
+  {
+    "name": "notes-2",
+    "host_path": "/srv/notes"
+  }
+]"#;
+
+    #[test]
+    fn legacy_registry_file_loads_and_re_saves_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join(".sources.json");
+        std::fs::write(&config, LEGACY_SOURCES_JSON).unwrap();
+
+        let reg = SourceRegistry::load(&config, tmp.path().join(OVERRIDE_FILENAME), None, None);
+        assert_eq!(
+            reg.fingerprint(),
+            "docs=/home/owner/docs;notes-2=/srv/notes"
+        );
+        reg.update_path("notes-2", PathBuf::from("/srv/notes"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            LEGACY_SOURCES_JSON
+        );
+    }
+
+    #[test]
+    fn invalid_name_on_disk_skips_only_that_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join(".sources.json");
+        let raw = LEGACY_SOURCES_JSON.replace("\"notes-2\"", "\"../etc\"");
+        std::fs::write(&config, &raw).unwrap();
+
+        let reg = SourceRegistry::load(&config, tmp.path().join(OVERRIDE_FILENAME), None, None);
+        let names: Vec<String> = reg.list().iter().map(|s| s.name.to_string()).collect();
+        assert_eq!(
+            names,
+            vec!["docs"],
+            "the valid sibling must survive a bad entry"
+        );
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), raw);
     }
 
     #[test]
@@ -631,10 +691,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let reg = bare_registry(&tmp);
 
-        // Names outside the [a-z0-9-] slug alphabet (mount-target + routing-key contract).
+        // Names outside the [a-z0-9-] slug alphabet (mount-target + routing-key contract)
+        // cannot even be constructed, so they never reach `add`.
         for bad in ["", "Has Caps", "under_score", "dots.too", "a/b"] {
-            let err = reg.add(source(bad, "/home/owner/docs")).unwrap_err();
-            assert!(err.contains("invalid source name"), "name '{bad}': {err}");
+            assert!(
+                Name::try_from(bad).is_err(),
+                "name '{bad}' must be rejected"
+            );
         }
         // Relative path.
         let err = reg.add(source("docs", "relative/docs")).unwrap_err();
@@ -737,7 +800,7 @@ mod tests {
         assert_eq!(
             resolved,
             vec![ResolvedSource {
-                name: "real".to_string(),
+                name: Name::try_from("real").unwrap(),
                 // Canonical, not merely the registered path — /tmp itself may be a symlink.
                 root: std::fs::canonicalize(real.path()).unwrap(),
             }]

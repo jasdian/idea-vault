@@ -27,6 +27,7 @@ flowchart TB
             D_SKILL["skill.rs — SkillStage/SkillRole/OutputContract vocabulary (docs/adr/0022)"]
             D_LINKS["links.rs — extract_links: pure [[slug]] extraction (D23)"]
             D_COMP["compacted.rs — Compacted: the compacted.md sidecar type (docs/adr/0012)"]
+            D_NAME["name.rs — Name: validated registry name (mcp + sources keys), slug alphabet (ADR-0025)"]
         end
 
         subgraph vault["vault/ (disk = truth)"]
@@ -160,7 +161,7 @@ flowchart TD
 > and hand them in. **`mcp` is a leaf like `domain`**, not a peer of `ai::mcp`: `mcp` holds only the
 > owner's server registry (config/persistence, no protocol knowledge) and must never import `ai`;
 > `mcp` and `sources` may depend on `domain` alone, for the shared slug-alphabet check
-> (`mcp::is_valid_name` re-exporting `domain::slug::is_valid`; `sources`'s own `domain::slug` use)
+> (both key their entries by `domain::Name`, valid by construction iff `domain::slug::is_valid`)
 > ([ADR-0025](./adr/0025-registry-leaves-may-use-domain.md));
 > `ai::mcp` (the wire client) must never import `mcp`; `ai::backend` is the *only* module that imports
 > both, one-way, so combining "which servers are enabled" with "how to call one" never creates a

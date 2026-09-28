@@ -43,7 +43,7 @@ fn register_source(state: &AppState, name: &str) {
     state
         .sources
         .add(SourceConfig {
-            name: name.to_string(),
+            name: idea_vault::domain::Name::try_from(name).unwrap(),
             host_path: dir.path().to_path_buf(),
         })
         .unwrap();
