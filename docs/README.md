@@ -66,7 +66,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D32) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0024 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0026 | — |
 
 ## Locked decisions (at a glance)
 
@@ -92,6 +92,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Verification layer:** skill answers are held to an output contract (repair, then at most one retry for a single interactive call); swarms and workflows run a factored audit by default (one Auditor call, CONFIRMED/UNCERTAIN/REFUTED, refuted findings kept as "disproven objections", live toggle); store-time facts must quote the discussion verbatim or go to a quarantined-facts artifact, and UPDATE appends rather than rewrites ([ADR-0023](./adr/0023-verification-layer.md)).
 - **Inbound MCP server:** idea-vault exposes itself as an MCP server at `POST /api/mcp` (`web::mcp_server`, `rmcp` `ServerHandler` over Streamable HTTP), gated by a single Bearer token (`IDEA_VAULT_MCP_TOKEN`, unset = not mounted) — the mirror image of the outbound `crate::mcp` registry above. `chat`/`store_idea` run as MCP Tasks (SEP-1686) bridged onto the existing `web::jobs` background-job machinery rather than a held-open connection ([ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md)).
 - **Registry leaves may use `domain`:** `crate::mcp` and `crate::sources` both validate owner-supplied names against the shared crate-wide slug alphabet (both key their entries by `domain::Name`, valid by construction iff `domain::slug::is_valid`), so both leaves depend on `domain` alone — never on `ai` or `web` — rather than duplicating the check ([ADR-0025](./adr/0025-registry-leaves-may-use-domain.md), amends ADR-0018, ADR-0021).
+- **Per-role call profiles:** swarm, workflow and skill calls run under their agent role's profile — an Ollama temperature plus an optional claude model and effort, blank inheriting the global — overlaid per call on the live settings via `ai::backend::LlmBackend::for_role`. On by default, switchable off on Settings; one Ollama model for every role; free chat, compaction and extraction keep the global settings ([ADR-0026](./adr/0026-per-role-call-profiles.md), amends ADR-0011).
 
 ## Beyond these docs
 
