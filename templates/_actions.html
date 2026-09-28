@@ -1,12 +1,34 @@
 <div id="idea-actions"{% if oob %} hx-swap-oob="true"{% endif %}>
   {% if can_store %}
+  {# The ideation spine (ADR-0022): which stages this discussion has been through, the move the
+     skill book suggests next, and soft wrong-turn warnings — all derived from the transcript. #}
+  <div class="spine" aria-label="ideation spine">
+    <a class="moves__label" href="/skills" title="The skill book: every move, by stage, with when to use it">spine</a>
+    <ol class="spine__stages">
+      {% for st in spine %}
+      <li class="spine__stage{% if st.done %} spine__stage--done{% endif %}">{% if st.done %}✓{% else %}○{% endif %} {{ st.name }}</li>
+      {% endfor %}
+    </ol>
+    {% if !next_skill.is_empty() %}
+    <form class="spine__next" hx-post="/idea/{{ slug }}/skill/{{ next_skill }}" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip chip--next" title="{{ next_why }}">next › {{ next_skill }}</button>
+    </form>
+    {% else if next_is_swarm %}
+    <form class="spine__next" hx-post="/idea/{{ slug }}/swarm" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip chip--next" title="{{ next_why }}">next › swarm</button>
+    </form>
+    {% endif %}
+  </div>
+  {% for w in warnings %}
+  <p class="spine__warn" role="note">{{ w }}</p>
+  {% endfor %}
   <div class="moves">
     <span class="moves__label">moves</span>
-    {% for name in skill_names %}{% if name != "build-prompt" %}
-    <form hx-post="/idea/{{ slug }}/skill/{{ name }}" hx-target="#transcript" hx-swap="innerHTML">
-      <button type="submit" class="chip" title="Run the {{ name }} move">{{ name }}</button>
+    {% for m in moves %}
+    <form hx-post="/idea/{{ slug }}/skill/{{ m.name }}" hx-target="#transcript" hx-swap="innerHTML">
+      <button type="submit" class="chip" title="{{ m.title }}">{{ m.name }}</button>
     </form>
-    {% endif %}{% endfor %}
+    {% endfor %}
     {# The swarm chip carries an angle picker (#1). The checkboxes have no `name`, so they are not
        submitted natively; the config-request hook joins the checked ones into the single
        comma-separated `angles` field the route already accepts. With JS off the form still posts
@@ -32,7 +54,7 @@
               title="Deterministic workflow (D19): {{ wf.description }}. {{ backend_note }}">{{ wf.name }}</button>
     </form>
     {% endfor %}
-    <span class="moves__caption">attacks from 4 angles, then converges into one synthesis</span>
+    <span class="moves__caption">swarm attacks from {{ default_angles }} angles by default, then converges into one synthesis · <a href="/skills">skill book</a></span>
   </div>
 
   <div class="capstones">
@@ -54,7 +76,7 @@
   </div>
 
   <div class="commit-bar">
-    <span class="commit-bar__label">when you've run it into the ground</span>
+    <span class="commit-bar__label">when you've run it into the ground{% if untested %} · <span class="spine__untested">no attack move has run yet</span>{% endif %}</span>
     {# A background job like every other model-calling button: the response is the transcript
        with the thinking indicator, and the /pending poll retargets #discussion with the stored
        view once the job lands (respond_discussion_or_stored). While ANY job runs for this idea

@@ -54,6 +54,9 @@ pub struct Config {
     /// Web access at boot (ADR-0017): the foil may search the web / fetch pages on either
     /// backend. Defaults on; live-toggleable on the Settings page.
     pub web_access: bool,
+    /// Factored audit at boot (docs/adr/0023): swarms and workflows judge each finding before
+    /// synthesis. Defaults on; live-toggleable on the Settings page.
+    pub audit_findings: bool,
     /// Where the MCP server registry JSON lives (`mcp::McpRegistry`). Defaults to
     /// `<vault_dir>/.mcp-servers.json`: the vault bind mount is the one host-persistent path in a
     /// containerized run, and the dotfile is invisible to the index by construction —
@@ -75,6 +78,10 @@ pub struct Config {
     /// `Some("")` (set but empty) means the override was layered with zero sources; `None` means
     /// it was never layered at all — the two must stay distinguishable, so no emptiness filter.
     pub sources_applied: Option<String>,
+    /// `IDEA_VAULT_SKILLS_DIR`: where owner-authored skill files live (docs/adr/0022). Defaults to
+    /// `<vault_dir>/.skills` — host-persistent like the other vault dotfiles and invisible to the
+    /// idea walker (no `idea.md`). App config, NOT vault truth: it is never indexed.
+    pub skills_dir: PathBuf,
 }
 
 /// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
@@ -116,12 +123,17 @@ const DEFAULT_COMPACT_THRESHOLD: f32 = 0.80;
 /// Web access default (ADR-0017): on — the owner asked for a foil that can crawl the internet;
 /// `IDEA_VAULT_WEB_ACCESS=false` (or the Settings toggle) restores a fully offline run.
 const DEFAULT_WEB_ACCESS: bool = true;
+/// Audit default (docs/adr/0023): on — one extra model call per swarm/workflow buys a verdict on
+/// every finding; `IDEA_VAULT_AUDIT_FINDINGS=false` (or the Settings toggle) skips it.
+const DEFAULT_AUDIT_FINDINGS: bool = true;
 /// Default MCP registry filename, joined onto the vault dir (a dotfile so idea listings and any
 /// `.md`-oriented scan skip it; the walker's is-a-directory check makes that structural too).
 const MCP_CONFIG_FILENAME: &str = ".mcp-servers.json";
 /// Default named-source registry filename, joined onto the vault dir (same dotfile rationale as
 /// [`MCP_CONFIG_FILENAME`]).
 const SOURCES_CONFIG_FILENAME: &str = ".sources.json";
+/// Default owner-skills directory, joined onto the vault dir (same dotfile rationale).
+const SKILLS_DIRNAME: &str = ".skills";
 /// Clamp band for a nonzero context-window override (tokens): below 1k is useless, above 2M is
 /// beyond any supported model (the claude 1M window fits comfortably).
 pub const CTX_TOKENS_MIN: usize = 1_024;
@@ -220,6 +232,11 @@ impl Config {
             .map(|v| v != "false" && v != "0")
             .unwrap_or(DEFAULT_WEB_ACCESS);
 
+        // Factored audit (docs/adr/0023): on unless explicitly `false`/`0`; live-toggleable.
+        let audit_findings = lookup("IDEA_VAULT_AUDIT_FINDINGS")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(DEFAULT_AUDIT_FINDINGS);
+
         // MCP registry file: defaults into the vault dir (host-persistent in containers) as a
         // dotfile the idea walker can never mistake for an idea.
         let mcp_config_path = lookup("IDEA_VAULT_MCP_CONFIG")
@@ -241,6 +258,12 @@ impl Config {
         // override was layered with zero sources) and distinct from unset (`None` = never
         // layered), so — unlike sources_dir above — no emptiness filter here.
         let sources_applied = lookup("IDEA_VAULT_SOURCES_APPLIED");
+
+        // Owner skill files: a vault dotdir by default, like the registries above.
+        let skills_dir = lookup("IDEA_VAULT_SKILLS_DIR")
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| vault_dir.join(SKILLS_DIRNAME));
 
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
@@ -277,10 +300,12 @@ impl Config {
             ollama_ctx_tokens,
             claude_ctx_tokens,
             web_access,
+            audit_findings,
             mcp_config_path,
             sources_config_path,
             sources_dir,
             sources_applied,
+            skills_dir,
         }
     }
 }

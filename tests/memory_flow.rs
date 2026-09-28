@@ -31,8 +31,18 @@ fn seed_idea(vault: &Path, slug: &str) {
         },
     )
     .unwrap();
-    store::append_conversation(vault, slug, "## user\nlet's dig in\n").unwrap();
-    store::append_conversation(vault, slug, "## assistant\ndigging\n").unwrap();
+    store::append_conversation(
+        vault,
+        slug,
+        "## user\nlet's dig in: we ship the first version solo\n",
+    )
+    .unwrap();
+    store::append_conversation(
+        vault,
+        slug,
+        "## assistant\ndigging — the buyers are small agencies who pay monthly\n",
+    )
+    .unwrap();
 }
 
 fn sem() -> std::sync::Arc<tokio::sync::Semaphore> {
@@ -53,7 +63,10 @@ async fn store_consolidates_extracts_and_rebuilds_memory_index() {
         &["llama3.2"],
         vec![
             tokens("A sharper consolidated statement."),
-            tokens("FACT: Key insight\nIt links [[other-idea]].\nFACT: Second point\nBody two.\n"),
+            tokens(
+                "FACT: Key insight\nQUOTE: \"we ship the first version solo\"\nIt links [[other-idea]].\n\
+                 FACT: Second point\nQUOTE: \"small agencies who pay monthly\"\nBody two.\n",
+            ),
         ],
     )
     .await;
@@ -70,6 +83,17 @@ async fn store_consolidates_extracts_and_rebuilds_memory_index() {
     assert_eq!(idea.body, "A sharper consolidated statement.\n");
     assert_eq!(idea.frontmatter.state, IdeaState::Stored);
     assert_eq!(outcome.new_facts, 2);
+    assert_eq!(outcome.quarantined, 0);
+    assert!(outcome.quarantine_artifact.is_none());
+
+    // Consolidate THEN distil: the extraction call reads the rewritten statement.
+    let bodies = mock.chat_bodies();
+    assert!(!bodies[0].contains("A sharper consolidated statement."));
+    assert!(bodies[1].contains("A sharper consolidated statement."));
+    assert!(
+        bodies[1].contains("QUOTE:"),
+        "the evidence format is asked for"
+    );
 
     // Facts on disk, MEMORY.md rebuilt, [[links]] mined into frontmatter.
     let facts = store::read_memory_facts(tmp.path(), "i").unwrap();
@@ -87,7 +111,7 @@ async fn store_consolidates_extracts_and_rebuilds_memory_index() {
 }
 
 #[tokio::test]
-async fn restore_merges_and_dedupes_memory_only_grows() {
+async fn restore_updates_by_appending_dedupes_and_quarantines_ungrounded_facts() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
 
@@ -96,7 +120,10 @@ async fn restore_merges_and_dedupes_memory_only_grows() {
         &["llama3.2"],
         vec![
             tokens("v1 statement."),
-            tokens("FACT: Key insight\nBody.\nFACT: Second point\nBody two.\n"),
+            tokens(
+                "FACT: Key insight\nQUOTE: \"we ship the first version solo\"\nBody.\n\
+                 FACT: Second point\nQUOTE: \"small agencies who pay monthly\"\nBody two.\n",
+            ),
         ],
     )
     .await;
@@ -104,16 +131,34 @@ async fn restore_merges_and_dedupes_memory_only_grows() {
     extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
         .await
         .unwrap();
-    let first_body = store::read_memory_facts(tmp.path(), "i").unwrap()[0]
+    let before = store::read_memory_facts(tmp.path(), "i").unwrap();
+    let first_body = before
+        .iter()
+        .find(|f| f.frontmatter.slug == "key-insight")
+        .unwrap()
+        .body
+        .clone();
+    let second_body = before
+        .iter()
+        .find(|f| f.frontmatter.slug == "second-point")
+        .unwrap()
         .body
         .clone();
 
-    // Re-store (as after a Reopen): one duplicate title, one genuinely new fact.
+    // Re-store (as after a Reopen): an UPDATE of an existing fact, an ADD that duplicates an
+    // existing title (the slug backstop), a NOOP, a genuinely new fact, and one whose quote was
+    // never said.
     let mock = spawn_sequence(
         &["llama3.2"],
         vec![
             tokens("v2 statement."),
-            tokens("FACT: Key insight\nRe-extracted duplicate.\nFACT: Fresh angle\nNew body.\n"),
+            tokens(
+                "FACT: Key insight\nOP: UPDATE key-insight\nQUOTE: \"we ship the first version solo\"\nStill true after review.\n\
+                 FACT: Second point\nQUOTE: \"small agencies who pay monthly\"\nRe-extracted duplicate.\n\
+                 FACT: Nothing new\nOP: NOOP\n\
+                 FACT: Fresh angle\nQUOTE: \"let's dig in: we ship\"\nNew body.\n\
+                 FACT: Invented\nQUOTE: \"we raise a seed round in March\"\nNever said.\n",
+            ),
         ],
     )
     .await;
@@ -123,22 +168,79 @@ async fn restore_merges_and_dedupes_memory_only_grows() {
             .await
             .unwrap();
 
-    // Dedupe by slug: the duplicate is skipped (existing body untouched), the new one added.
+    // The extractor was shown what memory already holds, by slug.
+    assert!(mock.chat_bodies()[1].contains("[[key-insight]] — Key insight"));
+
     assert_eq!(outcome.new_facts, 1);
+    assert_eq!(outcome.updated_facts, 1);
+    assert_eq!(outcome.quarantined, 1);
     let facts = store::read_memory_facts(tmp.path(), "i").unwrap();
     assert_eq!(facts.len(), 3, "memory only grows");
     let key = facts
         .iter()
         .find(|f| f.frontmatter.slug == "key-insight")
         .unwrap();
-    assert_eq!(key.body, first_body, "existing fact never rewritten");
+    assert!(
+        key.body.starts_with(first_body.trim_end()),
+        "UPDATE appends; the prior text is kept verbatim:\n{}",
+        key.body
+    );
+    assert!(key.body.contains("Still true after review."));
+    let second = facts
+        .iter()
+        .find(|f| f.frontmatter.slug == "second-point")
+        .unwrap();
+    assert_eq!(second.body, second_body, "a duplicate ADD never rewrites");
     assert!(facts.iter().any(|f| f.frontmatter.slug == "fresh-angle"));
+    assert!(!facts.iter().any(|f| f.frontmatter.slug == "invented"));
+
+    // The ungrounded fact is kept where the owner can see it, never in memory.
+    let artifact_slug = outcome.quarantine_artifact.expect("quarantine written");
+    let artifacts = store::read_artifacts(tmp.path(), "i").unwrap();
+    let quarantine = artifacts
+        .iter()
+        .find(|a| a.frontmatter.slug == artifact_slug)
+        .unwrap();
+    assert_eq!(
+        quarantine.frontmatter.kind,
+        idea_vault::domain::ArtifactKind::Quarantine
+    );
+    assert!(quarantine.body.contains("### Invented"));
+    assert!(quarantine.body.contains("we raise a seed round in March"));
     assert_eq!(
         store::read_memory_index(tmp.path(), "i")
             .unwrap()
             .entries
             .len(),
         3
+    );
+}
+
+#[tokio::test]
+async fn facts_without_a_quote_are_quarantined_not_remembered() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("Statement."),
+            tokens("FACT: Unsupported\nA claim with no quote.\n"),
+        ],
+    )
+    .await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let outcome =
+        extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
+            .await
+            .unwrap();
+    assert_eq!((outcome.new_facts, outcome.quarantined), (0, 1));
+    assert!(store::read_memory_facts(tmp.path(), "i")
+        .unwrap()
+        .is_empty());
+    // Still stored: the gate withholds facts, it never blocks the transition.
+    assert_eq!(
+        store::read_idea(tmp.path(), "i").unwrap().frontmatter.state,
+        IdeaState::Stored
     );
 }
 
@@ -173,7 +275,9 @@ async fn load_context_is_memory_first_and_truth_idempotent() {
         &["llama3.2"],
         vec![
             tokens("Stored statement."),
-            tokens("FACT: Key insight\nSummary line.\nDeep detail sentence.\n"),
+            tokens(
+                "FACT: Key insight\nQUOTE: \"we ship the first version solo\"\nSummary line.\nDeep detail sentence.\n",
+            ),
         ],
     )
     .await;

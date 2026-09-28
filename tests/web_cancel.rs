@@ -95,7 +95,7 @@ async fn cancel_of_a_running_swarm_persists_nothing() {
         store::read_conversation(&vault_dir, "cancellable").unwrap(),
         convo_before
     );
-    assert!(!convo_before.contains("## assistant (swarm)"));
+    assert!(!convo_before.contains("## assistant (swarm"));
 }
 
 #[tokio::test]
@@ -144,6 +144,6 @@ async fn swarm_progress_note_is_surfaced_via_pending() {
     // And the run still converges to a persisted synthesis.
     support::web::poll_until(state, "/idea/cancellable/pending", "foil · swarm").await;
     let convo = store::read_conversation(&vault_dir, "cancellable").unwrap();
-    assert_eq!(convo.matches("## assistant (swarm)").count(), 1);
+    assert_eq!(convo.matches("## assistant (swarm: ").count(), 1);
     let _ = vault_dir;
 }

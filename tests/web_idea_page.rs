@@ -201,3 +201,42 @@ async fn deleting_a_memory_fact_removes_it_and_shrinks_reopen_context() {
     let idx = store::read_memory_index(&vault_dir, "sharp-idea").unwrap();
     assert_eq!(idx.entries.len(), 1);
 }
+
+#[tokio::test]
+async fn the_spine_strip_shows_coverage_the_next_move_and_wrong_turns() {
+    // The actions block only renders while the foil is reachable (D20).
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["x".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "An idea.\n");
+    store::append_turn(&vault_dir, "sharp-idea", "user", "go").unwrap();
+    store::append_turn(&vault_dir, "sharp-idea", "assistant", "a reply").unwrap();
+
+    // Fresh discussion: nothing covered, steelman suggested, store flagged as untested.
+    let (status, page) = get(state.clone(), "/idea/sharp-idea").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("aria-label=\"ideation spine\""));
+    assert!(page.contains("○ steelman") && page.contains("○ attack"));
+    assert!(page.contains("hx-post=\"/idea/sharp-idea/skill/steelman\""));
+    assert!(page.contains("next › steelman"));
+    assert!(page.contains("no attack move has run yet"));
+
+    // A build prompt with no attack before it is a wrong turn; a steelman covers its stage.
+    store::append_turn(
+        &vault_dir,
+        "sharp-idea",
+        "assistant (skill: steelman)",
+        "best case",
+    )
+    .unwrap();
+    store::append_turn(
+        &vault_dir,
+        "sharp-idea",
+        "assistant (skill: build-prompt)",
+        "```markdown\nx\n```",
+    )
+    .unwrap();
+    let (_, page) = get(state, "/idea/sharp-idea").await;
+    assert!(page.contains("✓ steelman") && page.contains("✓ capstone"));
+    assert!(page.contains("next › premortem"));
+    assert!(page.contains("before any attack move ran"));
+}

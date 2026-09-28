@@ -88,11 +88,18 @@ async fn run_swarm_defaults_to_the_canonical_angles_and_persists_only_synthesis(
     let body = support::web::poll_until(state, "/idea/movable/pending", "foil · swarm").await;
     assert!(body.contains("converged finding"));
 
-    // Canonical D14 set: 4 angles + 1 synthesizer = 5 model calls.
-    assert_eq!(mock.chat_bodies().len(), 5);
-    // Only the synthesis persisted, exactly one swarm turn.
+    // Canonical D14 set: 4 angles + 1 auditor (on by default) + 1 synthesizer = 6 model calls.
+    assert_eq!(mock.chat_bodies().len(), 6);
+    // Only the synthesis persisted, exactly one swarm turn, headed by its angles.
     let convo = store::read_conversation(&vault_dir, "movable").unwrap();
-    assert_eq!(convo.matches("## assistant (swarm)").count(), 1);
+    assert_eq!(
+        convo
+            .matches(
+                "## assistant (swarm: premortem, cheapest-disproof, constraints, second-order-effects)"
+            )
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -116,8 +123,8 @@ async fn run_workflow_interrogate_persists_only_synthesis_and_guards() {
     .await;
     assert!(body.contains("workflow synthesis"));
 
-    // Fixed DAG: 4 fan-out steps + 1 synthesizer = 5 model calls, one labelled turn persisted.
-    assert_eq!(mock.chat_bodies().len(), 5);
+    // Fixed stages: 4 fan-out steps + 1 auditor + 1 synthesizer = 6 calls, one turn persisted.
+    assert_eq!(mock.chat_bodies().len(), 6);
     let convo = store::read_conversation(&vault_dir, "movable").unwrap();
     assert_eq!(
         convo
@@ -140,7 +147,11 @@ async fn run_swarm_custom_angles_and_unknown_angle_400() {
     let (status, _) = post_form(state.clone(), "/idea/movable/swarm", "angles=premortem").await;
     assert_eq!(status, StatusCode::OK);
     support::web::poll_until(state.clone(), "/idea/movable/pending", "foil · swarm").await;
-    assert_eq!(mock.chat_bodies().len(), 2, "1 angle + 1 synthesizer");
+    assert_eq!(
+        mock.chat_bodies().len(),
+        3,
+        "1 angle + 1 auditor + 1 synthesizer"
+    );
 
     // Unknown angle is rejected synchronously (validated in the handler before any job starts).
     let (status, _) = post_form(state, "/idea/movable/swarm", "angles=nope").await;
@@ -207,4 +218,30 @@ async fn run_swarm_all_agents_failed_surfaces_error_and_persists_nothing() {
         store::read_conversation(&vault_dir, "movable").unwrap(),
         convo_before
     );
+}
+
+#[tokio::test]
+async fn turning_the_audit_off_in_settings_drops_the_auditor_call() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["out".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion);
+
+    // The settings form posts every field; an unticked checkbox is simply absent.
+    let (status, form) = post_form(state.clone(), "/settings", "backend=ollama").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!state.llm.settings().audit_findings);
+    assert!(form.contains("name=\"audit_findings\""));
+
+    let (status, _) = post_form(state.clone(), "/idea/movable/swarm", "angles=premortem").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state, "/idea/movable/pending", "foil · swarm").await;
+    assert_eq!(
+        mock.chat_bodies().len(),
+        2,
+        "1 angle + 1 synthesizer, no auditor"
+    );
+    assert!(!mock
+        .chat_bodies()
+        .iter()
+        .any(|b| b.contains("You are the Auditor")));
 }

@@ -60,10 +60,11 @@ async fn run_extract_work(state: &AppState, slug: &str, want_html: bool) -> Resu
     // One scoped clone shared by every lens turn (ADR-0021): extraction reads the discussion,
     // and the discussion may lean on the idea's attached sources.
     let llm = scoped_llm(state, slug);
+    let skills = state.skills.snapshot();
     let outcome = knowledge::extract_knowledge(
         &llm,
         &state.ai_semaphore,
-        &state.skills,
+        &skills,
         &state.config.vault_dir,
         slug,
         knowledge::LENSES.iter().map(|l| l.to_string()).collect(),
@@ -154,6 +155,7 @@ fn artifact_meta(fm: &crate::domain::ArtifactFrontmatter) -> String {
             format!("finding · {} · {when}", knowledge::lens_short(lens))
         }
         (ArtifactKind::Finding, None) => format!("finding · {when}"),
+        (ArtifactKind::Quarantine, _) => format!("quarantined facts · unverified · {when}"),
     }
 }
 

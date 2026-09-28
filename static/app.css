@@ -884,3 +884,41 @@ a.srcchip:hover { border-color: var(--accent); color: var(--accent); }
   display: inline-flex; align-items: baseline; gap: .4rem; cursor: pointer;
 }
 .src-attach__opt input { accent-color: var(--accent); margin: 0; }
+
+/* ---- skill book (/skills) --------------------------------------------- */
+/* Reuses the MCP/Sources card rows; the stage headings are the spine, set in mono like all
+   machinery, with a one-line serif blurb under each. */
+.book__folder { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.book__folder .src__note { flex: 1 1 20rem; margin: 0; }
+.book__folder form { margin: 0; }
+.book__issues ul { margin: .4rem 0 0; padding-left: 1.1rem; }
+.book__stage { display: flex; flex-direction: column; gap: .5rem; }
+.book__stage-name {
+  font-family: var(--mono); font-size: .8rem; font-weight: 500; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--accent); margin: 0;
+}
+.book__stage-blurb { margin: 0 0 .25rem; color: var(--muted); font-size: .92rem; }
+.book__desc { margin: 0; }
+.book__when { margin: 0; font-size: .9rem; color: var(--muted); }
+.book__label {
+  font-family: var(--mono); font-size: .66rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--faint); margin-right: .35rem;
+}
+
+/* ---- ideation spine (#idea-actions) ----------------------------------- */
+/* The spine reads as a margin annotation over the moves: mono stage names, a quiet ✓ for covered
+   stages in the ink colour, and one "next ›" chip — the skill book's route, not a progress bar. */
+.spine { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .6rem; }
+.spine .moves__label { text-decoration: none; }
+.spine .moves__label:hover { color: var(--accent); }
+.spine__stages { list-style: none; display: flex; gap: .7rem; flex-wrap: wrap; margin: 0; padding: 0; }
+.spine__stage { font-family: var(--mono); font-size: .72rem; color: var(--faint); letter-spacing: .02em; }
+.spine__stage--done { color: var(--accent); }
+.spine__next { margin: 0; }
+.chip--next { border-style: dashed; }
+.spine__warn {
+  margin: 0 0 .6rem; font-family: var(--mono); font-size: .72rem; color: var(--warn);
+  padding: .3rem .6rem; border-left: 2px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: var(--warn-soft);
+}
+.spine__untested { color: var(--warn); }

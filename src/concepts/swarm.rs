@@ -1,6 +1,10 @@
 //! Subagent swarming: fan out N agents in parallel against one idea, each from an independent
 //! angle, then converge/synthesize (docs/06-concepts/swarm.md D14, D21; ADR-0006).
 //!
+//! With the audit on (the default, live-toggleable in Settings — docs/adr/0023), one Auditor call
+//! labels every finding CONFIRMED / UNCERTAIN / REFUTED against the discussion before the
+//! synthesizer converges them (`concepts::audit`).
+//!
 //! Bounding: this orchestrator holds NO semaphore permit of its own — every `run_agent` call
 //! acquires one, so at most K Ollama calls are ever in flight process-wide and the N−K excess
 //! queues (backpressure). Concurrency comes from polling all agent futures together
@@ -16,6 +20,7 @@ use tokio::sync::Semaphore;
 use crate::ai::budget::ContextBudget;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{run_agent, AgentResult, AgentRole, AgentTask};
+use crate::concepts::audit::{self, AuditReport, Finding};
 use crate::concepts::skills::{hydrate_context, SkillRegistry};
 use crate::concepts::ConceptError;
 use crate::vault::store;
@@ -36,6 +41,8 @@ pub const DEFAULT_ANGLES: [&str; 4] = [
 pub struct SwarmOutcome {
     pub synthesis: String,
     pub agent_results: Vec<Option<AgentResult>>,
+    /// The audit's verdicts, when the audit ran.
+    pub audit: Option<AuditReport>,
 }
 
 /// Bounded fan-out over prepared tasks: the D14 parallel primitive, shared with `workflows`
@@ -80,19 +87,47 @@ pub(crate) async fn fan_out(
     join_all(futures).await
 }
 
-/// Converge a judged shortlist with one Synthesizer call (shared with `workflows`).
+/// Converge findings with one Synthesizer call (shared with `workflows` and `knowledge`). The
+/// synthesizer sees the idea statement and every finding with its lens and — when audited — the
+/// auditor's verdict, each clipped so the whole prompt stays within `budget`.
 pub(crate) async fn synthesize(
     ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
     registry: &SkillRegistry,
-    shortlist: &[&AgentResult],
+    idea_statement: &str,
+    findings: &[Finding],
+    report: Option<&AuditReport>,
+    budget: ContextBudget,
 ) -> Result<String, ConceptError> {
-    let findings = shortlist
+    let allowance = audit::finding_allowance(budget, findings.len());
+    let listed = findings
         .iter()
         .enumerate()
-        .map(|(i, r)| format!("Finding {} ({}):\n{}", i + 1, r.role.as_str(), r.content))
+        .map(|(i, f)| {
+            let verdict = report
+                .and_then(|r| r.verdicts.get(i))
+                .map(|v| format!(" [{} — {}]", v.label.as_str(), v.reason))
+                .unwrap_or_default();
+            format!(
+                "Finding {} ({}){verdict}:\n{}",
+                i + 1,
+                f.provenance(),
+                audit::clip(&f.text, allowance)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
+    let guidance = if report.is_some_and(|r| !r.failed) {
+        "\n\nEach finding carries an auditor's verdict. Build the position on CONFIRMED \
+         findings, present UNCERTAIN ones as open questions, and do not build on REFUTED ones — \
+         they are listed separately after your answer."
+    } else {
+        ""
+    };
+    let context = format!(
+        "## The idea\n{}\n\n## Findings{guidance}\n\n{listed}",
+        audit::clip(idea_statement.trim(), budget.max_bytes / 4)
+    );
     Ok(run_agent(
         ollama,
         ai_semaphore,
@@ -100,7 +135,7 @@ pub(crate) async fn synthesize(
         AgentTask {
             role: AgentRole::Synthesizer,
             skill: None,
-            context: findings,
+            context,
         },
     )
     .await?
@@ -123,10 +158,12 @@ pub(crate) fn judge(results: &[Option<AgentResult>]) -> Vec<&AgentResult> {
     shortlist
 }
 
-/// Run the D14 pipeline for `idea_slug`: one Critic agent per angle (an angle is a skill name —
-/// e.g. `premortem`, `cheapest-disproof`), bounded fan-out, judge, then a Synthesizer converges
-/// the shortlist. The synthesis is appended to `conversation.md` as a single assistant turn only
-/// after everything completes; intermediate agent outputs are never persisted.
+/// Run the D14 pipeline for `idea_slug`: one agent per angle (an angle is a skill name — e.g.
+/// `premortem`, `cheapest-disproof` — run under that skill's role), bounded fan-out, judge,
+/// optionally the factored audit, then a Synthesizer converges the findings. The synthesis (plus
+/// the code-appended audit tally and disproven objections) is appended to `conversation.md` as a
+/// single assistant turn only after everything completes; intermediate agent outputs are never
+/// persisted.
 ///
 /// Unknown angles fail fast before any model call. If every agent fails the swarm errors with
 /// [`ConceptError::NothingToSynthesize`] and nothing is appended.
@@ -139,6 +176,7 @@ pub async fn swarm(
     idea_slug: &str,
     angles: Vec<String>,
     budget: ContextBudget,
+    audit_findings: bool,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<SwarmOutcome, ConceptError> {
     // Fail fast on a misconfigured request — before any AI call.
@@ -151,11 +189,14 @@ pub async fn swarm(
     // One budgeted context block for every agent (D21; hydrated once, lenses differ per angle).
     let context = hydrate_context(vault_dir, idea_slug, budget)?;
 
-    // Bounded fan-out (D14/ADR-0006): one Critic per angle over the shared context block.
+    // Bounded fan-out (D14/ADR-0006): one agent per angle over the shared context block, each
+    // under the persona its skill names (a `constraints` lens researches, a `premortem` attacks).
     let tasks = angles
         .iter()
         .map(|angle| AgentTask {
-            role: AgentRole::Critic,
+            role: registry
+                .get(angle)
+                .map_or(AgentRole::Critic, |s| s.role.into()),
             skill: Some(angle.clone()),
             context: context.text.clone(),
         })
@@ -174,10 +215,39 @@ pub async fn swarm(
     if shortlist.is_empty() {
         return Err(ConceptError::NothingToSynthesize);
     }
+    let findings = audit::findings_from(&shortlist, audit::MAX_AUDIT_FINDINGS);
 
-    // Synthesizer converges the shortlisted findings (one more bounded AI call).
-    progress(&format!("swarm · converging {} findings", shortlist.len()));
-    let synthesis = synthesize(ollama, ai_semaphore, registry, &shortlist).await?;
+    let report = if audit_findings {
+        progress(&format!("swarm · auditing {} findings", findings.len()));
+        Some(
+            audit::audit(
+                ollama,
+                ai_semaphore,
+                registry,
+                vault_dir,
+                idea_slug,
+                &findings,
+                budget,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    // Synthesizer converges the findings (one more bounded AI call).
+    progress(&format!("swarm · converging {} findings", findings.len()));
+    let statement = store::read_idea(vault_dir, idea_slug)?.body;
+    let synthesis = synthesize(
+        ollama,
+        ai_semaphore,
+        registry,
+        &statement,
+        &findings,
+        report.as_ref(),
+        budget,
+    )
+    .await?;
 
     // Persist boundary: the single converged result becomes one assistant turn, only now.
     if synthesis.is_empty() {
@@ -188,14 +258,30 @@ pub async fn swarm(
             "swarm synthesizer returned empty output; nothing persisted"
         );
     } else {
+        let appendix = report
+            .as_ref()
+            .map(|r| audit::appendix(&findings, r))
+            .unwrap_or_default();
         // append_turn owns the heading grammar and escapes embedded "## " lines (no forged
-        // turn boundaries from model output).
-        store::append_turn(vault_dir, idea_slug, "assistant (swarm)", &synthesis)?;
+        // turn boundaries from model output). The heading names the angles (unique, in order).
+        let mut named: Vec<&str> = Vec::new();
+        for angle in &angles {
+            if !named.contains(&angle.as_str()) {
+                named.push(angle);
+            }
+        }
+        store::append_turn(
+            vault_dir,
+            idea_slug,
+            &format!("assistant (swarm: {})", named.join(", ")),
+            &format!("{synthesis}{appendix}"),
+        )?;
     }
 
     Ok(SwarmOutcome {
         synthesis,
         agent_results,
+        audit: report,
     })
 }
 
@@ -206,6 +292,7 @@ mod tests {
     fn result(role: AgentRole, content: &str) -> Option<AgentResult> {
         Some(AgentResult {
             role,
+            lens: None,
             content: content.to_string(),
         })
     }

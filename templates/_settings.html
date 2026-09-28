@@ -61,6 +61,15 @@
   </fieldset>
 
   <fieldset class="settings__group">
+    <legend>audit</legend>
+    <label class="opt">
+      <input type="checkbox" name="audit_findings" value="true" {% if audit_findings %}checked{% endif %} />
+      <span>Audit swarm and workflow findings — one extra model call labels each finding
+        confirmed / uncertain / refuted against the discussion before it is synthesized.</span>
+    </label>
+  </fieldset>
+
+  <fieldset class="settings__group">
     <legend>auto-compact</legend>
     <label class="opt">
       <input type="checkbox" name="auto_compact" value="true" {% if auto_compact %}checked{% endif %} />

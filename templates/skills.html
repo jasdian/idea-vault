@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="crumb" href="/">← all ideas</a>
+<h1 class="title">Skill book</h1>
+<p class="settings__intro">The moves the foil can run against an idea, in the order an idea should
+  travel them: steelman it, attack it, ground it, converge, then build. Each move is a markdown
+  file — drop your own (or a same-named override) into the skills folder below and reload.</p>
+{{ list_html|safe }}
+{% endblock %}

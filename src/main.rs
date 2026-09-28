@@ -131,7 +131,11 @@ async fn main() -> anyhow::Result<()> {
     // 6. Shared state.
     let ai_concurrency = config.ai_concurrency.max(1);
     let bind = config.bind.clone();
-    let skills = Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin());
+    // Built-in skills plus the owner's `vault/.skills/*.md` (docs/adr/0022); a broken owner file
+    // is logged and listed on the skill book, never a boot failure.
+    let skills = Arc::new(idea_vault::concepts::skills::LiveSkills::load(
+        config.skills_dir.clone(),
+    ));
     let state = AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
@@ -206,6 +210,7 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         ollama_ctx_tokens: config.ollama_ctx_tokens,
         claude_ctx_tokens: config.claude_ctx_tokens,
         web_access: config.web_access,
+        audit_findings: config.audit_findings,
     };
     Ok(LlmBackend::new(ollama, claude_base, settings))
 }

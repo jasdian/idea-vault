@@ -1,4 +1,4 @@
-//! Knowledge extraction: fan out one Researcher per extraction lens against one idea, persist
+//! Knowledge extraction: fan out one Harvester per extraction lens against one idea, persist
 //! each lens's findings as an `artifacts/*.md` truth file, then converge a synthesis that is
 //! both persisted as an artifact and appended to the conversation (docs/adr/0015, D30).
 //!
@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 use crate::ai::budget::ContextBudget;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{AgentRole, AgentTask};
+use crate::concepts::audit;
 use crate::concepts::skills::{hydrate_context, SkillRegistry};
 use crate::concepts::swarm::{fan_out, judge, synthesize};
 use crate::concepts::ConceptError;
@@ -30,6 +31,10 @@ pub const LENSES: [&str; 5] = [
     "extract-risks-assumptions",
     "extract-next-actions",
 ];
+
+/// Most harvested items the synthesis digests. Higher than a swarm's cap: nothing is audited
+/// here, and every item stays in its lens's artifact file regardless.
+const MAX_SYNTHESIS_FINDINGS: usize = 60;
 
 /// One per-lens artifact file that was actually written.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,7 +72,7 @@ fn lens_title(lens: &str) -> String {
     }
 }
 
-/// Run the D30 pipeline for `idea_slug`: one Researcher per extraction lens, bounded fan-out,
+/// Run the D30 pipeline for `idea_slug`: one Harvester per extraction lens, bounded fan-out,
 /// then persist every non-empty finding as `artifacts/<stamp>-<lens>.md`, converge a synthesis
 /// (`artifacts/<stamp>-synthesis.md` + one `## assistant (knowledge)` conversation turn).
 ///
@@ -96,11 +101,14 @@ pub async fn extract_knowledge(
     // One budgeted context block for every lens (D21; hydrated once, lenses differ per task).
     let context = hydrate_context(vault_dir, idea_slug, budget)?;
 
-    // Bounded fan-out (ADR-0006): one Researcher per lens over the shared context block.
+    // Bounded fan-out (ADR-0006): one Harvester per lens over the shared context block — the
+    // lens's own role when an owner override names another.
     let tasks = lenses
         .iter()
         .map(|lens| AgentTask {
-            role: AgentRole::Researcher,
+            role: registry
+                .get(lens)
+                .map_or(AgentRole::Harvester, |s| s.role.into()),
             skill: Some(lens.clone()),
             context: context.text.clone(),
         })
@@ -124,7 +132,18 @@ pub async fn extract_knowledge(
         "extraction · converging {} findings",
         shortlist.len()
     ));
-    let synthesis = synthesize(ollama, ai_semaphore, registry, &shortlist).await?;
+    let findings = audit::findings_from(&shortlist, MAX_SYNTHESIS_FINDINGS);
+    let statement = store::read_idea(vault_dir, idea_slug)?.body;
+    let synthesis = synthesize(
+        ollama,
+        ai_semaphore,
+        registry,
+        &statement,
+        &findings,
+        None,
+        budget,
+    )
+    .await?;
 
     // Persist boundary: one await-free block — a cancel can no longer land between these writes
     // (tokio aborts only at await points), so the .md set + turn are all-or-nothing.

@@ -179,6 +179,9 @@ pub async fn remove_queued(
     Ok(Html(render_queue_panel(&slug, items, false)?))
 }
 
+/// Byte cap on the skill book carried in every chat prompt.
+const SKILL_BOOK_BYTES: usize = 1024;
+
 /// The background half: assemble the budgeted context (which already includes the just-persisted
 /// user turn), call the model under the shared semaphore, and append the assistant turn. Returns a
 /// human-readable message on failure for the indicator to surface.
@@ -187,9 +190,14 @@ async fn run_chat(state: &AppState, slug: &str) -> Result<(), String> {
     // One scoped view for the whole turn (ADR-0021): the budget the context is assembled
     // against and the backend that answers must agree on the sources riding the window.
     let llm = scoped_llm(state, slug);
-    let context = memory::load::load_context(vault_dir, slug, llm.context_budget())
-        .map_err(|e| e.to_string())?;
-    let prompt = format!("{FOIL_INSTRUCTION}\n\n{}", context.text);
+    // The skill book rides along (ADR-0022) so the foil can recommend a move by name; its bytes
+    // come out of the context budget rather than on top of it.
+    let book = crate::concepts::coverage::skill_book(&state.skills.snapshot(), SKILL_BOOK_BYTES);
+    let budget = crate::ai::budget::ContextBudget::new(
+        llm.context_budget().max_bytes.saturating_sub(book.len()),
+    );
+    let context = memory::load::load_context(vault_dir, slug, budget).map_err(|e| e.to_string())?;
+    let prompt = format!("{FOIL_INSTRUCTION}\n\n{book}\n{}", context.text);
 
     let reply = {
         let _permit = state

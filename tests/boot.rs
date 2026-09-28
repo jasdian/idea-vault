@@ -21,7 +21,7 @@ fn test_state() -> AppState {
 
     let config = Config {
         bind: "127.0.0.1:0".to_string(),
-        vault_dir,
+        vault_dir: vault_dir.clone(),
         index_path: index_path.clone(),
         // Port 9 (discard) refuses fast — the probe resolves to Unreachable without hanging.
         ollama_url: "http://127.0.0.1:9".to_string(),
@@ -45,12 +45,14 @@ fn test_state() -> AppState {
         ollama_ctx_tokens: 0,
         claude_ctx_tokens: 0,
         web_access: false,
+        audit_findings: true,
         mcp_config_path: tmp.path().join(".mcp-servers.json"),
         // Beside the vault (like the MCP registry), NOT inside it — the registry writes its
         // override + .gitignore next to its config file.
         sources_config_path: tmp.path().join(".sources.json"),
         sources_dir: None,
         sources_applied: None,
+        skills_dir: vault_dir.join(".skills"),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
@@ -64,6 +66,10 @@ fn test_state() -> AppState {
         None,
     ));
 
+    let skills = Arc::new(idea_vault::concepts::skills::LiveSkills::load(
+        config.skills_dir.clone(),
+    ));
+
     // Keep the tempdir alive for the process lifetime.
     std::mem::forget(tmp);
 
@@ -72,7 +78,7 @@ fn test_state() -> AppState {
         db: Arc::new(Mutex::new(conn)),
         llm: idea_vault::ai::LlmBackend::ollama_only(ollama),
         ai_semaphore: Arc::new(Semaphore::new(1)),
-        skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
+        skills,
         jobs: idea_vault::web::jobs::new_registry(),
         queues: idea_vault::web::jobs::new_queues(),
         mcp,

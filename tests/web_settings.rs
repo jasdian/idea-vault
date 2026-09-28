@@ -29,6 +29,27 @@ async fn web_access_toggle_round_trips_through_the_form() {
 }
 
 #[tokio::test]
+async fn audit_toggle_round_trips_through_the_form() {
+    // The audit boots ON (docs/adr/0023) — the page shows it checked.
+    let (state, _vault) = test_state();
+    let (_, body) = get(state.clone(), "/settings").await;
+    assert!(body.contains("name=\"audit_findings\" value=\"true\" checked"));
+
+    let (_, body) = post_form(state.clone(), "/settings", "backend=ollama").await;
+    assert!(!body.contains("name=\"audit_findings\" value=\"true\" checked"));
+    assert!(!state.llm.settings().audit_findings);
+
+    let (_, body) = post_form(
+        state.clone(),
+        "/settings",
+        "backend=ollama&audit_findings=true",
+    )
+    .await;
+    assert!(body.contains("name=\"audit_findings\" value=\"true\" checked"));
+    assert!(state.llm.settings().audit_findings);
+}
+
+#[tokio::test]
 async fn settings_page_renders_the_form() {
     let (state, _vault) = test_state();
     let (status, body) = get(state, "/settings").await;

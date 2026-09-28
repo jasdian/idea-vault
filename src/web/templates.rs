@@ -120,6 +120,8 @@ pub struct SettingsForm {
     pub compact_threshold: String,
     /// Web access toggle (ADR-0017): the foil may search the web / fetch pages on either backend.
     pub web_access: bool,
+    /// Factored-audit toggle (docs/adr/0023): swarms/workflows judge findings before synthesis.
+    pub audit_findings: bool,
     /// Per-backend context-window overrides in tokens ("0" = auto, derived from the model).
     pub ollama_ctx_tokens: String,
     pub claude_ctx_tokens: String,
@@ -199,12 +201,26 @@ pub struct Actions {
     /// Whether Store is a legal D9 transition from the idea's current state
     /// (InDiscussion/Reopened yes; Draft/Stored no — the UI must not offer a guaranteed 400).
     pub can_store: bool,
-    /// The registry's skill names — the "menu of moves" (docs/06-concepts/skills.md).
-    pub skill_names: Vec<String>,
+    /// The "menu of moves" (docs/06-concepts/skills.md): every visible non-capstone skill.
+    pub moves: Vec<MoveChip>,
     /// The swarm angle picker: every candidate attack angle with its default-checked state, so
-    /// the owner can aim a swarm instead of always firing the canonical four (#1). Derived from
-    /// `skill_names` (moves minus the `build-prompt` capstone); `on` marks `swarm::DEFAULT_ANGLES`.
+    /// the owner can aim a swarm instead of always firing the canonical four (#1). The same set
+    /// as `moves`; `on` marks `swarm::DEFAULT_ANGLES`.
     pub swarm_angles: Vec<SwarmAngle>,
+    /// How many angles start checked — the caption's count, so it can't drift from the picker.
+    pub default_angles: usize,
+    /// The ideation spine with each stage's coverage (`concepts::coverage`, ADR-0022).
+    pub spine: Vec<SpineStage>,
+    /// The suggested next move's skill name ("" when none, or when the swarm is suggested).
+    pub next_skill: String,
+    /// Why that move — its use-when line.
+    pub next_why: String,
+    /// The suggestion is "run a swarm" (convergence is the only thing missing before capstone).
+    pub next_is_swarm: bool,
+    /// Soft wrong-turn warnings; advice only, never a block.
+    pub warnings: Vec<String>,
+    /// No attack move has run yet — shown as a note by the store button.
+    pub untested: bool,
     /// A job is currently running for this idea. Store is a commitment action, so its button
     /// renders `disabled` while busy (a click would only bounce off `try_claim` anyway); the OOB
     /// actions refresh re-enables it once the job finishes or is cancelled.
@@ -217,6 +233,18 @@ pub struct Actions {
     /// never a lie about which backend is actually running the call.
     pub backend_note: String,
     pub oob: bool,
+}
+
+/// One stage of the spine strip.
+pub struct SpineStage {
+    pub name: &'static str,
+    pub done: bool,
+}
+
+/// One move chip: the skill name (the route segment) + its tooltip (description + use-when).
+pub struct MoveChip {
+    pub name: String,
+    pub title: String,
 }
 
 /// One workflow button: name (the route segment) + description (the hover title).
@@ -367,6 +395,43 @@ pub struct McpStatus {
     /// probe failure — it is a display convenience, not a health claim (see the registry field
     /// doc). Empty means "never successfully probed this process lifetime".
     pub tools: Vec<crate::mcp::ToolSummary>,
+}
+
+/// The skill book page shell (`templates/skills.html`); the panel is pre-rendered so a reload
+/// can swap just `#skills` — same split as `SourcesPage`/`SourcesList`.
+#[derive(Template, WebTemplate)]
+#[template(path = "skills.html")]
+pub struct SkillsPage {
+    pub list_html: String,
+}
+
+/// Partial: the swappable skill book panel (`templates/_skills_list.html`) — the owner skills
+/// folder + reload, any files that failed to load, and one group per spine stage.
+#[derive(Template, WebTemplate)]
+#[template(path = "_skills_list.html")]
+pub struct SkillsList {
+    pub dir: String,
+    pub issues: Vec<crate::concepts::skills::SkillIssue>,
+    pub groups: Vec<SkillGroup>,
+}
+
+/// One spine stage on the skill book.
+pub struct SkillGroup {
+    pub stage: &'static str,
+    pub blurb: &'static str,
+    pub skills: Vec<SkillCard>,
+}
+
+/// One skill on the skill book: the frontmatter, as display strings.
+pub struct SkillCard {
+    pub name: String,
+    pub description: String,
+    pub use_when: String,
+    pub avoid_when: String,
+    pub role: &'static str,
+    pub contract: &'static str,
+    pub source: &'static str,
+    pub hidden: bool,
 }
 
 /// The Sources page shell (`templates/sources.html`); the list is pre-rendered so a mutation can

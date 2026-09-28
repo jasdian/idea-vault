@@ -1,5 +1,6 @@
-//! D19 workflow tests against the mock Ollama: deterministic control flow (fixed step order),
-//! failed step nulled + judge skips, only the final synthesis persisted. No live model.
+//! D19/D32 workflow tests against the mock Ollama: deterministic control flow (fixed stage
+//! order), failed step nulled + judge skips, chained output carried forward, the audit stage
+//! gated by its toggle, only the final output persisted. No live model.
 
 mod support;
 
@@ -70,6 +71,8 @@ async fn interrogate_runs_the_fixed_dag_in_order_and_persists_only_the_synthesis
         "i",
         "interrogate",
         ContextBudget::new(4096),
+        false,
+        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -124,6 +127,8 @@ async fn failed_step_is_skipped_and_workflow_degrades() {
         "i",
         "interrogate",
         ContextBudget::new(4096),
+        false,
+        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -162,6 +167,8 @@ async fn all_steps_failed_errors_and_persists_nothing() {
         "i",
         "interrogate",
         ContextBudget::new(4096),
+        false,
+        &|_: &str| {},
     )
     .await
     .unwrap_err();
@@ -189,9 +196,133 @@ async fn unknown_workflow_fails_fast_with_no_ai_calls() {
         "i",
         "nope",
         ContextBudget::new(4096),
+        false,
+        &|_: &str| {},
     )
     .await
     .unwrap_err();
     assert!(matches!(err, ConceptError::UnknownWorkflow(name) if name == "nope"));
     assert!(mock.chat_bodies().is_empty());
+}
+
+async fn run(
+    mock: &support::MockOllama,
+    vault: &Path,
+    name: &str,
+    audit: bool,
+) -> idea_vault::concepts::workflows::WorkflowOutcome {
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let semaphore = Arc::new(Semaphore::new(1));
+    let registry = SkillRegistry::builtin();
+    run_workflow(
+        &client,
+        &semaphore,
+        &registry,
+        vault,
+        "i",
+        name,
+        ContextBudget::new(8192),
+        audit,
+        &|_: &str| {},
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn interrogate_with_the_audit_on_adds_one_auditor_call_before_synthesis() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("1. Nobody pays"),
+            tokens("- Test with a fake door"),
+            tokens("- Needs a licence"),
+            tokens("- Incumbents copy it"),
+            tokens("F1: REFUTED — pilots paid\nF2: CONFIRMED — cheap\nF3: UNCERTAIN — region\nF4: CONFIRMED — likely"),
+            tokens("audited position"),
+        ],
+    )
+    .await;
+    let outcome = run(&mock, tmp.path(), "interrogate", true).await;
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 6, "4 steps + auditor + synthesizer");
+    assert!(bodies[4].contains("You are the Auditor"));
+    assert!(bodies[5].contains("[REFUTED — pilots paid]"));
+    assert_eq!(outcome.audit.unwrap().answered, 4);
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(convo.contains("## assistant (workflow: interrogate)\naudited position"));
+    assert!(convo.contains("~~Nobody pays~~"));
+}
+
+#[tokio::test]
+async fn steelman_then_attack_carries_the_steelman_into_every_critic() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("STEELMAN-MARKER: the best version"),
+            tokens("1. fails because a"),
+            tokens("- disproof b"),
+            tokens("argument c"),
+            tokens("converged on the steelman"),
+        ],
+    )
+    .await;
+    let outcome = run(&mock, tmp.path(), "steelman-then-attack", false).await;
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 5, "steelman + 3 critics + synthesizer");
+    assert!(
+        bodies[0].contains("You are the Advocate") && bodies[0].contains("strongest honest case")
+    );
+    for critic in &bodies[1..4] {
+        assert!(critic.contains("You are the Critic"));
+        assert!(critic.contains("## Prior stage: steelman") && critic.contains("STEELMAN-MARKER"));
+    }
+    assert_eq!(outcome.synthesis, "converged on the steelman");
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert_eq!(convo.matches("## assistant").count(), 1);
+    assert!(
+        !convo.contains("STEELMAN-MARKER"),
+        "intermediate stage output stays out of truth"
+    );
+}
+
+#[tokio::test]
+async fn ready_to_build_folds_audited_findings_into_a_fenced_build_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("- Ship solo first"),
+            tokens("- Agencies pay monthly"),
+            tokens(""),
+            tokens("- risk: churn"),
+            tokens("- Call three agencies"),
+            tokens("F1: CONFIRMED — settled\nF2: CONFIRMED — said\nF3: UNCERTAIN — maybe\nF4: REFUTED — not discussed"),
+            tokens("Here it is:\n```markdown\n# Build the agency tool\n```\nGood luck!"),
+        ],
+    )
+    .await;
+    let outcome = run(&mock, tmp.path(), "ready-to-build", true).await;
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 7, "5 harvesters + auditor + build prompt");
+    assert!(bodies[0].contains("You are the Harvester"));
+    let chain = &bodies[6];
+    assert!(chain.contains("BUILD PROMPT"));
+    assert!(chain.contains("## Prior stage: findings"));
+    assert!(chain.contains("Ship solo first [CONFIRMED]"));
+    assert!(chain.contains("Call three agencies [REFUTED]"));
+    assert_eq!(
+        outcome.synthesis,
+        "```markdown\n# Build the agency tool\n```"
+    );
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(convo.contains(
+        "## assistant (workflow: ready-to-build)\n```markdown\n# Build the agency tool\n```"
+    ));
+    assert!(!convo.contains("Good luck"));
 }

@@ -13,7 +13,7 @@ use idea_vault::ai::{LlmBackend, OllamaClient};
 use idea_vault::concepts::skills::{self, SkillRegistry};
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState};
 use idea_vault::vault::store;
-use support::{refused_url, spawn, ChatScript};
+use support::{refused_url, spawn, spawn_sequence, ChatScript};
 use tokio::sync::Semaphore;
 
 fn seed_idea(vault: &Path, slug: &str) {
@@ -42,7 +42,7 @@ async fn invoke_hydrates_context_and_appends_assistant_turn() {
     seed_idea(tmp.path(), "i");
     let mock = spawn(
         &["llama3.2"],
-        ChatScript::Tokens(vec!["Failure cause one.".into()]),
+        ChatScript::Tokens(vec!["1. Failure cause one.".into()]),
     )
     .await;
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
@@ -61,7 +61,7 @@ async fn invoke_hydrates_context_and_appends_assistant_turn() {
     )
     .await
     .unwrap();
-    assert_eq!(output, "Failure cause one.");
+    assert_eq!(output, "1. Failure cause one.");
 
     // The hydrated {context} actually reached the model: the captured /api/chat request body
     // carries both the skill's template text and the idea body/conversation (D18 + D21).
@@ -88,7 +88,7 @@ async fn invoke_hydrates_context_and_appends_assistant_turn() {
     let convo = store::read_conversation(tmp.path(), "i").unwrap();
     assert_eq!(
         convo,
-        "## user\nkick the tires\n## assistant (skill: premortem)\nFailure cause one.\n"
+        "## user\nkick the tires\n## assistant (skill: premortem)\n1. Failure cause one.\n"
     );
 
     // Stateless: idea state untouched (D18).
@@ -164,4 +164,86 @@ async fn invoke_waits_on_the_shared_semaphore() {
         .expect("completes once a permit frees")
         .unwrap();
     assert_eq!(output, "ok");
+}
+
+/// Run `skill` once against a mock answering `answers` in order; returns the output, the request
+/// bodies the mock saw, and the persisted transcript.
+async fn invoke_with(skill: &str, answers: &[&str]) -> (String, Vec<String>, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        answers
+            .iter()
+            .map(|a| ChatScript::Tokens(vec![a.to_string()]))
+            .collect(),
+    )
+    .await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let semaphore = Arc::new(Semaphore::new(1));
+    let registry = SkillRegistry::builtin();
+    let output = skills::invoke(
+        &client,
+        &semaphore,
+        tmp.path(),
+        "i",
+        registry.get(skill).unwrap(),
+        ContextBudget::new(4096),
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    (output, mock.chat_bodies(), convo)
+}
+
+#[tokio::test]
+async fn an_off_contract_answer_is_retried_once_with_the_violation_read_back() {
+    let (output, bodies, convo) = invoke_with(
+        "premortem",
+        &[
+            "It could fail for many reasons.",
+            "Sure:\n1. Nobody pays.\n2. Churn.",
+        ],
+    )
+    .await;
+    assert_eq!(bodies.len(), 2, "exactly one retry");
+    assert!(!bodies[0].contains("was rejected because"));
+    assert!(bodies[1].contains("was rejected because") && bodies[1].contains("numbered list"));
+    assert!(
+        !bodies[1].contains("many reasons"),
+        "the failed answer is not resent"
+    );
+    assert_eq!(output, "1. Nobody pays.\n2. Churn.", "preamble stripped");
+    assert!(convo.ends_with("## assistant (skill: premortem)\n1. Nobody pays.\n2. Churn.\n"));
+}
+
+#[tokio::test]
+async fn a_second_violation_stops_at_two_calls_and_keeps_the_answer() {
+    let (output, bodies, convo) =
+        invoke_with("premortem", &["no list", "still no list", "never asked"]).await;
+    assert_eq!(bodies.len(), 2, "the retry cap is one");
+    assert_eq!(output, "still no list");
+    assert!(convo.ends_with("still no list\n"));
+}
+
+#[tokio::test]
+async fn an_on_contract_answer_is_never_retried() {
+    let (_, bodies, _) = invoke_with("devils-advocate", &["Plain prose is fine here."]).await;
+    assert_eq!(bodies.len(), 1);
+}
+
+#[tokio::test]
+async fn build_prompt_persists_only_the_fenced_block() {
+    let (output, bodies, convo) = invoke_with(
+        "build-prompt",
+        &["Here is your prompt:\n```markdown\n# Build X\n```bash\ncargo test\n```\n```\nGood luck!"],
+    )
+    .await;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(
+        output,
+        "```markdown\n# Build X\n```bash\ncargo test\n```\n```"
+    );
+    assert!(!convo.contains("Good luck") && !convo.contains("Here is your prompt"));
 }

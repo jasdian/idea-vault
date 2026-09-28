@@ -13,7 +13,9 @@ use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::web::routes::{admin, artifacts, chat, compact, ideas, mcp, memory, settings, sources};
+use crate::web::routes::{
+    admin, artifacts, chat, compact, ideas, mcp, memory, settings, skills, sources,
+};
 
 /// Cloneable shared state injected into handlers (docs/01-architecture.md "Cross-cutting concerns").
 #[derive(Clone)]
@@ -22,8 +24,9 @@ pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub llm: crate::ai::LlmBackend,
     pub ai_semaphore: Arc<Semaphore>,
-    /// Built-in skill registry, populated at boot (docs/06-concepts/skills.md "Registry").
-    pub skills: Arc<crate::concepts::skills::SkillRegistry>,
+    /// The live skill registry: built-ins plus the owner's `vault/.skills/` (docs/adr/0022).
+    /// Handlers take one `snapshot()` per request/job so a reload never changes a run mid-flight.
+    pub skills: Arc<crate::concepts::skills::LiveSkills>,
     /// In-flight background AI jobs, one per idea, so a slow model call survives the browser
     /// navigating away (`web::jobs`).
     pub jobs: crate::web::jobs::Jobs,
@@ -92,6 +95,9 @@ pub fn build_router(state: AppState) -> Router {
         // Live LLM settings (backend toggle + params).
         .route("/settings", get(settings::settings_page))
         .route("/settings", post(settings::update_settings))
+        // The skill book: built-in + owner skills by spine stage, with live reload (ADR-0022).
+        .route("/skills", get(skills::skills_page))
+        .route("/skills/reload", post(skills::reload_skills))
         // MCP server management (owner-configured tool endpoints, `crate::mcp`).
         .route("/mcp", get(mcp::mcp_page))
         .route("/mcp/add", post(mcp::add_server))

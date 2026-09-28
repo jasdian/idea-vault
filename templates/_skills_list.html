@@ -1,0 +1,52 @@
+{# The swappable #skills panel: where owner skill files live + reload, any files that failed to
+   load, then one group per spine stage. Reload re-reads the folder and swaps this panel. #}
+<section class="mcp book" id="skills">
+  <div class="book__folder">
+    <p class="src__note">owner skills are read from <code>{{ dir }}</code> — one
+      <code>&lt;name&gt;.md</code> per move: frontmatter (name, description, stage, role, contract,
+      use_when, avoid_when, hidden) then the prompt, which must contain <code>{context}</code>.</p>
+    <form hx-post="/skills/reload" hx-target="#skills" hx-swap="outerHTML">
+      <button type="submit" class="chip">↻ reload skills</button>
+    </form>
+  </div>
+
+  {% if !issues.is_empty() %}
+  <div class="src__banner book__issues">
+    <p>{{ issues.len() }} skill file{% if issues.len() != 1 %}s{% endif %} skipped — the built-in (if any) stays active:</p>
+    <ul>
+      {% for issue in issues %}
+      <li><code>{{ issue.file }}</code> — {{ issue.message }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% for group in groups %}
+  <div class="book__stage">
+    <h2 class="book__stage-name">{{ group.stage }}</h2>
+    <p class="book__stage-blurb">{{ group.blurb }}</p>
+    {% if group.skills.is_empty() %}
+    <p class="mcp__empty">no moves at this stage yet.</p>
+    {% else %}
+    <ul class="mcp__list">
+      {% for s in group.skills %}
+      <li class="mcp__row">
+        <div class="mcp__row-line1">
+          <span class="mcp__name">{{ s.name }}</span>
+          <span class="mcp__pill{% if s.source != "built-in" %} mcp__pill--on{% endif %}">{{ s.source }}</span>
+        </div>
+        <p class="book__desc">{{ s.description }}</p>
+        {% if !s.use_when.is_empty() %}<p class="book__when"><span class="book__label">use when</span> {{ s.use_when }}</p>{% endif %}
+        {% if !s.avoid_when.is_empty() %}<p class="book__when"><span class="book__label">not when</span> {{ s.avoid_when }}</p>{% endif %}
+        <div class="mcp__row-line2">
+          <span class="mcp__token">role · {{ s.role }}</span>
+          <span class="mcp__token">output · {{ s.contract }}</span>
+          {% if s.hidden %}<span class="mcp__token">orchestrator-only</span>{% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>

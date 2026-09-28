@@ -240,6 +240,68 @@ pub fn append_turn(
     append_conversation(vault_dir, slug, &turn)
 }
 
+/// Who produced a transcript turn, read back from its `## <role>` heading — the one parse of the
+/// heading grammar [`append_turn`] writes, so the UI label and the coverage spine
+/// (`concepts::coverage`) can't disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnSource {
+    /// `## user`
+    User,
+    /// `## assistant` — a plain chat reply.
+    Chat,
+    /// `## assistant (skill: <name>)`
+    Skill(String),
+    /// `## assistant (swarm: a, b)`; empty for the legacy bare `## assistant (swarm)`.
+    Swarm(Vec<String>),
+    /// `## assistant (workflow: <name>)`
+    Workflow(String),
+    /// `## assistant (knowledge)` — a knowledge-extraction synthesis.
+    Knowledge,
+    /// Any other heading (or none), verbatim.
+    Other(String),
+}
+
+/// The role text of a turn's first-line `## <role>` heading, or `""` for a headless turn.
+pub fn turn_role(turn: &str) -> &str {
+    turn.lines()
+        .next()
+        .and_then(|first| first.strip_prefix("## "))
+        .map_or("", str::trim)
+}
+
+/// Parse a turn heading's role text (as [`turn_role`] returns it) into a [`TurnSource`].
+pub fn parse_turn_heading(role: &str) -> TurnSource {
+    if role == "user" {
+        return TurnSource::User;
+    }
+    let Some(rest) = role.strip_prefix("assistant") else {
+        return TurnSource::Other(role.to_string());
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return TurnSource::Chat;
+    }
+    let inner = rest.trim_start_matches('(').trim_end_matches(')').trim();
+    let (kind, value) = match inner.split_once(':') {
+        Some((k, v)) => (k.trim(), v.trim()),
+        None => (inner, ""),
+    };
+    match kind {
+        "skill" if !value.is_empty() => TurnSource::Skill(value.to_string()),
+        "swarm" => TurnSource::Swarm(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ),
+        "workflow" if !value.is_empty() => TurnSource::Workflow(value.to_string()),
+        "knowledge" => TurnSource::Knowledge,
+        _ => TurnSource::Other(role.to_string()),
+    }
+}
+
 /// Delete the `index`-th turn (0-based, in `split_turns` order) from `conversation.md` by
 /// rewriting the file without it. Returns whether a turn was removed.
 ///
@@ -1136,7 +1198,8 @@ mod tests {
                     crate::domain::ArtifactKind::Finding => {
                         Some("extract-key-decisions".to_string())
                     }
-                    crate::domain::ArtifactKind::Synthesis => None,
+                    crate::domain::ArtifactKind::Synthesis
+                    | crate::domain::ArtifactKind::Quarantine => None,
                 },
                 created: Utc.with_ymd_and_hms(2026, 7, 8, 19, 30, 45).unwrap(),
                 model: "qwen3-8b-local".into(),
@@ -1326,5 +1389,37 @@ mod tests {
             read_artifact_html(tmp.path(), "i", "nope"),
             Err(VaultError::ArtifactNotFound(_))
         ));
+    }
+
+    #[test]
+    fn parse_turn_heading_reads_every_heading_the_app_writes() {
+        assert_eq!(parse_turn_heading("user"), TurnSource::User);
+        assert_eq!(parse_turn_heading("assistant"), TurnSource::Chat);
+        assert_eq!(
+            parse_turn_heading("assistant (skill: premortem)"),
+            TurnSource::Skill("premortem".into())
+        );
+        assert_eq!(
+            parse_turn_heading("assistant (swarm: premortem, constraints)"),
+            TurnSource::Swarm(vec!["premortem".into(), "constraints".into()])
+        );
+        assert_eq!(
+            parse_turn_heading("assistant (swarm)"),
+            TurnSource::Swarm(vec![])
+        );
+        assert_eq!(
+            parse_turn_heading("assistant (workflow: interrogate)"),
+            TurnSource::Workflow("interrogate".into())
+        );
+        assert_eq!(
+            parse_turn_heading("assistant (knowledge)"),
+            TurnSource::Knowledge
+        );
+        assert_eq!(parse_turn_heading("note"), TurnSource::Other("note".into()));
+        assert_eq!(
+            turn_role("## assistant (skill: x)\nbody\n"),
+            "assistant (skill: x)"
+        );
+        assert_eq!(turn_role("headless\n"), "");
     }
 }

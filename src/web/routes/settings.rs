@@ -27,6 +27,7 @@ fn form_view(state: &AppState, saved: bool) -> SettingsForm {
         claude_ctx_tokens: s.claude_ctx_tokens.to_string(),
         effective_ctx: state.llm.context_window_tokens().to_string(),
         web_access: s.web_access,
+        audit_findings: s.audit_findings,
         saved,
     }
 }
@@ -56,6 +57,9 @@ pub struct SettingsUpdate {
     /// Web access (ADR-0017) — checkbox, same omitted-means-off contract as `auto_compact`.
     #[serde(default)]
     pub web_access: bool,
+    /// Factored audit (docs/adr/0023) — checkbox, same omitted-means-off contract.
+    #[serde(default)]
+    pub audit_findings: bool,
     #[serde(default)]
     pub compact_threshold: Option<f32>,
     /// Per-backend context-window overrides in tokens; 0 = auto, absent = keep current.
@@ -107,6 +111,8 @@ pub async fn update_settings(
         .clamp(0.5, 0.95);
     // Web access (ADR-0017): the checkbox drives the toggle (absent ⇒ off).
     s.web_access = form.web_access;
+    // Factored audit (docs/adr/0023): the checkbox drives the toggle (absent ⇒ off).
+    s.audit_findings = form.audit_findings;
     // Context-window overrides (dynamic budget, ADR-0014): absent field = keep current value.
     if let Some(n) = form.ollama_ctx_tokens {
         s.ollama_ctx_tokens = clamp_ctx_tokens(n);

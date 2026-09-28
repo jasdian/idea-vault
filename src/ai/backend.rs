@@ -104,6 +104,9 @@ pub struct LlmSettings {
     /// the CLI's own WebSearch/WebFetch tools. Off ⇒ both backends stay fully offline (the
     /// claude tools are explicitly disallowed, not merely unrequested).
     pub web_access: bool,
+    /// Factored audit (docs/adr/0023): swarms and workflows run one Auditor call that labels each
+    /// finding CONFIRMED / UNCERTAIN / REFUTED before synthesis. Costs one model call per run.
+    pub audit_findings: bool,
 }
 
 /// The live LLM router: both backends available, dispatch chosen per-call from [`LlmSettings`].
@@ -229,6 +232,9 @@ impl LlmBackend {
                 // protocol only, and unit tests must never touch the real network. Production
                 // boots from `Config::web_access` (default on) in main.rs.
                 web_access: false,
+                // On, as in production: tests see the same swarm/workflow call shape the owner
+                // gets by default.
+                audit_findings: true,
             },
         )
     }

@@ -20,6 +20,7 @@ use chrono::Utc;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::{assemble_context, ContextBudget, ContextInput};
+use crate::ai::contract;
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::domain::{Compacted, CompactedFrontmatter};
@@ -71,21 +72,29 @@ impl CompactTargets {
 /// one-fold-per-turn); each round is its own Ollama call + permit, so this bounds worst-case work.
 pub const MAX_FOLD_ROUNDS: usize = 4;
 
+/// The four fixed sections of a compacted summary, as the exact heading lines the model must emit.
+pub const COMPACT_HEADINGS: [&str; 4] = [
+    "## Decisions",
+    "## Open threads",
+    "## Rejected forks",
+    "## Key facts & constraints",
+];
+
 /// The compaction instruction (styled after `EXTRACT_INSTRUCTION`/`CONSOLIDATE_INSTRUCTION`).
-/// Fixed `##` headings keep the summary stable, diffable, and coherent to re-fold into.
+/// Fixed `##` headings keep the summary stable, diffable, and coherent to re-fold into; they are
+/// spelled out as the literal lines to emit so a small model can't render them as bold bullets.
 const COMPACT_INSTRUCTION: &str = "You are compacting the EARLIER part of an ideation \
 conversation so it can continue within a tight context budget; the full verbatim transcript is \
 preserved elsewhere. Merge the PRIOR SUMMARY (if given, under `## Earlier in this discussion`) \
 with the NEW TURNS (under `## Conversation`) into one dense, self-contained running summary. Do \
-not invent — compress. A reader must be able to continue from your summary alone. Preserve, under \
-these EXACT headings:\n\
-- **Decisions** — conclusions reached and the why (rationale), so they are not re-litigated.\n\
-- **Open threads** — unresolved questions, next angles still being pushed on.\n\
-- **Rejected forks** — directions explicitly abandoned and the reason each was killed.\n\
-- **Key facts & constraints** — numbers, scope, hard limits surfaced in discussion.\n\
+not invent — compress. A reader must be able to continue from your summary alone. Emit exactly \
+these four heading lines, in this order, each followed by dense `- ` bullets:\n\
+## Decisions\n(conclusions reached and the why, so they are not re-litigated)\n\
+## Open threads\n(unresolved questions, next angles still being pushed on)\n\
+## Rejected forks\n(directions explicitly abandoned and the reason each was killed)\n\
+## Key facts & constraints\n(numbers, scope, hard limits surfaced in discussion)\n\
 Do not discard anything from the PRIOR SUMMARY unless the NEW TURNS supersede it. Drop \
-pleasantries, restated questions, verbatim phrasing. Output ONLY the four `##` headings with \
-dense bullets, under ~1200 tokens. No preamble.";
+pleasantries, restated questions, verbatim phrasing. Keep it under ~1200 tokens. No preamble.";
 
 /// The result of resolving how much of a transcript a `compacted.md` actually covers *right now*
 /// — one definition of "effective" for load, meter, and the fold trigger.
@@ -184,18 +193,6 @@ pub fn choose_high_water(
     k
 }
 
-/// Truncate `s` to at most `max` bytes without splitting a UTF-8 code point.
-fn trim_to_bytes(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].trim_end().to_string()
-}
-
 /// Fold one round for `slug`: read the transcript + prior summary, choose the high-water mark,
 /// summarize exactly `turns[k_old..k_new]` (merged with the prior summary) via one Ollama call
 /// under a single `ai_semaphore` permit, and write the new `compacted.md`. Returns `Ok(None)` when
@@ -260,7 +257,17 @@ pub async fn run_compaction_inner(
         .await?
     };
 
-    let summary = trim_to_bytes(raw.trim(), targets.summary_max_bytes);
+    // Section-aware trim (docs/adr/0023): over-long summaries lose body lines, never a heading.
+    // A summary missing headings is still kept (warn-only) — a folded head beats none.
+    let summary = contract::trim_sections(raw.trim(), targets.summary_max_bytes);
+    let missing = contract::missing_headings(&summary, &COMPACT_HEADINGS);
+    if !summary.is_empty() && !missing.is_empty() {
+        tracing::warn!(
+            slug,
+            ?missing,
+            "compacted summary is missing section headings"
+        );
+    }
     if summary.is_empty() {
         // Abort with truth intact — the previous compacted.md (if any) is untouched.
         return Err(MemoryError::EmptyCompaction);
@@ -572,15 +579,5 @@ mod tests {
                 all_bytes(&turns)
             );
         }
-    }
-
-    #[test]
-    fn trim_to_bytes_respects_char_boundaries() {
-        let s = "héllo wörld"; // multi-byte chars
-        let out = trim_to_bytes(s, 3);
-        assert!(s.starts_with(&out));
-        assert!(out.len() <= 3);
-        // No panic / no split char: round-trips as valid UTF-8 (guaranteed by &str slicing).
-        let _ = out.chars().count();
     }
 }

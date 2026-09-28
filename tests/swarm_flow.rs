@@ -43,6 +43,16 @@ async fn run_swarm(
     k: usize,
     angles: &[&str],
 ) -> Result<idea_vault::concepts::swarm::SwarmOutcome, ConceptError> {
+    run_swarm_audited(mock, vault, k, angles, false).await
+}
+
+async fn run_swarm_audited(
+    mock: &MockOllama,
+    vault: &Path,
+    k: usize,
+    angles: &[&str],
+    audit: bool,
+) -> Result<idea_vault::concepts::swarm::SwarmOutcome, ConceptError> {
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(k));
     let registry = SkillRegistry::builtin();
@@ -54,6 +64,7 @@ async fn run_swarm(
         "i",
         angles.iter().map(|a| a.to_string()).collect(),
         ContextBudget::new(4096),
+        audit,
         &|_: &str| {},
     )
     .await
@@ -83,12 +94,18 @@ async fn keystone_max_in_flight_equals_k_and_all_n_complete() {
         "cheapest-disproof",
         "devils-advocate",
     ];
-    let outcome = run_swarm(&mock, tmp.path(), K, &angles).await.unwrap();
+    let outcome = run_swarm_audited(&mock, tmp.path(), K, &angles, true)
+        .await
+        .unwrap();
 
     // All N complete (queued, not dropped) …
     assert_eq!(outcome.agent_results.len(), 6);
     assert!(outcome.agent_results.iter().all(Option::is_some));
-    assert_eq!(mock.chat_bodies().len(), 7, "6 agents + 1 synthesizer");
+    assert_eq!(
+        mock.chat_bodies().len(),
+        8,
+        "6 agents + 1 auditor + 1 synthesizer"
+    );
     // … while in-flight calls never exceeded K, and genuinely reached K (real parallelism).
     assert!(
         mock.max_in_flight() <= K,
@@ -129,7 +146,7 @@ async fn failed_agent_is_nulled_and_judge_skips_it() {
 
     // Only the synthesis is persisted, as one swarm turn; intermediate outputs are not.
     let convo = store::read_conversation(tmp.path(), "i").unwrap();
-    assert!(convo.contains("## assistant (swarm)\nconverged view\n"));
+    assert!(convo.contains("## assistant (swarm: premortem, cheapest-disproof)\nconverged view\n"));
     assert!(
         !convo.contains("finding A"),
         "intermediate output not persisted"
@@ -164,4 +181,97 @@ async fn unknown_angle_fails_fast_before_any_model_call() {
         .unwrap_err();
     assert!(matches!(err, ConceptError::UnknownSkill(name) if name == "not-a-skill"));
     assert!(mock.chat_bodies().is_empty(), "no AI call was made");
+}
+
+#[tokio::test]
+async fn the_audit_judges_findings_before_synthesis_and_keeps_refuted_ones_visible() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    // K=1 serializes: premortem agent, constraints agent, auditor, synthesizer.
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::Tokens(vec!["1. Nobody pays for it\n2. Churn kills it".into()]),
+            ChatScript::Tokens(vec!["- Needs a licence".into()]),
+            ChatScript::Tokens(vec![
+                "F1: REFUTED — three pilots already paid\nF2: UNCERTAIN — depends on region\nF3: CONFIRMED — churn is unaddressed".into(),
+            ]),
+            ChatScript::Tokens(vec!["converged view".into()]),
+        ],
+    )
+    .await;
+
+    let outcome = run_swarm_audited(&mock, tmp.path(), 1, &["premortem", "constraints"], true)
+        .await
+        .unwrap();
+
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 4);
+    assert!(
+        bodies[1].contains("You are the Researcher"),
+        "constraints runs under its own role"
+    );
+    // Factored: the auditor sees numbered findings, not the critics' personas or framing.
+    // Items interleave across lenses, so each lens's top finding comes first.
+    assert!(bodies[2].contains("You are the Auditor"));
+    assert!(bodies[2].contains("F1: Nobody pays for it"));
+    assert!(bodies[2].contains("F2: Needs a licence"));
+    assert!(bodies[2].contains("F3: Churn kills it"));
+    assert!(!bodies[2].contains("You are the Critic"));
+    // The synthesizer sees the idea, each finding's lens, and its verdict.
+    assert!(bodies[3].contains("Idea under swarm attack."));
+    assert!(bodies[3].contains("(premortem · critic) [REFUTED — three pilots already paid]"));
+    assert!(bodies[3].contains("(constraints · researcher) [UNCERTAIN"));
+
+    let report = outcome.audit.expect("audit ran");
+    assert_eq!(report.answered, 3);
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(convo.contains("converged view"));
+    assert!(convo.contains("_Audit: 1 confirmed · 1 uncertain · 1 refuted_"));
+    assert!(convo.contains("### Disproven objections"));
+    assert!(
+        convo.contains("~~Nobody pays for it~~ (premortem · critic) — three pilots already paid")
+    );
+}
+
+#[tokio::test]
+async fn a_garbled_audit_degrades_to_unverified_and_still_synthesizes() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::Tokens(vec!["1. Nobody pays".into()]),
+            ChatScript::Tokens(vec!["These all look like great points!".into()]),
+            ChatScript::Tokens(vec!["converged anyway".into()]),
+        ],
+    )
+    .await;
+    let outcome = run_swarm_audited(&mock, tmp.path(), 1, &["premortem"], true)
+        .await
+        .unwrap();
+    assert!(outcome.audit.unwrap().failed);
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(convo.contains("converged anyway"));
+    assert!(convo.contains("findings above are unverified"));
+    assert!(
+        !mock.chat_bodies()[2].contains("auditor's verdict"),
+        "no verdict guidance when the audit failed"
+    );
+}
+
+#[tokio::test]
+async fn with_the_audit_off_there_is_no_auditor_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["1. x".into()])).await;
+    let outcome = run_swarm(&mock, tmp.path(), 1, &["premortem", "devils-advocate"])
+        .await
+        .unwrap();
+    assert!(outcome.audit.is_none());
+    assert_eq!(mock.chat_bodies().len(), 3, "2 agents + synthesizer");
+    assert!(!mock
+        .chat_bodies()
+        .iter()
+        .any(|b| b.contains("You are the Auditor")));
 }

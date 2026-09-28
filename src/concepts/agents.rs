@@ -10,17 +10,25 @@
 
 use tokio::sync::Semaphore;
 
+use crate::ai::contract;
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::concepts::skills::SkillRegistry;
 use crate::concepts::ConceptError;
+use crate::domain::SkillRole;
 
 /// A scoped subagent persona (docs/06-concepts/agents.md "Standard roles").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentRole {
     Critic,
     Researcher,
+    /// Builds the strongest honest case for the idea (the steelman lens).
+    Advocate,
+    /// Extracts only what the material already says (the `extract-*` lenses).
+    Harvester,
     Synthesizer,
+    /// Judges other agents' findings against the idea and discussion (the factored audit).
+    Auditor,
 }
 
 impl AgentRole {
@@ -28,7 +36,10 @@ impl AgentRole {
         match self {
             AgentRole::Critic => "critic",
             AgentRole::Researcher => "researcher",
+            AgentRole::Advocate => "advocate",
+            AgentRole::Harvester => "harvester",
             AgentRole::Synthesizer => "synthesizer",
+            AgentRole::Auditor => "auditor",
         }
     }
 
@@ -47,11 +58,39 @@ impl AgentRole {
                  offline — no browsing). Stick to what is load-bearing; ignore critique and \
                  synthesis — other agents do that."
             }
+            AgentRole::Advocate => {
+                "You are the Advocate: make the strongest honest case FOR the idea below — its \
+                 best version, the conditions under which it wins, the evidence in its favour. \
+                 Do not attack it and do not hedge — other agents do that."
+            }
+            AgentRole::Harvester => {
+                "You are the Harvester: extract only what the material below already contains, \
+                 faithfully and without embellishment. Add no new ideas, critique, or outside \
+                 knowledge — other agents do that."
+            }
             AgentRole::Synthesizer => {
                 "You are the Synthesizer: neutral. Merge the prior agent outputs below into one \
                  coherent position, surfacing (not smoothing over) the real tensions between \
                  them. Do not add new critiques or research of your own."
             }
+            AgentRole::Auditor => {
+                "You are the Auditor: sceptical by default. You did not produce the findings \
+                 below and have no stake in them; your only job is to say which ones hold up. \
+                 A confirmation you cannot justify from the material is a failure."
+            }
+        }
+    }
+}
+
+impl From<SkillRole> for AgentRole {
+    /// The persona a skill runs under when an orchestrator fans it out.
+    fn from(role: SkillRole) -> Self {
+        match role {
+            SkillRole::Critic => AgentRole::Critic,
+            SkillRole::Researcher => AgentRole::Researcher,
+            SkillRole::Advocate => AgentRole::Advocate,
+            SkillRole::Harvester => AgentRole::Harvester,
+            SkillRole::Synthesizer => AgentRole::Synthesizer,
         }
     }
 }
@@ -69,12 +108,18 @@ pub struct AgentTask {
 #[derive(Debug, Clone)]
 pub struct AgentResult {
     pub role: AgentRole,
+    /// The skill lens the agent ran through, if any — kept so the synthesizer and the audit can
+    /// say which angle produced a finding.
+    pub lens: Option<String>,
     pub content: String,
 }
 
 /// Build the full prompt for a task: role persona, then the optional skill lens hydrated with
 /// the (already budgeted, D21) context — or the bare context when no skill is named.
-fn build_prompt(registry: &SkillRegistry, task: &AgentTask) -> Result<String, ConceptError> {
+pub(crate) fn build_prompt(
+    registry: &SkillRegistry,
+    task: &AgentTask,
+) -> Result<String, ConceptError> {
     let body = match &task.skill {
         Some(name) => {
             let skill = registry
@@ -115,12 +160,24 @@ pub async fn run_agent(
             .await?
     };
 
-    let content = content.trim().to_string();
+    // Repair only, never retry (docs/adr/0023): a retry per fan-out agent would double the
+    // fan-out's model calls. A lens whose answer can't be repaired degrades to the raw text.
+    let content = match task.skill.as_deref().and_then(|name| registry.get(name)) {
+        Some(skill) => match contract::validate(skill.contract, &content) {
+            Ok(repaired) => repaired,
+            Err(violation) => {
+                tracing::warn!(skill = %skill.name, %violation, "agent answer off-contract; kept raw");
+                content.trim().to_string()
+            }
+        },
+        None => content.trim().to_string(),
+    };
     if content.is_empty() {
         tracing::warn!(role = task.role.as_str(), "agent returned empty output");
     }
     Ok(AgentResult {
         role: task.role,
+        lens: task.skill,
         content,
     })
 }

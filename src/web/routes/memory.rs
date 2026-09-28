@@ -64,7 +64,8 @@ pub async fn store_idea(
             "consolidating the idea + extracting memory…",
         );
         match run_store_work(&ts, &tslug).await {
-            Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
+            Ok(None) => jobs::mark_done(&ts.jobs, &tslug),
+            Ok(Some(notice)) => jobs::mark_notice(&ts.jobs, &tslug, notice),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
@@ -76,8 +77,9 @@ pub async fn store_idea(
 /// The background half of Store: the extraction pipeline (which acquires the shared permit
 /// itself, scoped to exactly its two AI calls, ADR-0006 — this task must not hold one around
 /// it) followed by the log-not-fail reindex. Truth is only touched after both calls succeed,
-/// so an abort mid-run persists nothing partial.
-async fn run_store_work(state: &AppState, slug: &str) -> Result<(), String> {
+/// so an abort mid-run persists nothing partial. `Ok(Some(_))` is a notice for the owner (facts
+/// quarantined, context truncated) shown under the stored panel.
+async fn run_store_work(state: &AppState, slug: &str) -> Result<Option<String>, String> {
     let outcome = memory::extract::extract_and_store(
         &state.llm,
         &state.ai_semaphore,
@@ -88,8 +90,36 @@ async fn run_store_work(state: &AppState, slug: &str) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
     reindex_logged(state);
-    tracing::info!(slug, new_facts = outcome.new_facts, "idea stored");
-    Ok(())
+    tracing::info!(
+        slug,
+        new_facts = outcome.new_facts,
+        updated_facts = outcome.updated_facts,
+        quarantined = outcome.quarantined,
+        "idea stored"
+    );
+    Ok(store_notice(&outcome))
+}
+
+/// The one-shot line shown under the stored panel when a store did something the owner should
+/// know about: facts held back by the evidence gate, or a discussion too long to read in full.
+fn store_notice(outcome: &memory::extract::StoreOutcome) -> Option<String> {
+    let mut parts = Vec::new();
+    if outcome.quarantined > 0 {
+        parts.push(format!(
+            "{} extracted fact{} had no supporting quote in the discussion and went to the \
+             quarantined-facts artifact instead of memory",
+            outcome.quarantined,
+            if outcome.quarantined == 1 { "" } else { "s" }
+        ));
+    }
+    if outcome.context_truncated {
+        parts.push(
+            "the discussion was longer than the model's context, so its oldest turns were not \
+             read while storing"
+                .to_string(),
+        );
+    }
+    (!parts.is_empty()).then(|| format!("Stored — but {}.", parts.join("; and ")))
 }
 
 /// R5 — `POST /idea/{slug}/reopen` — re-enter discussion with memory loaded as context (D13).
@@ -126,7 +156,7 @@ pub async fn reopen_idea(
 
     let conversation = store::read_conversation(&vault_dir, &slug)?;
     let health = state.llm.probe().await;
-    let skill_names = state.skills.move_names();
+    let skills = state.skills.snapshot();
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     let queued_items = crate::web::jobs::list_queued(&state.queues, &slug);
     // The reopen form swaps `#discussion` (buttons come back with it); the subhead badge sits
@@ -139,7 +169,7 @@ pub async fn reopen_idea(
         state.llm.settings().backend,
         &state.llm.model(),
         true,
-        skill_names,
+        &skills,
         pending,
         queued_items,
         state.llm.context_budget().max_bytes,
@@ -188,10 +218,9 @@ pub async fn run_skill(
     let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
     guard_discussion_state(idea.frontmatter.state)?;
 
-    let Some(skill) = state.skills.get(&name) else {
+    let Some(skill) = state.skills.snapshot().get(&name).cloned() else {
         return Err(WebError::NotFound(format!("skill: {name}")));
     };
-    let skill = skill.clone();
 
     if !jobs::try_claim(&state.jobs, &slug) {
         return respond_with_transcript(&state, &slug);
@@ -277,9 +306,18 @@ pub async fn run_swarm(
     }
     // Reject unknown angles synchronously (they map to skills) — `swarm` checks this too, but that
     // now runs in the background task, so validate here to keep a bad request a 400 not an error turn.
+    // A capstone (build-prompt) folds the whole discussion into one deliverable; it is not an angle.
+    // One snapshot for the whole job, so a skill-book reload can't change the angles mid-run.
+    let skills = state.skills.snapshot();
     for angle in &angles {
-        if state.skills.get(angle).is_none() {
-            return Err(WebError::BadRequest(format!("unknown angle: {angle}")));
+        match skills.get(angle) {
+            None => return Err(WebError::BadRequest(format!("unknown angle: {angle}"))),
+            Some(s) if s.stage == crate::domain::SkillStage::Capstone => {
+                return Err(WebError::BadRequest(format!(
+                    "{angle} is a capstone, not a swarm angle"
+                )))
+            }
+            Some(_) => {}
         }
     }
 
@@ -289,7 +327,7 @@ pub async fn run_swarm(
     let ts = state.clone();
     let tslug = slug.clone();
     let abort = jobs::spawn_job(&state.jobs, &slug, async move {
-        match run_swarm_work(&ts, &tslug, angles).await {
+        match run_swarm_work(&ts, &tslug, &skills, angles).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
@@ -299,9 +337,9 @@ pub async fn run_swarm(
 }
 
 /// R22 — `POST /idea/{slug}/workflow/{name}` — run a deterministic workflow as a background job
-/// (D19). Script-driven control flow (fixed fan-out → judge → synthesize), as opposed to the
-/// free-form swarm: the same workflow takes the same path every run; only step content varies.
-/// Only the final synthesis is persisted, as one labelled turn.
+/// (D19/D32). Script-driven control flow (a fixed sequence of fan-out / chained / audit /
+/// synthesis stages), as opposed to the free-form swarm: the same workflow takes the same path
+/// every run; only stage content varies. Only the final output is persisted, as one turn.
 pub async fn run_workflow(
     State(state): State<AppState>,
     Path((slug, name)): Path<(String, String)>,
@@ -321,11 +359,6 @@ pub async fn run_workflow(
     let ts = state.clone();
     let tslug = slug.clone();
     let abort = jobs::spawn_job(&state.jobs, &slug, async move {
-        jobs::set_note(
-            &ts.jobs,
-            &tslug,
-            &format!("workflow · {name}: fan out → judge → synthesize"),
-        );
         match run_workflow_work(&ts, &tslug, &name).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
@@ -336,16 +369,20 @@ pub async fn run_workflow(
 }
 
 async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(), String> {
+    let progress = progress_sink(state, slug);
     // Scoped once per job (ADR-0021): every step turn sees the idea's attached sources.
     let llm = scoped_llm(state, slug);
+    let skills = state.skills.snapshot();
     let outcome = concepts::workflows::run_workflow(
         &llm,
         &state.ai_semaphore,
-        &state.skills,
+        &skills,
         &state.config.vault_dir,
         slug,
         name,
         llm.context_budget(),
+        llm.settings().audit_findings,
+        &progress,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -356,7 +393,12 @@ async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(
     Ok(())
 }
 
-async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Result<(), String> {
+async fn run_swarm_work(
+    state: &AppState,
+    slug: &str,
+    skills: &concepts::skills::SkillRegistry,
+    angles: Vec<String>,
+) -> Result<(), String> {
     let progress = progress_sink(state, slug);
     // One scoped clone, shared across the whole fan-out (ADR-0021): every angle's agent turn
     // carries the same resolved sources — resolved once, not once per subagent.
@@ -364,11 +406,12 @@ async fn run_swarm_work(state: &AppState, slug: &str, angles: Vec<String>) -> Re
     let outcome = concepts::swarm::swarm(
         &llm,
         &state.ai_semaphore,
-        &state.skills,
+        skills,
         &state.config.vault_dir,
         slug,
         angles,
         llm.context_budget(),
+        llm.settings().audit_findings,
         &progress,
     )
     .await

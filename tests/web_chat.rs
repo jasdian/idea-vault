@@ -68,6 +68,12 @@ async fn chat_persists_both_turns_and_returns_the_transcript() {
         .find("## assistant\nSteelmanned reply")
         .expect("assistant turn");
     assert!(u < a);
+    // The foil carries the skill book so it can recommend a move by name (ADR-0022) — the
+    // visible moves only, never the orchestrator-only extraction lenses.
+    let prompt = &mock.chat_bodies()[0];
+    assert!(prompt.contains("Moves the owner can run"));
+    assert!(prompt.contains("- premortem — "));
+    assert!(!prompt.contains("extract-"));
     assert_eq!(
         store::read_idea(&vault_dir, "chatty")
             .unwrap()

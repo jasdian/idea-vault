@@ -6,6 +6,7 @@ pub mod ideas;
 pub mod mcp;
 pub mod memory;
 pub mod settings;
+pub mod skills;
 pub mod sources;
 
 use crate::app::AppState;
@@ -108,10 +109,12 @@ mod tests {
             ollama_ctx_tokens: 0,
             claude_ctx_tokens: 0,
             web_access: false,
+            audit_findings: true,
             mcp_config_path: tmp.path().join(".mcp-servers.json"),
             sources_config_path: tmp.path().join(".sources.json"),
             sources_dir: None,
             sources_applied: None,
+            skills_dir: vault_dir.join(".skills"),
         };
         let ollama =
             crate::ai::OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone())
@@ -122,6 +125,9 @@ mod tests {
             None,
             None,
         ));
+        let skills = Arc::new(crate::concepts::skills::LiveSkills::load(
+            config.skills_dir.clone(),
+        ));
         let state = AppState {
             config: Arc::new(config),
             db: Arc::new(Mutex::new(
@@ -129,7 +135,7 @@ mod tests {
             )),
             llm: crate::ai::LlmBackend::ollama_only(ollama),
             ai_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
-            skills: Arc::new(crate::concepts::skills::SkillRegistry::builtin()),
+            skills,
             jobs: crate::web::jobs::new_registry(),
             queues: crate::web::jobs::new_queues(),
             mcp: Arc::new(crate::mcp::McpRegistry::load(

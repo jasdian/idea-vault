@@ -2,10 +2,19 @@
 //!
 //! Fires on the `InDiscussion→Stored` (or `Reopened→Stored`) transition: consolidate the idea
 //! body to the current best statement *first*, then distil a bounded set of durable facts from
-//! the discussion. On re-store, merge + dedupe against existing `memory/*.md` — memory only
-//! grows or consolidates, never silently drops (D9 invariant). All AI calls complete before the
-//! first byte of truth is written, so an unreachable model leaves the vault untouched. Markdown
-//! is written before any index upsert — the caller (web route) reindexes afterwards (ADR-0002).
+//! that statement plus the discussion. On re-store the model sees the facts already in memory and
+//! says per candidate whether it is new (`ADD`), extends one (`UPDATE <slug>`, appended — never a
+//! rewrite) or is already captured (`NOOP`); slug dedupe stays as a backstop. Memory only grows
+//! or consolidates, never silently drops (D9 invariant).
+//!
+//! Evidence gate (docs/adr/0023): every fact must carry a `QUOTE:` copied from the discussion,
+//! and code checks that quote against the raw `conversation.md` and the pre-store idea body. A
+//! fact whose quote isn't there is not written to `memory/` — it goes to a
+//! `artifacts/<stamp>-quarantined-facts.md` file the owner can read and promote by hand.
+//!
+//! All AI calls complete before the first byte of truth is written, so an unreachable model leaves
+//! the vault untouched. Markdown is written before any index upsert — the caller (web route)
+//! reindexes afterwards (ADR-0002).
 
 use std::path::Path;
 
@@ -15,7 +24,10 @@ use crate::ai::budget::{assemble_context, ContextBudget, ContextInput};
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::domain::{links, slug as domain_slug};
-use crate::domain::{IdeaState, MemoryFact, MemoryFactFrontmatter, MemoryIndex, MAX_IDEA_TAGS};
+use crate::domain::{
+    Artifact, ArtifactFrontmatter, ArtifactKind, IdeaState, MemoryFact, MemoryFactFrontmatter,
+    MemoryIndex, MAX_IDEA_TAGS,
+};
 use crate::memory::load::split_turns;
 use crate::memory::MemoryError;
 use crate::vault::store;
@@ -29,12 +41,19 @@ Rewrite the idea's current best statement as a short markdown document reflectin
 conclusions reached. Output only the new statement, no preamble.";
 
 const EXTRACT_INSTRUCTION: &str = "Extract the durable conclusions from this idea discussion as \
-at most 7 facts. Format each fact EXACTLY as a line `FACT: <short title>` followed by a 1-3 \
-sentence body on the next line(s). When a fact builds on, constrains, or contradicts ANOTHER \
-fact in your list, reference that other fact inside its body by its exact title in double \
-square brackets, e.g. `this only holds if [[cheapest disproof comes first]]`. After the last \
-fact, end with ONE final line `TAGS: <3-5 short lowercase topic tags, comma-separated>` \
-classifying the idea (domain, kind, stage). Output nothing else.";
+at most 7 facts. The idea's consolidated statement is under `## Idea`; facts already in memory \
+(if any) are listed under `## Memory` as `[[slug]] — title`. Write each fact as EXACTLY these \
+lines:\n\
+FACT: <short title>\n\
+OP: ADD (a new fact) | UPDATE <slug> (adds to the existing fact with that slug) | NOOP (already \
+in memory — nothing to add)\n\
+QUOTE: \"<a short span copied WORD FOR WORD from the discussion that supports the fact>\"\n\
+<a 1-3 sentence body>\n\
+A fact you cannot support with a word-for-word quote is not a durable fact — leave it out. When a \
+fact builds on, constrains, or contradicts ANOTHER fact, reference that other fact inside its \
+body by its exact title in double square brackets, e.g. `this only holds if [[cheapest disproof \
+comes first]]`. After the last fact, end with ONE final line `TAGS: <3-5 short lowercase topic \
+tags, comma-separated>` classifying the idea (domain, kind, stage). Output nothing else.";
 
 /// Cap on model-suggested tags merged into the idea per store (owner-set tags are never
 /// removed; the model only ever adds).
@@ -125,36 +144,99 @@ fn cross_link(self_slug: &str, body: &str, known: &[(String, String)]) -> (Strin
 #[derive(Debug)]
 pub struct StoreOutcome {
     pub consolidated_body: String,
-    /// Newly written facts (existing ones are never rewritten or dropped).
+    /// Newly written facts.
     pub new_facts: usize,
+    /// Existing facts extended by an `UPDATE` (text appended, never replaced).
+    pub updated_facts: usize,
+    /// Facts held back by the evidence gate and written to the quarantine artifact instead.
+    pub quarantined: usize,
+    /// The quarantine artifact's file slug, when one was written.
+    pub quarantine_artifact: Option<String>,
+    /// The discussion did not fully fit the extraction budget — the oldest turns were not seen.
+    pub context_truncated: bool,
     pub index: MemoryIndex,
 }
 
-/// Parse the model's `FACT: <title>` blocks into (title, body) pairs, capped at [`MAX_FACTS`].
-/// Defensive: junk before the first `FACT:` line and empty titles/bodies are skipped — local
-/// models are not reliable formatters.
-fn parse_facts(raw: &str) -> Vec<(String, String)> {
-    let mut facts: Vec<(String, String)> = Vec::new();
-    let mut current: Option<(String, String)> = None;
+/// What the model says to do with one extracted fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FactOp {
+    Add,
+    /// Extend the existing fact with this slug (appended; the owner's text is never replaced).
+    Update(String),
+    /// Already captured — skip.
+    Noop,
+}
+
+fn parse_op(raw: &str) -> FactOp {
+    let raw = raw.trim();
+    let upper = raw.to_ascii_uppercase();
+    if upper.starts_with("NOOP") {
+        FactOp::Noop
+    } else if upper.starts_with("UPDATE") {
+        let target = raw[6..]
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']' || c == '`');
+        match domain_slug::try_slugify(target) {
+            Some(slug) => FactOp::Update(slug),
+            None => FactOp::Add,
+        }
+    } else {
+        FactOp::Add
+    }
+}
+
+/// One `FACT:` block from the model.
+#[derive(Debug, Clone, PartialEq)]
+struct Candidate {
+    title: String,
+    body: String,
+    quote: Option<String>,
+    op: FactOp,
+}
+
+/// Parse the model's `FACT: <title>` blocks (with their `OP:` / `QUOTE:` lines, in any order)
+/// into candidates, capped at [`MAX_FACTS`]. Defensive: junk before the first `FACT:` line and
+/// empty titles/bodies are skipped — local models are not reliable formatters. A block with no
+/// `OP:` line is an `ADD`.
+fn parse_facts(raw: &str) -> Vec<Candidate> {
+    let mut facts: Vec<Candidate> = Vec::new();
+    let mut current: Option<Candidate> = None;
 
     for line in raw.lines() {
-        if let Some(title) = line.trim_start().strip_prefix("FACT:") {
+        let t = line.trim_start();
+        if let Some(title) = t.strip_prefix("FACT:") {
             if let Some(done) = current.take() {
                 facts.push(done);
             }
             let title = title.trim();
             if !title.is_empty() {
-                current = Some((title.to_string(), String::new()));
+                current = Some(Candidate {
+                    title: title.to_string(),
+                    body: String::new(),
+                    quote: None,
+                    op: FactOp::Add,
+                });
             }
-        } else if line.trim_start().starts_with("TAGS:") {
+        } else if t.starts_with("TAGS:") {
             // The trailing tag line (parsed separately by `parse_tags`) is metadata, not the
             // last fact's body.
             if let Some(done) = current.take() {
                 facts.push(done);
             }
-        } else if let Some((_, body)) = current.as_mut() {
-            body.push_str(line);
-            body.push('\n');
+        } else if let Some(fact) = current.as_mut() {
+            if let Some(op) = t.strip_prefix("OP:") {
+                fact.op = parse_op(op);
+            } else if let Some(quote) = t.strip_prefix("QUOTE:") {
+                let quote = quote
+                    .trim()
+                    .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’'));
+                if !quote.trim().is_empty() {
+                    fact.quote = Some(quote.trim().to_string());
+                }
+            } else {
+                fact.body.push_str(line);
+                fact.body.push('\n');
+            }
         }
     }
     if let Some(done) = current.take() {
@@ -163,10 +245,105 @@ fn parse_facts(raw: &str) -> Vec<(String, String)> {
 
     facts
         .into_iter()
-        .map(|(t, b)| (t, b.trim().to_string()))
-        .filter(|(_, b)| !b.is_empty())
+        .map(|mut f| {
+            f.body = f.body.trim().to_string();
+            f
+        })
+        .filter(|f| !f.body.is_empty() || f.op == FactOp::Noop)
         .take(MAX_FACTS)
         .collect()
+}
+
+/// Fold text for quote matching: lowercase, typographic quotes and dashes made plain, markdown
+/// emphasis/quote/heading marks dropped, whitespace collapsed — so a quote the model copied from
+/// rendered-looking text still matches the raw markdown it came from.
+fn normalize_for_match(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last_space = true;
+    for ch in text.chars() {
+        let ch = match ch {
+            '“' | '”' | '„' => '"',
+            '‘' | '’' => '\'',
+            '–' | '—' => '-',
+            c => c,
+        };
+        if matches!(ch, '*' | '_' | '`' | '>' | '#') {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+            continue;
+        }
+        out.extend(ch.to_lowercase());
+        last_space = false;
+    }
+    out.trim().to_string()
+}
+
+/// Minimum words a supporting quote must carry — anything shorter ("yes", "the market") matches
+/// almost any discussion and proves nothing.
+const MIN_QUOTE_WORDS: usize = 3;
+
+/// Most normalized bytes an elision (`…`) in a supporting quote may skip.
+const MAX_ELISION_GAP: usize = 200;
+
+/// The evidence gate: does `quote` occur (normalized) in `haystack`? An elided quote
+/// (`a … b`) passes only if its segments occur in order, each close after the last. Pure — no
+/// model call.
+fn grounded(quote: &str, haystack_normalized: &str) -> bool {
+    let segments: Vec<String> = quote
+        .split(['…'])
+        .flat_map(|s| s.split("..."))
+        .map(|s| {
+            normalize_for_match(s)
+                .trim_matches(|c: char| {
+                    c.is_whitespace() || matches!(c, '"' | '\'' | '.' | ',' | ';' | ':' | '!' | '?')
+                })
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    let words: usize = segments.iter().map(|s| s.split(' ').count()).sum();
+    let Some((first, rest)) = segments.split_first() else {
+        return false;
+    };
+    // An elision stands for a few skipped words, not a jump across the discussion: every later
+    // segment must follow the previous one within MAX_ELISION_GAP bytes, in order — otherwise
+    // two unrelated true fragments could vouch for a spliced false claim.
+    let chained_from = |start: usize| {
+        rest.iter().try_fold(start, |cursor, segment| {
+            haystack_normalized[cursor..]
+                .find(segment.as_str())
+                .filter(|gap| *gap <= MAX_ELISION_GAP)
+                .map(|gap| cursor + gap + segment.len())
+        })
+    };
+    words >= MIN_QUOTE_WORDS
+        && haystack_normalized
+            .match_indices(first.as_str())
+            .any(|(at, _)| chained_from(at + first.len()).is_some())
+}
+
+/// The quarantine artifact body: every fact the evidence gate held back, with why.
+fn quarantine_body(held: &[Candidate]) -> String {
+    let mut body = String::from(
+        "These facts were extracted when the idea was stored but NOT written to memory: their \
+         supporting quote could not be found in the discussion, so they may be the model's \
+         invention. Copy any that are true into a memory fact by hand.\n",
+    );
+    for fact in held {
+        body.push_str(&format!("\n### {}\n\n{}\n\n", fact.title, fact.body));
+        match &fact.quote {
+            Some(q) => body.push_str(&format!(
+                "> claimed quote, not found in the discussion: \"{q}\"\n"
+            )),
+            None => body.push_str("> no supporting quote was given\n"),
+        }
+    }
+    body
 }
 
 /// Run the full D12 store pipeline for `slug`: consolidate → distil → merge/dedupe → write
@@ -184,24 +361,31 @@ pub async fn extract_and_store(
     let mut idea = store::read_idea(vault_dir, slug)?;
     let conversation = store::read_conversation(vault_dir, slug)?;
     let existing = store::read_memory_facts(vault_dir, slug)?;
+    let original_body = idea.body.clone();
 
     let turns = split_turns(&conversation);
-    let context = assemble_context(
+    // Store distils the FULL verbatim transcript (the high-fidelity backstop); it never
+    // substitutes the lossy rolling summary and never reads compacted.md (docs/adr/0012).
+    let consolidate_context = assemble_context(
         budget,
         ContextInput {
             idea_body: &idea.body,
             memory: &[],
-            // Store distils the FULL verbatim transcript (the high-fidelity backstop); it never
-            // substitutes the lossy rolling summary and never reads compacted.md (docs/adr/0012).
             summary: None,
             turns: &turns,
         },
     );
+    // The extractor sees what is already remembered, so it can say UPDATE/NOOP instead of
+    // re-adding a paraphrase of an existing fact.
+    let existing_lines: Vec<String> = existing
+        .iter()
+        .map(|f| format!("[[{}]] — {}", f.frontmatter.slug, f.frontmatter.title))
+        .collect();
 
     // Both AI calls happen BEFORE any write: a model failure aborts the store with truth
     // intact. One permit covers exactly the two sequential calls (one bounded operation,
     // ADR-0006) and is released before parsing/writes — callers must NOT already hold one.
-    let (consolidated, facts_raw) = {
+    let (consolidated, facts_raw, extract_truncated) = {
         let _permit = ai_semaphore
             .acquire()
             .await
@@ -209,43 +393,104 @@ pub async fn extract_and_store(
         let consolidated = ollama
             .chat(vec![ChatMessage {
                 role: "user".to_string(),
-                content: format!("{CONSOLIDATE_INSTRUCTION}\n\n{}", context.text),
+                content: format!("{CONSOLIDATE_INSTRUCTION}\n\n{}", consolidate_context.text),
             }])
             .await?;
+        // Consolidate THEN distil (D12): facts are drawn from the rewritten statement, so they
+        // reflect the conclusions reached rather than the idea as first pitched.
+        let statement = if consolidated.trim().is_empty() {
+            idea.body.clone()
+        } else {
+            format!("{}\n", consolidated.trim())
+        };
+        let extract_context = assemble_context(
+            budget,
+            ContextInput {
+                idea_body: &statement,
+                memory: &existing_lines,
+                summary: None,
+                turns: &turns,
+            },
+        );
         let facts_raw = ollama
             .chat(vec![ChatMessage {
                 role: "user".to_string(),
-                content: format!("{EXTRACT_INSTRUCTION}\n\n{}", context.text),
+                content: format!("{EXTRACT_INSTRUCTION}\n\n{}", extract_context.text),
             }])
             .await?;
-        (consolidated, facts_raw)
+        (consolidated, facts_raw, extract_context.truncated)
     };
+    let context_truncated = consolidate_context.truncated || extract_truncated;
+    if context_truncated {
+        tracing::warn!(
+            slug,
+            "store context exceeded the budget; the oldest turns were not seen by the model"
+        );
+    }
 
-    // Consolidate-then-distil (D12): the body is rewritten to the best statement; an empty
-    // model response falls back to keeping the current body rather than erasing truth.
+    // An empty model response falls back to keeping the current body rather than erasing truth.
     let consolidated = consolidated.trim();
     if !consolidated.is_empty() {
         idea.body = format!("{consolidated}\n");
     }
 
-    // Merge + dedupe by fact slug: a re-extracted fact whose title slugifies to an existing
-    // fact's slug is a duplicate and is skipped; existing facts are never dropped (D9).
-    let mut taken: Vec<String> = existing
-        .iter()
-        .map(|f| f.frontmatter.slug.clone())
-        .collect();
-    let now = Utc::now();
-    let mut new_facts: Vec<MemoryFact> = Vec::new();
     let candidates = parse_facts(&facts_raw);
     if candidates.is_empty() && !facts_raw.trim().is_empty() {
         // A "successful" store that extracted nothing is usually the model ignoring the FACT:
         // format — surface it rather than silently storing factless (D24: surface, not swallow).
         tracing::warn!(slug, "fact extraction yielded no parseable FACT: blocks");
     }
-    // First pass: settle every new fact's slug (the batch's slugs must all be known before any
-    // body can be cross-linked against them).
-    let mut drafts: Vec<(String, String, String)> = Vec::new(); // (slug, title, body)
-    for (title, body) in candidates {
+
+    // Evidence gate: a quote must occur in what the owner and foil actually said (or the idea as
+    // it stood before this store). Never the consolidated body — the model just wrote that, so
+    // matching against it would be circular.
+    let haystack = normalize_for_match(&format!("{original_body}\n{conversation}"));
+    let mut held: Vec<Candidate> = Vec::new();
+    let mut accepted: Vec<Candidate> = Vec::new();
+    for candidate in candidates {
+        if candidate.op == FactOp::Noop {
+            continue;
+        }
+        let ok = candidate
+            .quote
+            .as_deref()
+            .is_some_and(|q| grounded(q, &haystack));
+        if ok {
+            accepted.push(candidate);
+        } else {
+            held.push(candidate);
+        }
+    }
+
+    // Merge + dedupe: an UPDATE naming an existing fact extends it; an ADD whose title slugifies
+    // to an existing fact's slug is a duplicate and is skipped (the backstop); existing facts are
+    // never dropped (D9).
+    let mut taken: Vec<String> = existing
+        .iter()
+        .map(|f| f.frontmatter.slug.clone())
+        .collect();
+    let now = Utc::now();
+    let mut drafts: Vec<(String, String, String)> = Vec::new(); // new facts: (slug, title, body)
+    let mut updates: Vec<(usize, String)> = Vec::new(); // (index into `existing`, appended body)
+    for Candidate {
+        title, body, op, ..
+    } in accepted
+    {
+        if let FactOp::Update(target) = &op {
+            if let Some(i) = existing.iter().position(|f| &f.frontmatter.slug == target) {
+                match updates.iter_mut().find(|(j, _)| *j == i) {
+                    Some((_, text)) => {
+                        text.push(' ');
+                        text.push_str(&body);
+                    }
+                    None => updates.push((i, body)),
+                }
+                continue;
+            }
+            // An UPDATE of a slug that doesn't exist is a new fact.
+        }
+        // First pass: settle every new fact's slug (the batch's slugs must all be known before
+        // any body can be cross-linked against them).
         let fact_slug = match domain_slug::try_slugify(&title) {
             // A junk title (emoji-only, symbols) must not alias a real fact via the shared
             // "idea" fallback — give it its own disambiguated slug instead of dedupe-skipping.
@@ -269,6 +514,7 @@ pub async fn extract_and_store(
         .map(|f| (f.frontmatter.slug.clone(), f.frontmatter.title.clone()))
         .chain(drafts.iter().map(|(s, t, _)| (s.clone(), t.clone())))
         .collect();
+    let mut new_facts: Vec<MemoryFact> = Vec::new();
     for (fact_slug, title, body) in drafts {
         let (body, fact_links) = cross_link(&fact_slug, &body, &known);
         new_facts.push(MemoryFact {
@@ -281,6 +527,22 @@ pub async fn extract_and_store(
             },
             body: format!("{body}\n"),
         });
+    }
+    let mut updated_facts: Vec<MemoryFact> = Vec::new();
+    for (i, addition) in updates {
+        let mut fact = existing[i].clone();
+        let (addition, add_links) = cross_link(&fact.frontmatter.slug, &addition, &known);
+        fact.body = format!(
+            "{}\n\n_Updated {}:_ {addition}\n",
+            fact.body.trim_end(),
+            now.format("%Y-%m-%d")
+        );
+        for link in add_links {
+            if !fact.frontmatter.links.contains(&link) {
+                fact.frontmatter.links.push(link);
+            }
+        }
+        updated_facts.push(fact);
     }
 
     // Merge model-suggested tags (additive only: owner-set tags are never removed, and a
@@ -297,18 +559,49 @@ pub async fn extract_and_store(
         }
     }
 
-    // Writes, in D12 order: consolidated idea.md (state=stored) → facts → MEMORY.md.
+    // Writes, in D12 order: consolidated idea.md (state=stored) → facts → MEMORY.md →
+    // quarantine artifact.
     idea.frontmatter.state = IdeaState::Stored;
     idea.frontmatter.updated = now;
     store::write_idea(vault_dir, &idea)?;
-    for fact in &new_facts {
+    for fact in new_facts.iter().chain(&updated_facts) {
         store::write_memory_fact(vault_dir, slug, fact)?;
     }
     let index = store::rebuild_memory_index(vault_dir, slug)?;
+    let quarantine_artifact = if held.is_empty() {
+        None
+    } else {
+        let taken_artifact =
+            |candidate: &str| store::artifact_exists(vault_dir, slug, candidate).unwrap_or(false);
+        let file_slug = domain_slug::disambiguate(
+            &format!("{}-quarantined-facts", now.format("%Y%m%d-%H%M%S")),
+            taken_artifact,
+        );
+        store::write_artifact(
+            vault_dir,
+            slug,
+            &Artifact {
+                frontmatter: ArtifactFrontmatter {
+                    slug: file_slug.clone(),
+                    title: "Quarantined facts".to_string(),
+                    kind: ArtifactKind::Quarantine,
+                    lens: None,
+                    created: now,
+                    model: ollama.model(),
+                },
+                body: quarantine_body(&held),
+            },
+        )?;
+        Some(file_slug)
+    };
 
     Ok(StoreOutcome {
         consolidated_body: idea.body,
         new_facts: new_facts.len(),
+        updated_facts: updated_facts.len(),
+        quarantined: held.len(),
+        quarantine_artifact,
+        context_truncated,
         index,
     })
 }
@@ -336,7 +629,7 @@ mod tests {
     fn parse_facts_does_not_swallow_the_tags_line_into_a_body() {
         let facts = parse_facts("FACT: One\nBody line.\nTAGS: x, y\n");
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].1, "Body line.", "TAGS: is metadata, not body");
+        assert_eq!(facts[0].body, "Body line.", "TAGS: is metadata, not body");
     }
 
     #[test]
@@ -406,9 +699,9 @@ mod tests {
                    FACT: Second insight\nBody two\nstill body two.\n";
         let facts = parse_facts(raw);
         assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].0, "First insight");
-        assert_eq!(facts[0].1, "The body of one.");
-        assert_eq!(facts[1].1, "Body two\nstill body two.");
+        assert_eq!(facts[0].title, "First insight");
+        assert_eq!(facts[0].body, "The body of one.");
+        assert_eq!(facts[1].body, "Body two\nstill body two.");
     }
 
     #[test]
@@ -419,7 +712,7 @@ mod tests {
         }
         let facts = parse_facts(&raw);
         assert_eq!(facts.len(), MAX_FACTS, "cap is exact, not off-by-one");
-        assert_eq!(facts[0].0, "Kept", "bodyless fact dropped");
+        assert_eq!(facts[0].title, "Kept", "bodyless fact dropped");
     }
 
     #[test]
@@ -433,5 +726,99 @@ mod tests {
             crate::domain::slug::try_slugify("Idea"),
             Some("idea".to_string())
         );
+    }
+
+    #[test]
+    fn parse_facts_reads_op_and_quote_lines_in_any_order() {
+        let raw = "FACT: Solo first\n\
+                   QUOTE: \u{201c}we ship v1 solo\u{201d}\n\
+                   OP: UPDATE [[team-size]]\n\
+                   Ship alone first.\n\
+                   FACT: Already known\nOP: NOOP\n\
+                   FACT: No op line\nBody.\n";
+        let facts = parse_facts(raw);
+        assert_eq!(facts.len(), 3);
+        assert_eq!(facts[0].quote.as_deref(), Some("we ship v1 solo"));
+        assert_eq!(facts[0].op, FactOp::Update("team-size".into()));
+        assert_eq!(
+            facts[0].body, "Ship alone first.",
+            "OP/QUOTE lines are not body"
+        );
+        assert_eq!(
+            facts[1].op,
+            FactOp::Noop,
+            "a bodyless NOOP is kept so it can be skipped"
+        );
+        assert_eq!(facts[2].op, FactOp::Add, "no OP line means ADD");
+        assert_eq!(facts[2].quote, None);
+    }
+
+    #[test]
+    fn grounded_matches_normalized_verbatim_spans_only() {
+        let hay = normalize_for_match(
+            "## user\nWe **ship v1** solo — no hires until\n   revenue.\n## assistant\nOK.",
+        );
+        assert!(
+            grounded("we ship v1 solo - no hires", &hay),
+            "markup + dash + case folded"
+        );
+        assert!(
+            grounded("\u{201c}no hires until revenue\u{201d}", &hay),
+            "line break folded"
+        );
+        assert!(
+            grounded("we ship … until revenue", &hay),
+            "elided segments each match"
+        );
+        assert!(!grounded("we hire a team first", &hay), "invented quote");
+        assert!(!grounded("ship v1", &hay), "under the minimum word count");
+        assert!(
+            !grounded("we ship … hire a CTO", &hay),
+            "one segment invented"
+        );
+    }
+
+    #[test]
+    fn an_elided_quote_cannot_splice_distant_fragments_together() {
+        let filler = "unrelated discussion ".repeat(40);
+        let hay = normalize_for_match(&format!(
+            "we ship solo. {filler} the market is agencies. {filler} revenue first"
+        ));
+        assert!(
+            grounded("the market … is agencies", &hay),
+            "adjacent segments pass"
+        );
+        assert!(
+            !grounded("we ship … revenue first", &hay),
+            "segments hundreds of bytes apart are a splice, not a quote"
+        );
+        assert!(
+            !grounded("revenue first … we ship", &hay),
+            "segments must occur in order"
+        );
+    }
+
+    #[test]
+    fn quarantine_body_lists_each_fact_with_why() {
+        let held = vec![
+            Candidate {
+                title: "Invented".into(),
+                body: "Claimed thing.".into(),
+                quote: Some("never said".into()),
+                op: FactOp::Add,
+            },
+            Candidate {
+                title: "Unquoted".into(),
+                body: "Other thing.".into(),
+                quote: None,
+                op: FactOp::Add,
+            },
+        ];
+        let body = quarantine_body(&held);
+        assert!(
+            body.contains("### Invented")
+                && body.contains("not found in the discussion: \"never said\"")
+        );
+        assert!(body.contains("### Unquoted") && body.contains("no supporting quote"));
     }
 }

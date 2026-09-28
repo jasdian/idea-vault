@@ -29,8 +29,20 @@ fn seed(vault: &std::path::Path, state: IdeaState, with_turns: bool) {
     )
     .unwrap();
     if with_turns {
-        store::append_turn(vault, "vaulted", "user", "dig in").unwrap();
-        store::append_turn(vault, "vaulted", "assistant", "dug").unwrap();
+        store::append_turn(
+            vault,
+            "vaulted",
+            "user",
+            "dig in: the core bet is that agencies pay monthly",
+        )
+        .unwrap();
+        store::append_turn(
+            vault,
+            "vaulted",
+            "assistant",
+            "dug — the risk is churn after the first quarter",
+        )
+        .unwrap();
     }
 }
 
@@ -44,7 +56,7 @@ async fn store_consolidates_extracts_and_lands_stored() {
         &["llama3.2"],
         vec![
             tokens("Consolidated best statement."),
-            tokens("FACT: Durable point\nThe conclusion body.\n"),
+            tokens("FACT: Durable point\nQUOTE: \"agencies pay monthly\"\nThe conclusion body.\n"),
         ],
     )
     .await;
@@ -95,7 +107,7 @@ async fn store_double_submit_runs_one_pipeline_and_disables_the_button() {
                 tokens: vec!["Consolidated once.".into()],
                 delay_ms: 300,
             },
-            tokens("FACT: Only point\nBody.\n"),
+            tokens("FACT: Only point\nQUOTE: \"the core bet is\"\nBody.\n"),
         ],
     )
     .await;
@@ -196,7 +208,7 @@ async fn reopen_flips_state_loads_context_and_returns_discussion() {
         &["llama3.2"],
         vec![
             tokens("Stored statement."),
-            tokens("FACT: Key point\nRemember this.\n"),
+            tokens("FACT: Key point\nQUOTE: \"churn after the first quarter\"\nRemember this.\n"),
         ],
     )
     .await;
@@ -235,9 +247,12 @@ async fn restore_from_reopened_merges_memory_without_turn_guard() {
         &["llama3.2"],
         vec![
             tokens("v1."),
-            tokens("FACT: First point\nBody one.\n"),
+            tokens("FACT: First point\nQUOTE: \"the core bet is\"\nBody one.\n"),
             tokens("v2 after reopen."),
-            tokens("FACT: First point\nDuplicate.\nFACT: Second point\nBody two.\n"),
+            tokens(
+                "FACT: First point\nQUOTE: \"the core bet is\"\nDuplicate.\n\
+                 FACT: Second point\nQUOTE: \"churn after the first quarter\"\nBody two.\n",
+            ),
         ],
     )
     .await;
@@ -282,4 +297,37 @@ async fn reopen_guards_non_stored_states_and_missing() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = post_form(state, "/idea/ghost/reopen", "").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_quarantined_fact_is_announced_and_searchable_but_not_remembered() {
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("Stored with a doubt."),
+            tokens(
+                "FACT: Real point\nQUOTE: \"agencies pay monthly\"\nGrounded.\n\
+                 FACT: Made up\nQUOTE: \"we raise a zebracorn round\"\nZebracorn claim.\n",
+            ),
+        ],
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, true);
+
+    let (status, _) = post_form(state.clone(), "/idea/vaulted/store", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let body = poll_until(state.clone(), "/idea/vaulted/pending", "quarantined-facts").await;
+    assert!(
+        body.contains("1 extracted fact had no supporting quote"),
+        "{body}"
+    );
+
+    let facts = store::read_memory_facts(&vault_dir, "vaulted").unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].frontmatter.slug, "real-point");
+
+    // The quarantine artifact is truth on disk, so reindex makes it findable.
+    let (_, hits) = support::web::get(state, "/search?q=zebracorn").await;
+    assert!(hits.contains("vaulted"), "quarantine not indexed:\n{hits}");
 }

@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::artifact::ArtifactKind;
 use crate::domain::idea::IdeaState;
+use crate::domain::skill::{OutputContract, SkillRole, SkillStage};
 use crate::domain::DomainError;
 
 /// Cap on `IdeaFrontmatter::tags`, shared by every writer (the owner-edit form and store-time
@@ -71,6 +72,31 @@ pub struct MemoryFactFrontmatter {
     pub created: DateTime<Utc>,
     #[serde(default)]
     pub links: Vec<String>,
+}
+
+/// The structured header of a skill file — a built-in `src/concepts/skills/<name>.md` or an
+/// owner-authored `vault/.skills/<name>.md` (docs/adr/0022). The body is the prompt template.
+/// Unknown keys are rejected so a typo in an owner's file surfaces on the skill book instead of
+/// silently falling back to a default.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillFrontmatter {
+    pub name: String,
+    pub description: String,
+    pub stage: SkillStage,
+    #[serde(default)]
+    pub role: SkillRole,
+    #[serde(default)]
+    pub contract: OutputContract,
+    /// When to reach for this move — shown on the chip and in the skill book.
+    #[serde(default)]
+    pub use_when: String,
+    /// When not to — the skill book's "wrong turn" column.
+    #[serde(default)]
+    pub avoid_when: String,
+    /// Registered and resolvable, but never offered as a move chip (the `extract-*` lenses).
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Split a `---\n<yaml>\n---\n<body>` fenced document into its raw YAML block and body text.
@@ -181,6 +207,14 @@ pub fn parse_artifact(input: &str) -> Result<(ArtifactFrontmatter, String), Doma
 pub fn emit_artifact(fm: &ArtifactFrontmatter, body: &str) -> Result<String, DomainError> {
     let yaml = serde_norway::to_string(fm)?;
     Ok(emit_fence(&yaml, body))
+}
+
+/// Parse a skill file into its frontmatter and prompt template. Trailing whitespace is trimmed
+/// from the template so a file's final newline never leaks into the prompt.
+pub fn parse_skill(input: &str) -> Result<(SkillFrontmatter, String), DomainError> {
+    let (yaml, body) = split_fence(input)?;
+    let fm: SkillFrontmatter = serde_norway::from_str(yaml)?;
+    Ok((fm, body.trim_end().to_string()))
 }
 
 /// Parse a `memory/<fact-slug>.md` document into its frontmatter and body.
@@ -430,5 +464,48 @@ body\n";
         assert_eq!(fm, fm2);
         assert_eq!(body, body2);
         assert_eq!(fm2.sources, vec!["rf-docs", "td-notes"]);
+    }
+
+    #[test]
+    fn parse_skill_reads_every_field_and_trims_the_template() {
+        let input = "---\n\
+name: steelman\n\
+description: Make the strongest case.\n\
+stage: steelman\n\
+role: advocate\n\
+contract: ranked_list\n\
+use_when: Before any attack.\n\
+avoid_when: Never.\n\
+hidden: true\n\
+---\n\
+\n\
+Argue for it.\n\
+{context}\n\n";
+        let (fm, body) = parse_skill(input).unwrap();
+        assert_eq!(fm.name, "steelman");
+        assert_eq!(fm.stage, SkillStage::Steelman);
+        assert_eq!(fm.role, SkillRole::Advocate);
+        assert_eq!(fm.contract, OutputContract::RankedList);
+        assert_eq!(fm.use_when, "Before any attack.");
+        assert_eq!(fm.avoid_when, "Never.");
+        assert!(fm.hidden);
+        assert_eq!(body, "Argue for it.\n{context}");
+    }
+
+    #[test]
+    fn parse_skill_defaults_optional_fields() {
+        let input = "---\nname: x\ndescription: d\nstage: attack\n---\n\n{context}\n";
+        let (fm, _) = parse_skill(input).unwrap();
+        assert_eq!(fm.role, SkillRole::Critic);
+        assert_eq!(fm.contract, OutputContract::Free);
+        assert!(fm.use_when.is_empty() && fm.avoid_when.is_empty() && !fm.hidden);
+    }
+
+    #[test]
+    fn parse_skill_rejects_unknown_keys_and_unknown_stages() {
+        let typo = "---\nname: x\ndescription: d\nstage: attack\nuse-when: oops\n---\n{context}";
+        assert!(matches!(parse_skill(typo), Err(DomainError::Yaml(_))));
+        let stage = "---\nname: x\ndescription: d\nstage: dance\n---\n{context}";
+        assert!(matches!(parse_skill(stage), Err(DomainError::Yaml(_))));
     }
 }

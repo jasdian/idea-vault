@@ -12,6 +12,7 @@
 //! - [`backend`] — the [`LlmBackend`] enum that lets callers target either backend behind one API.
 //! - [`stream`] — adapts a backend's token stream into SSE events (D11).
 //! - [`budget`] — assembles a prompt within the model's context limit (D21).
+//! - [`contract`] — pure output-shape checks + repair for skill answers (docs/adr/0023).
 //! - [`web`] — keyless web-search + page-fetch tool leaves (ADR-0017), executed by the router's
 //!   bounded Ollama tool loop; claude-code uses its own WebSearch/WebFetch instead.
 //! - [`sources`] — deterministic read-only tool leaves (`source_list`/`source_grep`/`source_read`)
@@ -26,6 +27,7 @@
 pub mod backend;
 pub mod budget;
 pub mod claude_code;
+pub mod contract;
 pub mod mcp;
 pub mod ollama;
 pub mod sources;

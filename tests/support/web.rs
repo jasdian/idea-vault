@@ -39,12 +39,14 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         ollama_ctx_tokens: 0,
         claude_ctx_tokens: 0,
         web_access: false,
+        audit_findings: true,
         mcp_config_path: tmp.path().join(".mcp-servers.json"),
         // Beside the vault (like the MCP registry), NOT inside it: the registry writes its
         // override + .gitignore next to its config file, and tests assert on-disk vault truth.
         sources_config_path: tmp.path().join(".sources.json"),
         sources_dir: None,
         sources_applied: None,
+        skills_dir: vault_dir.join(".skills"),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");
@@ -58,6 +60,10 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         None,
     ));
 
+    let skills = Arc::new(idea_vault::concepts::skills::LiveSkills::load(
+        config.skills_dir.clone(),
+    ));
+
     std::mem::forget(tmp);
 
     (
@@ -66,7 +72,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
             db: Arc::new(Mutex::new(conn)),
             llm: idea_vault::ai::LlmBackend::ollama_only(ollama).with_mcp(mcp.clone()),
             ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
-            skills: Arc::new(idea_vault::concepts::skills::SkillRegistry::builtin()),
+            skills,
             jobs: idea_vault::web::jobs::new_registry(),
             queues: idea_vault::web::jobs::new_queues(),
             mcp,

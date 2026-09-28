@@ -59,27 +59,31 @@ fn turn_role_and_content(turn: &str) -> (String, String) {
 
 /// Turn the stored role heading into a display label + whether it's the owner's turn:
 /// `user` → `you`; `assistant` → `foil`; `assistant (skill: premortem)` → `foil · premortem`;
-/// `assistant (swarm)` → `foil · swarm`; `assistant (workflow: x)` → `foil · workflow x`.
+/// `assistant (swarm)` → `foil · swarm`; `assistant (swarm: a, b)` → `foil · swarm (a, b)`;
+/// `assistant (workflow: x)` → `foil · workflow x`. The grammar is parsed once, by
+/// `store::parse_turn_heading`.
 fn turn_label(role: &str) -> (String, bool) {
-    if role == "user" {
-        return ("you".to_string(), true);
-    }
-    if let Some(rest) = role.strip_prefix("assistant") {
-        let rest = rest.trim();
-        if rest.is_empty() {
-            return ("foil".to_string(), false);
-        }
-        let inner = rest.trim_start_matches('(').trim_end_matches(')');
-        let lens = match inner.split_once(':') {
-            // Keep the "workflow" kind in the label — a deterministic workflow run and a skill
-            // of the same name must stay distinguishable in the transcript.
-            Some((kind, v)) if kind.trim() == "workflow" => format!("workflow {}", v.trim()),
-            Some((_, v)) => v.trim().to_string(),
-            None => inner.to_string(),
-        };
-        return (format!("foil · {lens}"), false);
-    }
-    (role.to_string(), false)
+    use store::TurnSource;
+    let label = match store::parse_turn_heading(role) {
+        TurnSource::User => return ("you".to_string(), true),
+        TurnSource::Chat => "foil".to_string(),
+        TurnSource::Skill(name) => format!("foil · {name}"),
+        TurnSource::Swarm(angles) if angles.is_empty() => "foil · swarm".to_string(),
+        TurnSource::Swarm(angles) => format!("foil · swarm ({})", angles.join(", ")),
+        // Keep the "workflow" kind in the label — a deterministic workflow run and a skill of
+        // the same name must stay distinguishable in the transcript.
+        TurnSource::Workflow(name) => format!("foil · workflow {name}"),
+        TurnSource::Knowledge => "foil · knowledge".to_string(),
+        TurnSource::Other(role) => match role.strip_prefix("assistant") {
+            Some(rest) => {
+                let inner = rest.trim().trim_start_matches('(').trim_end_matches(')');
+                let lens = inner.split_once(':').map_or(inner, |(_, v)| v).trim();
+                format!("foil · {lens}")
+            }
+            None => role,
+        },
+    };
+    (label, false)
 }
 
 /// Render each turn of a transcript to HTML. Shared by the discussion pane (which has the text)
@@ -179,6 +183,19 @@ fn notice_block(message: &str) -> String {
         r#"<div class="foil-notice" role="status">{}</div>"#,
         esc(message)
     )
+}
+
+/// What goes under the stored panel for a job slot: a store's one-shot notice (or failure), a
+/// follow-up poll while the store job is still wrapping up, or nothing.
+fn stored_outcome(slug: &str, pending: crate::web::jobs::Pending) -> String {
+    use crate::web::jobs::Pending;
+    match pending {
+        Pending::Notice(msg) | Pending::Failed(msg) => notice_block(&msg),
+        Pending::Running { .. } => format!(
+            r##"<div class="queue-poll" aria-hidden="true" hx-get="/idea/{slug}/pending" hx-trigger="load delay:800ms" hx-target="#discussion" hx-swap="innerHTML"></div>"##
+        ),
+        Pending::Idle => String::new(),
+    }
 }
 
 /// A bare re-arm poller: keeps the `/pending` poll alive across a beat when the idea is idle (or
@@ -284,18 +301,29 @@ fn backend_note(backend: crate::config::LlmBackendKind) -> String {
     format!("Runs serially {via}, so it takes a while.")
 }
 
+/// A skill's chip tooltip: what the move does, then when to reach for it (the skill book's
+/// "use when" column), so the menu of moves carries its own routing guidance.
+pub(crate) fn skill_tooltip(skill: &crate::concepts::skills::Skill) -> String {
+    if skill.use_when.trim().is_empty() {
+        skill.description.clone()
+    } else {
+        format!("{} — use when: {}", skill.description, skill.use_when)
+    }
+}
+
 /// Render the `#idea-actions` block (`_actions.html`) — the state-dependent moves/swarm/store
 /// controls. Shared by the full-page `_discussion.html` render (`oob = false`) and the
 /// out-of-band fragment appended to transcript responses (`oob = true`).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_actions(
     slug: &str,
-    skill_names: Vec<String>,
+    skills: &crate::concepts::skills::SkillRegistry,
+    conversation: &str,
     can_store: bool,
     busy: bool,
     backend: crate::config::LlmBackendKind,
     oob: bool,
 ) -> Result<String, WebError> {
+    use crate::domain::SkillStage;
     use askama::Template as _;
     // The workflow chips come straight off the static built-in registry — no caller threading.
     let workflows = crate::concepts::workflows::builtin_workflows()
@@ -305,23 +333,57 @@ pub(crate) fn render_actions(
             description: w.description.to_string(),
         })
         .collect();
-    // The swarm angle picker (#1): every move except the `build-prompt` capstone is a candidate
-    // attack angle; the canonical `swarm::DEFAULT_ANGLES` start checked. Derived from the moves
-    // already threaded in, so no new call-site plumbing — an empty selection falls back to the
-    // same defaults server-side (memory::run_swarm), keeping the picker purely additive.
-    let swarm_angles = skill_names
-        .iter()
-        .filter(|n| n.as_str() != "build-prompt")
-        .map(|n| crate::web::templates::SwarmAngle {
-            name: n.clone(),
-            on: crate::concepts::swarm::DEFAULT_ANGLES.contains(&n.as_str()),
+    // Move chips: every visible skill except capstones, which get their own button row.
+    let moves = skills
+        .visible()
+        .filter(|s| s.stage != SkillStage::Capstone)
+        .map(|s| crate::web::templates::MoveChip {
+            name: s.name.clone(),
+            title: skill_tooltip(s),
         })
         .collect();
+    // The swarm angle picker (#1): the same moves are the candidate attack angles; the canonical
+    // `swarm::DEFAULT_ANGLES` start checked. An empty selection falls back to the same defaults
+    // server-side (memory::run_swarm), keeping the picker purely additive.
+    let swarm_angles: Vec<crate::web::templates::SwarmAngle> = skills
+        .visible()
+        .filter(|s| s.stage != SkillStage::Capstone)
+        .map(|s| crate::web::templates::SwarmAngle {
+            name: s.name.clone(),
+            on: crate::concepts::swarm::DEFAULT_ANGLES.contains(&s.name.as_str()),
+        })
+        .collect();
+    let default_angles = swarm_angles.iter().filter(|a| a.on).count();
+    // The spine strip + next move + wrong-turn warnings, derived from the transcript (ADR-0022).
+    let coverage = crate::concepts::coverage::coverage(conversation, skills);
+    let (next_skill, next_why, next_is_swarm) = match coverage.next {
+        Some(crate::concepts::coverage::NextMove::Skill { name, why }) => (name, why, false),
+        Some(crate::concepts::coverage::NextMove::Swarm) => (
+            String::new(),
+            "converge what the moves found into one position".to_string(),
+            true,
+        ),
+        None => (String::new(), String::new(), false),
+    };
     crate::web::templates::Actions {
         slug: slug.to_string(),
         can_store,
-        skill_names,
+        moves,
         swarm_angles,
+        default_angles,
+        spine: coverage
+            .stages
+            .iter()
+            .map(|(stage, done)| crate::web::templates::SpineStage {
+                name: stage.as_str(),
+                done: *done,
+            })
+            .collect(),
+        next_skill,
+        next_why,
+        next_is_swarm,
+        warnings: coverage.warnings,
+        untested: coverage.untested,
         busy,
         workflows,
         backend_note: backend_note(backend),
@@ -378,11 +440,12 @@ pub(crate) fn respond_with_transcript(
         idea.frontmatter.state,
         IdeaState::InDiscussion | IdeaState::Reopened
     );
-    let skill_names = state.skills.move_names();
+    let skills = state.skills.snapshot();
     html.push_str(&state_badge_oob(idea.frontmatter.state));
     html.push_str(&render_actions(
         slug,
-        skill_names,
+        &skills,
+        &conversation,
         can_store,
         busy,
         llm.settings().backend,
@@ -474,6 +537,14 @@ pub(crate) fn respond_discussion_or_stored(
         }
         .render()
         .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
+        // A store that quarantined facts or read a truncated discussion leaves a one-shot notice
+        // in the job slot; it belongs under the stored panel, since this swap replaces the
+        // transcript that would otherwise show it. Truth lands a beat before the job clears its
+        // slot, so a still-Running slot earns one more poll rather than a lost notice.
+        html.push_str(&stored_outcome(
+            slug,
+            crate::web::jobs::peek(&state.jobs, slug),
+        ));
         html.push_str(&state_badge_oob(IdeaState::Stored));
         // The store job rewrote idea.md's body to the consolidated writeup — refresh the page's
         // top .statement out-of-band, since the stored panel deliberately no longer carries it
@@ -665,7 +736,7 @@ pub(crate) fn build_discussion(
     backend: crate::config::LlmBackendKind,
     model: &str,
     can_store: bool,
-    skill_names: Vec<String>,
+    skills: &crate::concepts::skills::SkillRegistry,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -687,7 +758,7 @@ pub(crate) fn build_discussion(
         budget_bytes,
         tools_bytes,
     )?;
-    let actions_html = render_actions(slug, skill_names, can_store, busy, backend, false)?;
+    let actions_html = render_actions(slug, skills, conversation, can_store, busy, backend, false)?;
     let queue_html = render_queue_panel(slug, queued_items, false)?;
 
     Ok(crate::web::templates::Discussion {
@@ -712,7 +783,7 @@ fn render_panel(
     health: crate::ai::AiHealth,
     backend: crate::config::LlmBackendKind,
     model: &str,
-    skill_names: Vec<String>,
+    skills: &crate::concepts::skills::SkillRegistry,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -721,11 +792,12 @@ fn render_panel(
     use askama::Template as _;
 
     if idea.frontmatter.state == IdeaState::Stored {
-        return crate::web::templates::Stored {
+        let stored = crate::web::templates::Stored {
             slug: idea.frontmatter.slug.clone(),
         }
         .render()
-        .map_err(|e| WebError::Internal(format!("template render: {e}")));
+        .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
+        return Ok(stored + &stored_outcome(&idea.frontmatter.slug, pending));
     }
 
     // Store is legal only from InDiscussion/Reopened (D9) — a Draft page must not offer it.
@@ -738,7 +810,7 @@ fn render_panel(
         backend,
         model,
         can_store,
-        skill_names,
+        skills,
         pending,
         queued_items,
         budget_bytes,
@@ -765,7 +837,7 @@ pub async fn idea_page(
     // most that per page view.
     let health = state.llm.probe().await;
 
-    let skill_names = state.skills.move_names();
+    let skills = state.skills.snapshot();
     // If a background job is running for this idea, this resumes its indicator on the fresh page.
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     // Scoped for the meter (ADR-0021) — the probe above stays on the shared instance (health is
@@ -781,7 +853,7 @@ pub async fn idea_page(
         health,
         llm.settings().backend,
         &llm.model(),
-        skill_names,
+        &skills,
         pending,
         queued_items,
         llm.context_budget().max_bytes,
