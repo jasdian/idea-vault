@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS backlinks (
     target_idea_id INTEGER REFERENCES ideas(id)
 );
 
+CREATE TABLE IF NOT EXISTS fact_links (
+    id            INTEGER PRIMARY KEY,
+    src_idea_id   INTEGER NOT NULL REFERENCES ideas(id),
+    src_fact_id   INTEGER REFERENCES memory_facts(id),
+    dst_idea_slug TEXT NOT NULL,
+    dst_fact_slug TEXT NOT NULL,
+    dst_fact_id   INTEGER REFERENCES memory_facts(id),
+    explicit      INTEGER NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
     idea_id UNINDEXED,
     kind    UNINDEXED,

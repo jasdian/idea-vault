@@ -128,8 +128,8 @@ fn kind_weight(kind: &str) -> f64 {
 }
 
 /// Backlink prior — the "google" part (PageRank-flavored, not literally PageRank: a simple
-/// inbound-`[[slug]]`-count prior is plenty at this corpus size). `log(1 + inbound)` so the first
-/// few backlinks matter far more than the hundredth (diminishing returns, not a popularity
+/// inbound-`[[slug]]`-count prior, where a cross-idea `[[slug#fact]]` also counts, is plenty
+/// at this corpus size). `log(1 + inbound)` so the first few backlinks matter far more than the hundredth (diminishing returns, not a popularity
 /// contest), and the raw count is capped before the log so one absurdly-linked idea can't buy an
 /// unbounded boost. The coefficient is deliberately small relative to a `kind_weight` swing (0.85
 /// to 4.0, a ~4.7x range): at the cap, the maximum possible boost is
@@ -310,6 +310,41 @@ pub fn links_from(conn: &Connection, slug: &str) -> Result<Vec<LinkTarget>, Inde
         Ok(LinkTarget {
             target_slug: row.get(0)?,
             resolved: row.get(1)?,
+        })
+    })?;
+    rows.collect::<Result<_, _>>().map_err(Into::into)
+}
+
+/// One outbound fact-level link from an idea (D23): a `[[idea#fact]]` reference, or a bare
+/// `[[fact]]` / frontmatter `links:` entry inside a memory fact that named a sibling fact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactLink {
+    /// The linking memory fact's slug; `None` when the link sits in the idea.md body.
+    pub src_fact: Option<String>,
+    pub dst_idea: String,
+    pub dst_fact: String,
+    /// Whether the last reindex found `dst_fact` inside `dst_idea` (`false` = dangling/forward
+    /// `[[idea#fact]]`; bare links are only kept when they resolve).
+    pub resolved: bool,
+}
+
+/// Outbound fact links of the idea `slug` — from its body and its memory facts — in reindex
+/// insertion order, with resolution status.
+pub fn fact_links_from(conn: &Connection, slug: &str) -> Result<Vec<FactLink>, IndexError> {
+    let mut stmt = conn.prepare(
+        "SELECT sf.slug, fl.dst_idea_slug, fl.dst_fact_slug, fl.dst_fact_id IS NOT NULL
+         FROM fact_links fl
+         JOIN ideas s ON s.id = fl.src_idea_id
+         LEFT JOIN memory_facts sf ON sf.id = fl.src_fact_id
+         WHERE s.slug = ?1
+         ORDER BY fl.id",
+    )?;
+    let rows = stmt.query_map([slug], |row| {
+        Ok(FactLink {
+            src_fact: row.get(0)?,
+            dst_idea: row.get(1)?,
+            dst_fact: row.get(2)?,
+            resolved: row.get(3)?,
         })
     })?;
     rows.collect::<Result<_, _>>().map_err(Into::into)

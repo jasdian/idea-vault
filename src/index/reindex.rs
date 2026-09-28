@@ -36,6 +36,9 @@ pub struct ReindexCounts {
     pub ideas: usize,
     pub facts: usize,
     pub links: usize,
+    /// Rows left in `fact_links` after resolution: every `[[idea#fact]]` (resolved or dangling)
+    /// plus the bare in-fact links that resolved to a sibling fact.
+    pub fact_links: usize,
 }
 
 /// Canonical TEXT form for timestamps in the index: RFC3339, whole seconds, `Z` suffix — the
@@ -111,9 +114,15 @@ pub fn check_drift(conn: &Connection, vault_dir: &Path) -> Result<bool, IndexErr
 /// intact either way); skipped ideas simply have no rows until fixed.
 ///
 /// `[[slug]]` link sources (D23): the idea body, each memory-fact body, and each fact's
-/// frontmatter `links:` list — deduplicated per source idea, first-occurrence order. The
-/// conversation transcript is indexed for search but deliberately not mined for backlinks
+/// frontmatter `links:` list — deduplicated per source idea, first-occurrence order. An
+/// `[[idea#fact]]` reference in the idea body or a fact body also counts as a link to `idea`.
+/// The conversation transcript is indexed for search but deliberately not mined for backlinks
 /// (chat text mentioning an idea is not a curated cross-reference).
+///
+/// `fact_links` rows: every `[[idea#fact]]` in the idea body (no source fact) or a fact body is
+/// kept, resolved or dangling; a bare `[[x]]` / frontmatter `links:` entry inside a fact is a
+/// candidate link to the sibling fact `x` and is kept only if that fact exists — otherwise it was
+/// an idea link, which `backlinks` already records.
 ///
 /// Guarded against the empty-vault wipe (ADR-0019): if the walk finds no ideas while the index
 /// still holds some, this refuses with [`IndexError::RefusingEmptyRebuild`] rather than committing
@@ -162,6 +171,7 @@ fn reindex_inner(
     // 2. Clear every derived table — full rebuild semantics.
     tx.execute_batch(
         "DELETE FROM idea_tags;
+         DELETE FROM fact_links;
          DELETE FROM memory_facts;
          DELETE FROM backlinks;
          DELETE FROM search_fts;
@@ -264,8 +274,14 @@ fn reindex_inner(
             )?;
         }
 
-        // 7 + 9. Memory facts and `[[slug]]` link targets.
+        // 7 + 9. Memory facts, `[[slug]]` link targets, and fact-link candidates.
         let mut targets: Vec<String> = links::extract_links(&idea.body);
+        for fact_ref in links::extract_fact_refs(&idea.body) {
+            insert_fact_link(&tx, idea_id, None, &fact_ref.idea, &fact_ref.fact, true)?;
+            if fact_ref.idea != entry.slug {
+                targets.push(fact_ref.idea);
+            }
+        }
         let facts = match store::read_memory_facts(vault_dir, &entry.slug) {
             Ok(facts) => facts,
             Err(e) => {
@@ -285,6 +301,7 @@ fn reindex_inner(
                     ts(&fact.frontmatter.created)
                 ],
             )?;
+            let fact_id = tx.last_insert_rowid();
             counts.facts += 1;
 
             // Fact bodies are owner-authored durable truth (the `memory_facts` table and
@@ -298,15 +315,41 @@ fn reindex_inner(
                 ],
             )?;
 
+            // (dst idea, dst fact, explicit) in first-occurrence order; a repeat of the same
+            // destination keeps one row, explicit if any occurrence was.
+            let mut fact_dsts: Vec<(String, String, bool)> = Vec::new();
+            let mut add_dst = |dst_idea: &str, dst_fact: &str, explicit: bool| {
+                if dst_idea == entry.slug && dst_fact == fact.frontmatter.slug {
+                    return;
+                }
+                match fact_dsts
+                    .iter_mut()
+                    .find(|(i, f, _)| i == dst_idea && f == dst_fact)
+                {
+                    Some(existing) => existing.2 |= explicit,
+                    None => fact_dsts.push((dst_idea.to_string(), dst_fact.to_string(), explicit)),
+                }
+            };
             for target in links::extract_links(&fact.body) {
+                add_dst(&entry.slug, &target, false);
                 targets.push(target);
+            }
+            for fact_ref in links::extract_fact_refs(&fact.body) {
+                add_dst(&fact_ref.idea, &fact_ref.fact, true);
+                if fact_ref.idea != entry.slug {
+                    targets.push(fact_ref.idea);
+                }
             }
             for target in &fact.frontmatter.links {
                 // Frontmatter `links:` entries are author-provided strings — hold them to the
                 // same canonical-slug bar as `[[slug]]` tokens.
                 if domain_slug::is_valid(target) {
+                    add_dst(&entry.slug, target, false);
                     targets.push(target.clone());
                 }
+            }
+            for (dst_idea, dst_fact, explicit) in &fact_dsts {
+                insert_fact_link(&tx, idea_id, Some(fact_id), dst_idea, dst_fact, *explicit)?;
             }
         }
 
@@ -333,8 +376,39 @@ fn reindex_inner(
         [],
     )?;
 
+    // 11. Resolve fact links by (idea slug, fact slug), again leaving NULL for dangling refs.
+    // Unresolved bare candidates are dropped: they named an idea, not a sibling fact.
+    tx.execute_batch(
+        "UPDATE fact_links
+         SET dst_fact_id = (SELECT f.id FROM memory_facts f
+                            JOIN ideas i ON i.id = f.idea_id
+                            WHERE i.slug = fact_links.dst_idea_slug
+                              AND f.slug = fact_links.dst_fact_slug
+                            ORDER BY f.id LIMIT 1);
+         DELETE FROM fact_links WHERE explicit = 0 AND dst_fact_id IS NULL;",
+    )?;
+    counts.fact_links = tx.query_row("SELECT COUNT(*) FROM fact_links", [], |row| row.get(0))?;
+
     tx.commit()?;
     Ok(counts)
+}
+
+// Inserts one unresolved `fact_links` row; step 11 of `reindex` resolves or drops it.
+fn insert_fact_link(
+    tx: &rusqlite::Transaction<'_>,
+    src_idea_id: i64,
+    src_fact_id: Option<i64>,
+    dst_idea: &str,
+    dst_fact: &str,
+    explicit: bool,
+) -> Result<(), IndexError> {
+    tx.execute(
+        "INSERT INTO fact_links
+             (src_idea_id, src_fact_id, dst_idea_slug, dst_fact_slug, dst_fact_id, explicit)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        params![src_idea_id, src_fact_id, dst_idea, dst_fact, explicit],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -343,6 +417,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{Idea, IdeaFrontmatter, IdeaState, MemoryFact, MemoryFactFrontmatter};
+    use crate::index::queries::{self, FactLink};
     use crate::index::schema;
 
     fn dt(h: u32) -> DateTime<Utc> {
@@ -392,8 +467,10 @@ mod tests {
     }
 
     /// Fixture per docs/10-testing-strategy.md: mixed states, tags, facts, `[[slug]]` links
-    /// including dangling and forward references, plus a conversation transcript and a
-    /// knowledge-extraction artifact (docs/adr/0015).
+    /// including dangling and forward references, fact links (a resolving cross-idea
+    /// `[[beta#durable-one]]` in alpha's body, a dangling `[[beta#no-such-fact]]` in an alpha fact,
+    /// and a bare same-idea `[[durable-one]]` in a beta fact), plus a conversation transcript and
+    /// a knowledge-extraction artifact (docs/adr/0015).
     fn build_fixture_vault(vault: &Path) {
         store::write_idea(
             vault,
@@ -402,7 +479,19 @@ mod tests {
                 "Alpha",
                 IdeaState::InDiscussion,
                 &["markets", "risk"],
-                "Alpha builds on [[beta]] but also on [[ghost-idea]] (not created yet).\n",
+                "Alpha builds on [[beta]] but also on [[ghost-idea]] (not created yet).\n\
+                 Its core rests on [[beta#durable-one]].\n",
+            ),
+        )
+        .unwrap();
+        store::write_memory_fact(
+            vault,
+            "alpha",
+            &fact(
+                "alpha-note",
+                "Alpha note",
+                &[],
+                "Parked question waiting on [[beta#no-such-fact]].\n",
             ),
         )
         .unwrap();
@@ -427,6 +516,17 @@ mod tests {
                 "Durable one",
                 &["alpha", "Not A Slug"],
                 "Conclusion referencing [[alpha]] again and [[gamma]].\n",
+            ),
+        )
+        .unwrap();
+        store::write_memory_fact(
+            vault,
+            "beta",
+            &fact(
+                "durable-two",
+                "Durable two",
+                &["durable-one"],
+                "Refines [[durable-one]].\n",
             ),
         )
         .unwrap();
@@ -486,6 +586,16 @@ mod tests {
              JOIN ideas s ON s.id = b.source_idea_id
              LEFT JOIN ideas t ON t.id = b.target_idea_id
              ORDER BY s.slug, b.target_slug",
+        );
+        push_query(
+            "SELECT 'fact_link', s.slug, sf.slug, fl.dst_idea_slug, fl.dst_fact_slug,
+                    di.slug || '#' || df.slug, CAST(fl.explicit AS TEXT)
+             FROM fact_links fl
+             JOIN ideas s ON s.id = fl.src_idea_id
+             LEFT JOIN memory_facts sf ON sf.id = fl.src_fact_id
+             LEFT JOIN memory_facts df ON df.id = fl.dst_fact_id
+             LEFT JOIN ideas di ON di.id = df.idea_id
+             ORDER BY s.slug, sf.slug, fl.dst_idea_slug, fl.dst_fact_slug, fl.explicit",
         );
         push_query(
             "SELECT 'fts', i.slug, s.kind, s.content FROM search_fts s
@@ -593,14 +703,18 @@ mod tests {
         let mut conn = mem_conn();
 
         let counts = reindex(&mut conn, tmp.path()).unwrap();
-        // alpha: [[beta]], [[ghost-idea]] — beta: [[alpha]] (body + fact, deduped) + [[gamma]]
-        // (fact body); the fact's frontmatter "Not A Slug" entry is rejected.
+        // alpha: [[beta]] (body, plus both [[beta#..]] refs, deduped), [[ghost-idea]] — beta:
+        // [[alpha]] (body + fact, deduped) + [[gamma]] (fact body) + the bare fact slug
+        // [[durable-one]] (dangling at idea level); the frontmatter "Not A Slug" is rejected.
+        // Fact links: alpha body -> beta#durable-one, alpha-note -> beta#no-such-fact,
+        // durable-two -> durable-one.
         assert_eq!(
             counts,
             ReindexCounts {
                 ideas: 2,
-                facts: 1,
-                links: 4
+                facts: 3,
+                links: 5,
+                fact_links: 3,
             }
         );
 
@@ -625,8 +739,273 @@ mod tests {
                 ("alpha".into(), "beta".into(), Some("beta".into())),
                 ("alpha".into(), "ghost-idea".into(), None),
                 ("beta".into(), "alpha".into(), Some("alpha".into())),
+                ("beta".into(), "durable-one".into(), None),
                 ("beta".into(), "gamma".into(), None),
             ]
+        );
+    }
+
+    #[test]
+    fn fact_links_resolve_cross_idea_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        // Resolved means dst_fact_id names the fact with that slug inside that other idea.
+        let resolved_cross_idea: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fact_links fl
+                 JOIN ideas s ON s.id = fl.src_idea_id
+                 JOIN memory_facts df ON df.id = fl.dst_fact_id
+                 JOIN ideas di ON di.id = df.idea_id
+                 WHERE di.slug = fl.dst_idea_slug AND df.slug = fl.dst_fact_slug
+                   AND di.slug <> s.slug",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved_cross_idea, 1);
+
+        assert_eq!(
+            queries::fact_links_from(&conn, "alpha").unwrap(),
+            vec![
+                FactLink {
+                    src_fact: None,
+                    dst_idea: "beta".into(),
+                    dst_fact: "durable-one".into(),
+                    resolved: true,
+                },
+                FactLink {
+                    src_fact: Some("alpha-note".into()),
+                    dst_idea: "beta".into(),
+                    dst_fact: "no-such-fact".into(),
+                    resolved: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn fact_links_bare_same_idea_link_resolves_and_idea_links_are_not_duplicated() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        // durable-two names durable-one twice (body + frontmatter) — one row, resolved, bare.
+        assert_eq!(
+            queries::fact_links_from(&conn, "beta").unwrap(),
+            vec![FactLink {
+                src_fact: Some("durable-two".into()),
+                dst_idea: "beta".into(),
+                dst_fact: "durable-one".into(),
+                resolved: true,
+            }]
+        );
+        let explicit: i64 = conn
+            .query_row(
+                "SELECT explicit FROM fact_links WHERE dst_fact_slug = 'durable-one'
+                   AND src_fact_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(explicit, 0);
+
+        // durable-one's bare [[alpha]]/[[gamma]] are idea links: they stay in backlinks only.
+        let idea_targets_as_facts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fact_links WHERE dst_fact_slug IN ('alpha', 'gamma')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idea_targets_as_facts, 0);
+        let beta_backlinks: Vec<String> = queries::links_from(&conn, "beta")
+            .unwrap()
+            .into_iter()
+            .map(|l| l.target_slug)
+            .collect();
+        assert_eq!(beta_backlinks, ["alpha", "gamma", "durable-one"]);
+    }
+
+    #[test]
+    fn fact_links_dangling_explicit_ref_stays_unresolved_and_resolves_later() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let dangling = |conn: &Connection| -> Option<bool> {
+            queries::fact_links_from(conn, "alpha")
+                .unwrap()
+                .into_iter()
+                .find(|l| l.dst_fact == "no-such-fact")
+                .map(|l| l.resolved)
+        };
+        assert_eq!(dangling(&conn), Some(false), "kept, unresolved");
+
+        store::write_memory_fact(
+            tmp.path(),
+            "beta",
+            &fact("no-such-fact", "Now it exists", &[], "Created later.\n"),
+        )
+        .unwrap();
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(
+            dangling(&conn),
+            Some(true),
+            "re-resolved on the next reindex"
+        );
+    }
+
+    fn backlink_rows(conn: &Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.slug, b.target_slug FROM backlinks b
+                 JOIN ideas s ON s.id = b.source_idea_id ORDER BY s.slug, b.target_slug",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn resolved_fact_link_rows(conn: &Connection) -> Vec<(String, String, String, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT si.slug, COALESCE(sf.slug, ''), di.slug, df.slug FROM fact_links fl
+                 JOIN ideas si ON si.id = fl.src_idea_id
+                 LEFT JOIN memory_facts sf ON sf.id = fl.src_fact_id
+                 JOIN memory_facts df ON df.id = fl.dst_fact_id
+                 JOIN ideas di ON di.id = df.idea_id
+                 ORDER BY 1, 2, 3, 4",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn owned(rows: &[(&str, &str, &str, &str)]) -> Vec<(String, String, String, String)> {
+        rows.iter()
+            .map(|(a, b, c, d)| (a.to_string(), b.to_string(), c.to_string(), d.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn fact_links_ref_into_own_idea_adds_no_self_backlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        store::write_idea(
+            tmp.path(),
+            &idea(
+                "solo",
+                "Solo",
+                IdeaState::Draft,
+                &[],
+                "See [[solo#core]].\n",
+            ),
+        )
+        .unwrap();
+        store::write_memory_fact(
+            tmp.path(),
+            "solo",
+            &fact("core", "Core", &[], "Restated in [[solo#core-two]].\n"),
+        )
+        .unwrap();
+        store::write_memory_fact(tmp.path(), "solo", &fact("core-two", "Two", &[], "x\n")).unwrap();
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(backlink_rows(&conn), Vec::<(String, String)>::new());
+        assert_eq!(
+            resolved_fact_link_rows(&conn),
+            owned(&[
+                ("solo", "", "solo", "core"),
+                ("solo", "core", "solo", "core-two")
+            ])
+        );
+    }
+
+    #[test]
+    fn fact_links_fact_linking_to_itself_is_not_a_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        store::write_idea(
+            tmp.path(),
+            &idea("solo", "Solo", IdeaState::Draft, &[], "body\n"),
+        )
+        .unwrap();
+        store::write_memory_fact(
+            tmp.path(),
+            "solo",
+            &fact(
+                "loop",
+                "Loop",
+                &["loop"],
+                "Echo [[loop]] and [[solo#loop]].\n",
+            ),
+        )
+        .unwrap();
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(resolved_fact_link_rows(&conn), owned(&[]));
+    }
+
+    #[test]
+    fn fact_links_fact_ref_alone_adds_an_inbound_idea_backlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        store::write_idea(
+            tmp.path(),
+            &idea("src", "Src", IdeaState::Draft, &[], "Only [[dst#claim]].\n"),
+        )
+        .unwrap();
+        store::write_idea(
+            tmp.path(),
+            &idea("dst", "Dst", IdeaState::Draft, &[], "body\n"),
+        )
+        .unwrap();
+        store::write_memory_fact(tmp.path(), "dst", &fact("claim", "Claim", &[], "x\n")).unwrap();
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            backlink_rows(&conn),
+            vec![("src".to_string(), "dst".to_string())]
+        );
+        assert_eq!(
+            queries::backlinks_for(&conn, "dst").unwrap(),
+            vec!["src".to_string()]
+        );
+    }
+
+    #[test]
+    fn fact_links_bare_link_resolves_within_its_own_idea_when_slugs_collide() {
+        let tmp = tempfile::tempdir().unwrap();
+        for slug in ["one", "two"] {
+            store::write_idea(
+                tmp.path(),
+                &idea(slug, slug, IdeaState::Draft, &[], "body\n"),
+            )
+            .unwrap();
+            store::write_memory_fact(tmp.path(), slug, &fact("shared", "Shared", &[], "x\n"))
+                .unwrap();
+        }
+        store::write_memory_fact(
+            tmp.path(),
+            "two",
+            &fact("pointer", "Pointer", &[], "Builds on [[shared]].\n"),
+        )
+        .unwrap();
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            resolved_fact_link_rows(&conn),
+            owned(&[("two", "pointer", "two", "shared")])
         );
     }
 
@@ -798,7 +1177,7 @@ mod tests {
         assert_eq!(kind, "artifact");
 
         // The artifact's [[beta]] link is NOT a backlink (alpha's only targets come from its
-        // own body: beta + ghost-idea).
+        // body and facts: beta + ghost-idea).
         let alpha_links: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM backlinks b JOIN ideas s ON s.id = b.source_idea_id
