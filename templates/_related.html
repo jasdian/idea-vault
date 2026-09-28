@@ -1,6 +1,8 @@
 <aside class="related" id="related">
   <h2>Related ideas</h2>
-  {% if entries.is_empty() && drift.is_empty() %}
+  {% if unavailable %}
+  <p class="related__empty">Related ideas are unavailable right now.</p>
+  {% else if entries.is_empty() && drift.is_empty() %}
   <p class="related__empty">No related ideas yet — links and shared tags create them.</p>
   {% endif %}
   {% if !entries.is_empty() %}
@@ -12,6 +14,9 @@
       <span class="related__hop">{{ entry.hop_label }}</span>
       {% if !entry.reasons.is_empty() %}
       <div class="related__reasons">{% for reason in entry.reasons %}<span>{{ reason }}</span>{% endfor %}</div>
+      {% endif %}
+      {% if !entry.fact_titles.is_empty() %}
+      <div class="related__facts">{% for title in entry.fact_titles %}<span>{{ title }}</span>{% endfor %}</div>
       {% endif %}
     </li>
     {% endfor %}

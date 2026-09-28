@@ -13,11 +13,40 @@ pub const MIN_RELATED_SCORE: f64 = 0.1;
 /// At most this many related ideas are shown.
 pub const MAX_RELATED: usize = 5;
 
+/// One related idea, capped and redacted for display: the single shape both the model-facing
+/// block and the idea-page panel render from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedEntryView {
+    /// The related idea's slug.
+    pub slug: String,
+    /// Its title, capped for display.
+    pub title: String,
+    /// Edge distance from the queried idea: 1 or 2.
+    pub hops: u32,
+    /// `"linked"` for a direct neighbour, `"via <mid>"` for a two-hop one, else `"N hops"`.
+    pub hop_label: String,
+    /// Every reason for a direct neighbour, exactly one for a two-hop idea.
+    pub reasons: Vec<String>,
+    /// The most recent memory fact titles, at most two.
+    pub fact_titles: Vec<String>,
+}
+
+/// The related ideas of `slug` that qualify for display: at most [`MAX_RELATED`], none scoring
+/// below [`MIN_RELATED_SCORE`], in [`crate::index::queries::related_ideas`] order. The queried
+/// idea is never an entry and its slug is redacted from every reason. Deterministic for a given
+/// index.
+pub fn related_entries(conn: &Connection, slug: &str) -> Result<Vec<RelatedEntryView>, IndexError> {
+    queries::related_ideas(conn, slug, MAX_RELATED)?
+        .into_iter()
+        .filter(|idea| idea.score >= MIN_RELATED_SCORE)
+        .map(|idea| entry_view(conn, slug, idea))
+        .collect()
+}
+
 /// Render the related-ideas block for `slug` in at most `max_bytes` bytes, trailing blank line
 /// included, or `""` when nothing qualifies or not even the header plus one entry fits.
 ///
-/// Entries follow [`crate::index::queries::related_ideas`] order and are added whole; the queried
-/// idea is never an entry. Deterministic for a given index.
+/// Entries follow [`related_entries`] order and are added whole.
 pub fn related_block(
     conn: &Connection,
     slug: &str,
@@ -28,11 +57,8 @@ pub fn related_block(
     }
     let mut block = String::from(HEADER);
     let mut entries = 0;
-    for idea in queries::related_ideas(conn, slug, MAX_RELATED)? {
-        if idea.score < MIN_RELATED_SCORE {
-            continue;
-        }
-        let entry = render_entry(conn, slug, &idea)?;
+    for view in related_entries(conn, slug)? {
+        let entry = render_entry(&view);
         if block.len() + entry.len() + 1 > max_bytes {
             break;
         }
@@ -55,27 +81,54 @@ const MAX_TITLE_CHARS: usize = 80;
 const MAX_FACT_TITLES: usize = 2;
 const OWN_IDEA: &str = "this idea";
 
-fn render_entry(conn: &Connection, own: &str, idea: &RelatedIdea) -> Result<String, IndexError> {
-    let reasons: Vec<String> = if idea.hops == 1 {
-        idea.reasons.iter().map(|r| redact_own(r, own)).collect()
+fn entry_view(
+    conn: &Connection,
+    own: &str,
+    idea: RelatedIdea,
+) -> Result<RelatedEntryView, IndexError> {
+    let hop_label = if idea.hops == 1 {
+        "linked".to_string()
     } else {
-        idea.reasons.iter().take(1).cloned().collect()
+        idea.reasons
+            .first()
+            .and_then(|r| r.strip_prefix("via "))
+            .and_then(|r| r.split_whitespace().next())
+            .map(|mid| format!("via {mid}"))
+            .unwrap_or_else(|| format!("{} hops", idea.hops))
     };
-    let reasons: Vec<String> = reasons
+    let shown = if idea.hops == 1 {
+        idea.reasons.len()
+    } else {
+        1
+    };
+    let reasons = idea
+        .reasons
         .iter()
-        .map(|r| truncate_chars(r, MAX_REASON_CHARS))
+        .take(shown)
+        .map(|r| truncate_chars(&redact_own(r, own), MAX_REASON_CHARS))
         .collect();
+    let fact_titles = recent_fact_titles(conn, &idea.slug)?;
+    Ok(RelatedEntryView {
+        title: truncate_chars(&idea.title, MAX_TITLE_CHARS),
+        slug: idea.slug,
+        hops: idea.hops,
+        hop_label,
+        reasons,
+        fact_titles,
+    })
+}
+
+fn render_entry(view: &RelatedEntryView) -> String {
     let mut entry = format!(
         "- {} (`{}`): {}\n",
-        truncate_chars(&idea.title, MAX_TITLE_CHARS),
-        idea.slug,
-        reasons.join("; ")
+        view.title,
+        view.slug,
+        view.reasons.join("; ")
     );
-    let facts = recent_fact_titles(conn, &idea.slug)?;
-    if !facts.is_empty() {
-        entry.push_str(&format!("  Facts: {}\n", facts.join("; ")));
+    if !view.fact_titles.is_empty() {
+        entry.push_str(&format!("  Facts: {}\n", view.fact_titles.join("; ")));
     }
-    Ok(entry)
+    entry
 }
 
 fn recent_fact_titles(conn: &Connection, slug: &str) -> Result<Vec<String>, IndexError> {
@@ -95,10 +148,10 @@ fn recent_fact_titles(conn: &Connection, slug: &str) -> Result<Vec<String>, Inde
         .collect())
 }
 
-/// Replace the queried idea's own slug inside `link:` reasons with a neutral phrase, so a block
-/// or panel about an idea never names that idea. Tag details are tag names, not idea
-/// references, and are left alone.
-pub fn redact_own(reason: &str, own: &str) -> String {
+// Replace the queried idea's own slug inside `link:` reasons with a neutral phrase, so a block
+// or panel about an idea never names that idea. Tag details are tag names, not idea
+// references, and are left alone.
+fn redact_own(reason: &str, own: &str) -> String {
     reason
         .split("; ")
         .map(|part| match part.strip_prefix("link: ") {
@@ -131,8 +184,8 @@ fn replace_slug_token(text: &str, slug: &str) -> String {
     out
 }
 
-/// Collapse whitespace and cut to `max_chars` characters, ending with an ellipsis when cut.
-pub fn truncate_chars(text: &str, max_chars: usize) -> String {
+// Collapse whitespace and cut to `max_chars` characters, ending with an ellipsis when cut.
+fn truncate_chars(text: &str, max_chars: usize) -> String {
     let text = one_line(text);
     match text.char_indices().nth(max_chars) {
         Some((cut, _)) => format!("{}…", &text[..cut]),
@@ -382,5 +435,73 @@ mod tests {
         assert!(reason.ends_with('…'), "got {reason:?}");
         assert_eq!(reason.chars().count(), MAX_REASON_CHARS + 1);
         assert!(!reason.contains("alpha"));
+    }
+
+    #[test]
+    fn related_entries_match_the_block_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(
+            tmp.path(),
+            "alpha",
+            "Own",
+            &["shared"],
+            "Links [[beta]] and [[delta]].\n",
+        );
+        write_idea(
+            tmp.path(),
+            "beta",
+            "Beta",
+            &["shared"],
+            "Links [[gamma]].\n",
+        );
+        write_idea(tmp.path(), "delta", "Delta", &[], "Links [[gamma]].\n");
+        write_idea(tmp.path(), "gamma", "Gamma", &[], "Leaf.\n");
+        write_fact(tmp.path(), "beta", "first", "First fact", 1);
+        write_fact(tmp.path(), "beta", "second", "Second fact", 2);
+        write_fact(tmp.path(), "beta", "third", "Third fact", 3);
+        let conn = index(tmp.path());
+
+        let entries = related_entries(&conn, "alpha").unwrap();
+        let block = related_block(&conn, "alpha", 100_000).unwrap();
+
+        let rendered: Vec<(String, String)> = block
+            .lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| {
+                let (head, reasons) = l.split_once("`): ").unwrap();
+                let slug = head.rsplit_once("(`").unwrap().1.to_string();
+                (slug, reasons.to_string())
+            })
+            .collect();
+        let expected: Vec<(String, String)> = entries
+            .iter()
+            .map(|e| (e.slug.clone(), e.reasons.join("; ")))
+            .collect();
+        assert_eq!(rendered, expected);
+        assert!(entries.len() >= 3, "fixture reaches several ideas");
+
+        let gamma = entries.iter().find(|e| e.slug == "gamma").unwrap();
+        assert_eq!(gamma.reasons.len(), 1);
+        assert!(gamma.hop_label.starts_with("via "), "got {gamma:?}");
+        let beta = entries.iter().find(|e| e.slug == "beta").unwrap();
+        assert_eq!(beta.hop_label, "linked");
+        assert_eq!(beta.fact_titles, vec!["Third fact", "Second fact"]);
+        assert!(entries.iter().all(|e| e.slug != "alpha"));
+    }
+
+    #[test]
+    fn related_block_renders_exact_bytes_for_direct_and_two_hop_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), "alpha", "Alpha", &[], "Links [[beta]].\n");
+        write_idea(tmp.path(), "beta", "Beta", &[], "Links [[gamma]].\n");
+        write_idea(tmp.path(), "gamma", "Gamma", &[], "Leaf.\n");
+        write_fact(tmp.path(), "beta", "older", "Older fact", 9);
+        write_fact(tmp.path(), "beta", "newer", "Newer fact", 11);
+        let conn = index(tmp.path());
+
+        let expected = format!(
+            "{HEADER}- Beta (`beta`): link: this idea → beta\n  Facts: Newer fact; Older fact\n- Gamma (`gamma`): via beta (link: beta → gamma)\n\n"
+        );
+        assert_eq!(related_block(&conn, "alpha", 4_096).unwrap(), expected);
     }
 }

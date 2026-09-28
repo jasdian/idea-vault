@@ -900,91 +900,58 @@ fn build_related_panel(
     slug: &str,
     own_tags: &[String],
 ) -> crate::web::templates::RelatedPanel {
-    use crate::memory::related::{redact_own, truncate_chars, MAX_RELATED, MIN_RELATED_SCORE};
-    use crate::web::templates::{RelatedEntry, RelatedPanel, TagDriftNote};
+    use crate::web::templates::{RelatedPanel, TagDriftNote};
 
-    let empty = RelatedPanel {
+    let unavailable = RelatedPanel {
         entries: Vec::new(),
         drift: Vec::new(),
+        unavailable: true,
     };
-    let conn = match state.db.lock() {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(slug = %slug, error = %e, "db mutex poisoned; empty related panel");
-            return empty;
-        }
-    };
-    let related = crate::index::queries::related_ideas(&conn, slug, MAX_RELATED);
-    let drift = crate::index::queries::tag_near_duplicates(&conn);
-    drop(conn);
-    let (related, drift) = match (related, drift) {
-        (Ok(related), Ok(drift)) => (related, drift),
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::warn!(slug = %slug, error = %e, "related panel skipped");
-            return empty;
-        }
-    };
-
-    let entries = related
-        .into_iter()
-        .filter(|idea| idea.score >= MIN_RELATED_SCORE)
-        .map(|idea| {
-            let hop_label = if idea.hops == 1 {
-                "linked".to_string()
-            } else {
-                idea.reasons
-                    .first()
-                    .and_then(|r| r.strip_prefix("via "))
-                    .and_then(|r| r.split_whitespace().next())
-                    .map(|mid| format!("via {mid}"))
-                    .unwrap_or_else(|| format!("{} hops", idea.hops))
-            };
-            let reasons = idea
-                .reasons
-                .iter()
-                .take(3)
-                .map(|r| {
-                    let r = if idea.hops == 1 {
-                        redact_own(r, slug)
-                    } else {
-                        r.clone()
-                    };
-                    truncate_chars(&r, 120)
-                })
-                .collect();
-            RelatedEntry {
-                slug: idea.slug,
-                title: idea.title,
-                hop_label,
-                reasons,
+    let (entries, carriers) = {
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!(slug = %slug, error = %e, "db mutex poisoned; related panel unavailable");
+                return unavailable;
             }
-        })
-        .collect();
+        };
+        let entries = crate::memory::related::related_entries(&conn, slug);
+        let carriers = crate::index::queries::tag_carriers(&conn);
+        match (entries, carriers) {
+            (Ok(entries), Ok(carriers)) => (entries, carriers),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!(slug = %slug, error = %e, "related panel unavailable");
+                return unavailable;
+            }
+        }
+    };
 
-    let drift = drift
+    let drift = crate::index::queries::own_tag_near_duplicates(own_tags, &carriers)
         .into_iter()
-        .filter_map(|pair| {
+        .map(|pair| {
             let (own_tag, other_tag, others) = if own_tags.contains(&pair.a) {
                 (pair.a, pair.b, pair.b_ideas)
-            } else if own_tags.contains(&pair.b) {
-                (pair.b, pair.a, pair.a_ideas)
             } else {
-                return None;
+                (pair.b, pair.a, pair.a_ideas)
             };
             let carriers: Vec<String> = others.into_iter().filter(|s| s != slug).collect();
             let mut shown = carriers[..carriers.len().min(MAX_DRIFT_CARRIERS)].join(", ");
             if carriers.len() > MAX_DRIFT_CARRIERS {
                 shown.push_str(&format!(" +{} more", carriers.len() - MAX_DRIFT_CARRIERS));
             }
-            Some(TagDriftNote {
+            TagDriftNote {
                 own_tag,
                 other_tag,
                 carriers: shown,
-            })
+            }
         })
         .take(MAX_DRIFT_NOTES)
         .collect();
-    RelatedPanel { entries, drift }
+    RelatedPanel {
+        entries,
+        drift,
+        unavailable: false,
+    }
 }
 
 const MAX_DRIFT_CARRIERS: usize = 5;

@@ -242,6 +242,8 @@ a.tagchip:hover { border-color: var(--accent); }
 .related__hop { font-family: var(--mono); font-size: .72rem; color: var(--faint); margin-left: .4rem; }
 .related__reasons { font-family: var(--mono); font-size: .75rem; color: var(--muted); }
 .related__reasons span + span::before { content: " · "; color: var(--faint); }
+.related__facts { font-size: .8rem; color: var(--muted); }
+.related__facts span + span::before { content: " · "; color: var(--faint); }
 .related__empty, .related__note { font-family: var(--serif); font-size: .85rem; font-style: italic; color: var(--muted); margin: 0; }
 .related__drift li { border-top: 1px solid var(--rule); padding-top: .3rem; }
 

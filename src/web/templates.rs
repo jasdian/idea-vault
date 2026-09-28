@@ -56,14 +56,6 @@ pub struct IdeaPage {
     pub related_html: String,
 }
 
-/// One related idea in the idea page's related panel.
-pub struct RelatedEntry {
-    pub slug: String,
-    pub title: String,
-    pub hop_label: String,
-    pub reasons: Vec<String>,
-}
-
 /// A tag this idea carries that looks like drift of another tag in the vault.
 pub struct TagDriftNote {
     pub own_tag: String,
@@ -75,8 +67,10 @@ pub struct TagDriftNote {
 #[derive(Template)]
 #[template(path = "_related.html")]
 pub struct RelatedPanel {
-    pub entries: Vec<RelatedEntry>,
+    pub entries: Vec<crate::memory::related::RelatedEntryView>,
     pub drift: Vec<TagDriftNote>,
+    /// The index lookup failed or its lock was poisoned: say so instead of claiming there are none.
+    pub unavailable: bool,
 }
 
 /// Partial: the idea-page title block (`templates/_idea_title.html`) — the `h1` plus its inline

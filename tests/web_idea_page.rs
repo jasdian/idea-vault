@@ -386,3 +386,65 @@ async fn idea_page_related_panel_caps_drift_carriers() {
     assert!(!panel.contains("carrier-5"), "got {panel}");
     assert!(panel.contains("+3 more"), "got {panel}");
 }
+
+#[tokio::test]
+async fn idea_page_related_panel_shows_fact_titles() {
+    let (state, vault) = test_state();
+    seed_idea(&vault, "alpha", "Alpha Idea", &[], "Builds on [[beta]].\n");
+    seed_idea(&vault, "beta", "Beta Idea", &[], "Standalone.\n");
+    for (slug, title, hour) in [
+        ("oldest", "Oldest orchard fact", 1),
+        ("middle", "Middle orchard fact", 2),
+        ("newest", "Newest orchard fact", 3),
+    ] {
+        store::write_memory_fact(
+            &vault,
+            "beta",
+            &MemoryFact {
+                frontmatter: MemoryFactFrontmatter {
+                    slug: slug.into(),
+                    title: title.into(),
+                    tags: vec![],
+                    created: Utc.with_ymd_and_hms(2026, 7, 7, hour, 0, 0).unwrap(),
+                    links: vec![],
+                },
+                body: "Fact body.\n".into(),
+            },
+        )
+        .unwrap();
+    }
+    reindex_state(&state, &vault);
+
+    let (status, body) = get(state, "/idea/alpha").await;
+    assert_eq!(status, StatusCode::OK);
+    let panel = related_section(&body);
+    assert!(panel.contains("Newest orchard fact"), "got {panel}");
+    assert!(panel.contains("Middle orchard fact"), "got {panel}");
+    assert!(!panel.contains("Oldest orchard fact"), "got {panel}");
+}
+
+#[tokio::test]
+async fn idea_page_related_panel_unavailable_on_poisoned_lock() {
+    let (state, vault) = test_state();
+    seed_idea(&vault, "alpha", "Alpha Idea", &[], "Builds on [[beta]].\n");
+    seed_idea(&vault, "beta", "Beta Idea", &[], "Standalone.\n");
+    reindex_state(&state, &vault);
+
+    let db = state.db.clone();
+    let joined = std::thread::spawn(move || {
+        let _guard = db.lock().unwrap();
+        panic!("poison the index mutex");
+    })
+    .join();
+    assert!(joined.is_err());
+    assert!(state.db.is_poisoned());
+
+    let (status, body) = get(state, "/idea/alpha").await;
+    assert_eq!(status, StatusCode::OK);
+    let panel = related_section(&body);
+    assert!(
+        panel.contains("Related ideas are unavailable right now."),
+        "got {panel}"
+    );
+    assert!(!panel.contains("No related ideas yet"), "got {panel}");
+}

@@ -1029,6 +1029,63 @@ mod tests {
     }
 
     #[test]
+    fn own_tag_near_duplicates_equal_the_filtered_full_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            tmp.path(),
+            &[
+                ("a", &["system-design", "rust"], "Statement."),
+                ("b", &["systems-design"], "Statement."),
+                ("c", &["strategy"], "Statement."),
+                ("d", &["strategies"], "Statement."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let own: Vec<String> = vec!["system-design".into(), "rust".into()];
+        let expected: Vec<queries::TagNearDuplicate> = queries::tag_near_duplicates(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|p| own.contains(&p.a) || own.contains(&p.b))
+            .collect();
+        let carriers = queries::tag_carriers(&conn).unwrap();
+        let actual = queries::own_tag_near_duplicates(&own, &carriers);
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 1);
+        assert_eq!(
+            (actual[0].a.as_str(), actual[0].b.as_str()),
+            ("system-design", "systems-design")
+        );
+        assert!(actual
+            .iter()
+            .all(|p| p.a != "strategy" && p.b != "strategy"));
+        assert!(queries::tag_near_duplicates(&conn)
+            .unwrap()
+            .iter()
+            .any(|p| p.a == "strategies" && p.b == "strategy"));
+    }
+
+    #[test]
+    fn own_tag_near_duplicates_lists_a_pair_of_two_own_tags_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tagged_ideas(
+            tmp.path(),
+            &[("a", &["system-design", "systems-design"], "Statement.")],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let own: Vec<String> = vec!["system-design".into(), "systems-design".into()];
+        let carriers = queries::tag_carriers(&conn).unwrap();
+        assert_eq!(
+            queries::own_tag_near_duplicates(&own, &carriers),
+            queries::tag_near_duplicates(&conn).unwrap()
+        );
+    }
+
+    #[test]
     fn shared_tag_edge_and_link_sum_in_related_ideas() {
         let tmp = tempfile::tempdir().unwrap();
         write_tagged_ideas(

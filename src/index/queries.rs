@@ -442,10 +442,10 @@ pub struct TagNearDuplicate {
     pub b_ideas: Vec<String>,
 }
 
-/// Every pair of tag names in `tags` that look like drift of one another, ordered by `(a, b)` with
-/// `a < b`. A read-side report only: the edges derivation matches tag names exactly and never
-/// merges these.
-pub fn tag_near_duplicates(conn: &Connection) -> Result<Vec<TagNearDuplicate>, IndexError> {
+/// Every tag name with the slugs of the ideas carrying it (sorted), ordered by name. A tag no idea
+/// carries appears with an empty list. One flat read, so a caller can drop the connection before
+/// comparing names.
+pub fn tag_carriers(conn: &Connection) -> Result<Vec<(String, Vec<String>)>, IndexError> {
     let mut stmt = conn.prepare(
         "SELECT t.name, i.slug FROM tags t
          LEFT JOIN idea_tags it ON it.tag_id = t.id
@@ -464,6 +464,14 @@ pub fn tag_near_duplicates(conn: &Connection) -> Result<Vec<TagNearDuplicate>, I
             ideas.push(slug);
         }
     }
+    Ok(carriers)
+}
+
+/// Every pair of tag names in `tags` that look like drift of one another, ordered by `(a, b)` with
+/// `a < b`. A read-side report only: the edges derivation matches tag names exactly and never
+/// merges these.
+pub fn tag_near_duplicates(conn: &Connection) -> Result<Vec<TagNearDuplicate>, IndexError> {
+    let carriers = tag_carriers(conn)?;
     let mut report = Vec::new();
     for (i, (a, a_ideas)) in carriers.iter().enumerate() {
         for (b, b_ideas) in &carriers[i + 1..] {
@@ -478,6 +486,36 @@ pub fn tag_near_duplicates(conn: &Connection) -> Result<Vec<TagNearDuplicate>, I
         }
     }
     Ok(report)
+}
+
+/// The pairs [`tag_near_duplicates`] would report that involve at least one of `own_tags`, in the
+/// same `(a, b)` order, computed from `carriers` (as returned by [`tag_carriers`], sorted by name)
+/// by comparing only the own tags against every tag: O(own * tags) rather than O(tags^2).
+pub fn own_tag_near_duplicates(
+    own_tags: &[String],
+    carriers: &[(String, Vec<String>)],
+) -> Vec<TagNearDuplicate> {
+    let mut pairs: std::collections::BTreeMap<(usize, usize), TagNearDuplicate> =
+        std::collections::BTreeMap::new();
+    for (own_idx, (own, _)) in carriers
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| own_tags.contains(name))
+    {
+        for (other_idx, (other, _)) in carriers.iter().enumerate() {
+            if other_idx == own_idx || !crate::domain::tag::near_duplicate(own, other) {
+                continue;
+            }
+            let (lo, hi) = (own_idx.min(other_idx), own_idx.max(other_idx));
+            pairs.entry((lo, hi)).or_insert_with(|| TagNearDuplicate {
+                a: carriers[lo].0.clone(),
+                b: carriers[hi].0.clone(),
+                a_ideas: carriers[lo].1.clone(),
+                b_ideas: carriers[hi].1.clone(),
+            });
+        }
+    }
+    pairs.into_values().collect()
 }
 
 /// Every idea carrying `tag` in its frontmatter, most-recently-updated first.
