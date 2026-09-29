@@ -155,13 +155,29 @@ pub struct WorkflowOutcome {
     pub audit: Option<AuditReport>,
 }
 
-/// The findings as a carried-forward block for a chained step, capped at half the stage budget.
-/// Audited lines carry the verdict and the auditor's clipped reason; when the audit failed the
+/// How a build-plan planner routes audited findings into plan sections; carried ahead of the
+/// findings block, never model text.
+const BUILD_PLAN_PREAMBLE: &str = "## How to use the findings\n\
+Route each finding by its verdict:\n\
+- CONFIRMED key decisions go to Settled only with a verbatim owner quote found in the discussion below; without one they are not Settled.\n\
+- UNCERTAIN findings, and open-question findings, go to Open questions (Q#).\n\
+- Risks and assumptions go to Verify first (P# with a read-only check) or to Kill criteria (K#).\n\
+- REFUTED findings are never Settled and never a task; they are listed as do-not-build-on.\n\
+- CONFIRMED next actions become task candidates, keeping any paths or commands they named.\n\
+- A finding with no verdict label is unchecked: treat it as UNCERTAIN.";
+
+/// Divisor of the stage budget the planner's findings block may take, so quotable discussion
+/// survives.
+const PLANNER_FINDINGS_DIVISOR: usize = 3;
+
+/// The findings as a carried-forward block for a chained step, capped at `1/divisor` of the stage
+/// budget. Audited lines carry the verdict and the auditor's clipped reason; when the audit failed the
 /// verdicts are defaults, so the findings are listed unlabelled and the block says so.
 fn findings_block(
     findings: &[Finding],
     report: Option<&AuditReport>,
     budget: ContextBudget,
+    divisor: usize,
 ) -> String {
     let allowance = audit::finding_allowance(budget, findings.len());
     let audited = report.filter(|r| !r.failed);
@@ -198,7 +214,7 @@ fn findings_block(
         Some(p) => format!("{heading}{p}\n\n{lines}"),
         None => format!("{heading}{lines}"),
     };
-    audit::clip(&block, budget.max_bytes / 2)
+    audit::clip(&block, budget.max_bytes / divisor)
 }
 
 /// The findings a run's fan-outs produced, judged, deduped and capped — or
@@ -222,15 +238,28 @@ fn stage_context(
     carried: &[String],
     related: RelatedProvider<'_>,
 ) -> Result<String, ConceptError> {
+    stage_context_flagged(vault_dir, idea_slug, budget, carried, related).map(|(text, _)| text)
+}
+
+/// [`stage_context`] plus, when hydration clipped the idea, memory or discussion, the byte budget
+/// the hydrated part was held to.
+fn stage_context_flagged(
+    vault_dir: &Path,
+    idea_slug: &str,
+    budget: ContextBudget,
+    carried: &[String],
+    related: RelatedProvider<'_>,
+) -> Result<(String, Option<usize>), ConceptError> {
     let carried = carried.join("\n\n");
     let rest = ContextBudget::new(budget.max_bytes.saturating_sub(carried.len()));
     let base = hydrate_context(vault_dir, idea_slug, rest)?;
     let block = related(related_allowance(rest, base.text.len()));
-    Ok(if carried.is_empty() {
+    let text = if carried.is_empty() {
         format!("{block}{}", base.text)
     } else {
         format!("{block}{carried}\n\n{}", base.text)
-    })
+    };
+    Ok((text, base.truncated.then_some(rest.max_bytes)))
 }
 
 /// Run a named workflow against `idea_slug` (D19/D32): execute its stages in order, holding no
@@ -308,24 +337,36 @@ pub async fn run_workflow(
             Stage::Chain(step) => {
                 let label = step.skill.unwrap_or(step.role.as_str());
                 note(label);
+                let contract = step
+                    .skill
+                    .and_then(|s| registry.get(s))
+                    .map_or(OutputContract::Free, |s| s.contract);
+                let planner = contract == OutputContract::BuildPlan;
                 // A chained step after a fan-out reads its findings (with verdicts, if audited).
                 if !step_results.is_empty() {
                     if findings.is_none() {
                         findings = gather(&step_results).ok();
                     }
                     if let Some(f) = &findings {
-                        carried.push(findings_block(f, report.as_ref(), budget));
+                        let divisor = if planner {
+                            carried.push(BUILD_PLAN_PREAMBLE.to_string());
+                            PLANNER_FINDINGS_DIVISOR
+                        } else {
+                            2
+                        };
+                        carried.push(findings_block(f, report.as_ref(), budget, divisor));
                     }
+                }
+                let (mut context, clipped) =
+                    stage_context_flagged(vault_dir, idea_slug, budget, &carried, related)?;
+                if let (true, Some(bytes)) = (planner, clipped) {
+                    context = format!("(discussion truncated to {} KB)\n\n{context}", bytes / 1024);
                 }
                 let task = AgentTask {
                     role: step.role,
                     skill: step.skill.map(str::to_string),
-                    context: stage_context(vault_dir, idea_slug, budget, &carried, related)?,
+                    context,
                 };
-                let contract = step
-                    .skill
-                    .and_then(|s| registry.get(s))
-                    .map_or(OutputContract::Free, |s| s.contract);
                 let prompt = build_prompt(registry, &task)?;
                 let llm = ollama.for_role(step.role.as_str());
                 match ask_on_contract(&llm, ai_semaphore, prompt, contract, label, progress).await {

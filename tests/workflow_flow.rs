@@ -676,3 +676,73 @@ async fn an_empty_interrogate_fan_out_fails_in_synthesize_without_an_audit_call(
         );
     }
 }
+
+const PREAMBLE_HEADING: &str = "## How to use the findings";
+
+#[tokio::test]
+async fn ready_to_build_preamble_maps_verdicts_to_sections() {
+    let chain = chained_step_body(
+        "F1: CONFIRMED — ok\nF2: UNCERTAIN — maybe\nF3: REFUTED — no\nF4: CONFIRMED — ok",
+    )
+    .await;
+    let pre = chain.find(PREAMBLE_HEADING).expect("preamble present");
+    let findings = chain.find("## Prior stage: findings").expect("findings");
+    assert!(pre < findings, "the preamble precedes the findings");
+    for needle in [
+        "verbatim owner quote",
+        "Open questions (Q#)",
+        "Verify first (P# with a read-only check)",
+        "Kill criteria (K#)",
+        "never Settled and never a task",
+        "keeping any paths or commands",
+    ] {
+        assert!(chain.contains(needle), "missing {needle}");
+    }
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_caps_findings_at_a_third() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mut scripts: Vec<ChatScript> = (0..5)
+        .map(|i| tokens(&format!("- finding{i} {}", "long text ".repeat(60))))
+        .collect();
+    scripts.push(tokens(PLAN));
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let budget = 3000;
+    run_at(&mock, tmp.path(), "ready-to-build", false, budget).await;
+    let chain = mock.chat_bodies().pop().unwrap().replace("\\n", "\n");
+    let block = findings_block_of(&chain);
+    assert!(
+        block.len() <= budget / 3 + '…'.len_utf8(),
+        "block is {} bytes",
+        block.len()
+    );
+    assert!(block.ends_with('…'), "{block}");
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_absent_for_other_workflows() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("STEELMAN: best version"),
+            tokens("1. fails because a"),
+            tokens("- disproof b"),
+            tokens("argument c"),
+            tokens("converged"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "steelman-then-attack", false).await;
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 5);
+    assert!(bodies.iter().all(|b| !b.contains(PREAMBLE_HEADING)));
+    let planner = chained_step_body("F1: CONFIRMED — ok").await;
+    assert!(
+        planner.contains(PREAMBLE_HEADING),
+        "control: the planner has it"
+    );
+}
