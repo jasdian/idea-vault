@@ -1,16 +1,18 @@
 //! G1 quote and provenance, G2 open collision, G3 audit carry-through.
 
 use super::{AuditView, AuditedFinding, GateInputs, GateReport};
-use crate::concepts::audit::Label;
+use crate::concepts::audit::{clip, Label};
 use crate::concepts::build_plan::plan::{BuildPlan, Item, Provenance};
-use crate::domain::evidence::{content_overlap, normalize_for_match};
+use crate::domain::evidence::{content_overlap, normalize_for_match, MIN_QUOTE_WORDS};
 
 const COLLIDE_RATIO: f64 = 0.6;
 const COLLIDE_SHARED: usize = 3;
 
 const MARKER_WINDOW: usize = 300;
 
-const MAX_FINDING_CHARS: usize = 300;
+const MAX_FINDING_BYTES: usize = 300;
+
+const MAX_REASON_QUOTE_BYTES: usize = 160;
 
 const OPEN_QUESTIONS_LENS: &str = "extract-open-questions";
 
@@ -38,12 +40,12 @@ const OPEN_MARKERS: &[&str] = &[
 /// audit's open findings into Open questions.
 pub fn apply(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateReport) {
     let model_open: Vec<Item> = plan.open.clone();
-    let audit = inputs.audit.filter(|a| !a.failed);
+    let audit = inputs.audit;
     let grounded = quote_and_provenance(plan, inputs, report);
-    let grounded = audit_verdicts(plan, audit, grounded, report);
+    let grounded = audit_verdicts(plan, audit.filter(|a| !a.failed), grounded, report);
     open_collision(plan, inputs, audit, &model_open, grounded, report);
-    if let Some(view) = inputs.audit {
-        carry_open_findings(plan, audit, report);
+    if let Some(view) = audit {
+        carry_open_findings(plan, view, report);
         if view.failed {
             report.note("audit unavailable — verdicts are defaults, treat as unaudited");
         }
@@ -88,6 +90,14 @@ fn quote_and_provenance(
     let mut kept = Vec::new();
     for mut item in std::mem::take(&mut plan.settled) {
         let quote = item.field("quote").map(strip_quotes).map(str::to_string);
+        let too_short = quote.as_deref().is_some_and(|q| {
+            normalize_for_match(q)
+                .split_whitespace()
+                .filter(|w| w.chars().any(char::is_alphanumeric))
+                .count()
+                < MIN_QUOTE_WORDS
+        });
+        let quote = quote.filter(|_| !too_short);
         let ground = quote.as_deref().unwrap_or(item.text.as_str()).to_string();
         match inputs.evidence.locate(&ground) {
             Some((turn, start)) => {
@@ -99,19 +109,27 @@ fn quote_and_provenance(
                 };
                 kept.push(Grounded { item, at });
             }
-            None => match quote {
-                Some(q) => {
-                    plan.quarantine(
-                        item,
-                        format!("claimed quote is not in the discussion: \"{q}\""),
-                    );
-                    report.count("quarantined");
+            None => {
+                item.provenance = None;
+                match quote {
+                    Some(q) => {
+                        let q = clip(&q, MAX_REASON_QUOTE_BYTES);
+                        plan.quarantine(
+                            item,
+                            format!("claimed quote is not in the discussion: \"{q}\""),
+                        );
+                        report.count("quarantined");
+                    }
+                    None if too_short => {
+                        plan.open_from(item, "opened: quote too short to prove anything");
+                        report.count("opened");
+                    }
+                    None => {
+                        plan.open_from(item, "opened: no supporting quote");
+                        report.count("opened");
+                    }
                 }
-                None => {
-                    plan.open_from(item, "opened: no supporting quote");
-                    report.count("opened");
-                }
-            },
+            }
         }
     }
     kept
@@ -152,12 +170,16 @@ fn audit_verdicts(
     kept
 }
 
+fn whole_word_at(text: &str, at: usize, len: usize) -> bool {
+    let before = text[..at].chars().next_back();
+    let after = text[at + len..].chars().next();
+    !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+}
+
 fn find_phrase(text: &str, phrase: &str) -> Option<usize> {
-    text.match_indices(phrase).map(|(at, _)| at).find(|&at| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + phrase.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
-    })
+    text.match_indices(phrase)
+        .map(|(at, _)| at)
+        .find(|&at| whole_word_at(text, at, phrase.len()))
 }
 
 fn hedge(text: &str) -> Option<&'static str> {
@@ -169,23 +191,21 @@ fn hedge(text: &str) -> Option<&'static str> {
     find_phrase(&norm[either..], "or").map(|_| "either … or")
 }
 
-fn floor_boundary(s: &str, mut at: usize) -> usize {
-    at = at.min(s.len());
-    while !s.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
-}
-
+// A marker inside the quote itself is the claim's own wording ("fork the upstream repo"), not a
+// sign that the discussion left it open, so only markers outside the quote's span count.
 fn marker_beside(inputs: &GateInputs, at: Span) -> Option<&'static str> {
     let text = &inputs.evidence.turns()[at.turn].normalized;
-    let start = floor_boundary(text, at.start.saturating_sub(MARKER_WINDOW));
-    let end = floor_boundary(text, at.start + at.len + MARKER_WINDOW);
-    let window = &text[start..end];
-    OPEN_MARKERS
-        .iter()
-        .find(|m| find_phrase(window, m).is_some())
-        .copied()
+    let quote_end = at.start + at.len;
+    let from = at.start.saturating_sub(MARKER_WINDOW);
+    let to = quote_end + MARKER_WINDOW;
+    OPEN_MARKERS.iter().copied().find(|m| {
+        text.match_indices(m).any(|(i, _)| {
+            let end = i + m.len();
+            let before = i >= from && end <= at.start;
+            let after = i >= quote_end && end <= to;
+            (before || after) && whole_word_at(text, i, m.len())
+        })
+    })
 }
 
 fn open_collision(
@@ -200,7 +220,7 @@ fn open_collision(
         .map(|a| {
             a.findings
                 .iter()
-                .filter(|f| is_open_finding(f))
+                .filter(|f| is_open_finding(f, a.failed))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -241,25 +261,27 @@ fn open_collision(
     }
 }
 
-fn is_open_finding(f: &AuditedFinding) -> bool {
-    f.label == Label::Uncertain
-        || (f.label != Label::Refuted && f.lenses.iter().any(|l| l == OPEN_QUESTIONS_LENS))
-}
-
-fn clip(text: &str) -> String {
-    match text.char_indices().nth(MAX_FINDING_CHARS) {
-        Some((at, _)) => format!("{}…", text[..at].trim_end()),
-        None => text.to_string(),
+// A failed audit's labels are defaults, but its harvested findings and their lenses are real.
+fn is_open_finding(f: &AuditedFinding, audit_failed: bool) -> bool {
+    let open_lens = f.lenses.iter().any(|l| l == OPEN_QUESTIONS_LENS);
+    if audit_failed {
+        return open_lens;
     }
+    f.label == Label::Uncertain || (f.label != Label::Refuted && open_lens)
 }
 
-fn carry_open_findings(plan: &mut BuildPlan, audit: Option<&AuditView>, report: &mut GateReport) {
-    let Some(audit) = audit else {
-        return;
-    };
-    for f in audit.findings.iter().filter(|f| is_open_finding(f)) {
-        let text = clip(f.text.trim());
-        if plan.open.iter().any(|q| collides(&q.text, &text)) {
+fn carry_open_findings(plan: &mut BuildPlan, audit: &AuditView, report: &mut GateReport) {
+    for f in audit
+        .findings
+        .iter()
+        .filter(|f| is_open_finding(f, audit.failed))
+    {
+        let text = clip(f.text.trim(), MAX_FINDING_BYTES);
+        let already = plan.open.iter().any(|q| {
+            let own = q.text.strip_prefix("proposed:").unwrap_or(&q.text);
+            collides(own, &text)
+        });
+        if already {
             continue;
         }
         let n = plan
@@ -358,15 +380,21 @@ mod tests {
     #[test]
     fn g1_a_missing_quote_is_quarantined() {
         let ev = Evidence::new("", CONVERSATION, &[]);
+        let mut item = settled(
+            "The owner chose freeze at entry",
+            Some("\"we freeze the snapshot at entry\""),
+        );
+        item.provenance = Some(Provenance::Owner);
         let mut plan = BuildPlan {
-            settled: vec![settled(
-                "The owner chose freeze at entry",
-                Some("\"we freeze the snapshot at entry\""),
-            )],
+            settled: vec![item],
             ..BuildPlan::default()
         };
         gate(&mut plan, &ev, None, None);
         assert!(plan.settled.is_empty());
+        assert_eq!(
+            plan.quarantined[0].provenance, None,
+            "a model-claimed label does not survive"
+        );
         assert_eq!(
             plan.quarantined[0].field("reason"),
             Some("claimed quote is not in the discussion: \"we freeze the snapshot at entry\"")
@@ -392,15 +420,15 @@ mod tests {
     #[test]
     fn g1_no_quote_is_opened() {
         let ev = Evidence::new("An idea about a parser.", CONVERSATION, &[]);
+        let mut unproven = settled("We hire a team of five first", None);
+        unproven.provenance = Some(Provenance::Owner);
         let mut plan = BuildPlan {
-            settled: vec![
-                settled("We hire a team of five first", None),
-                settled("an idea about a parser", None),
-            ],
+            settled: vec![unproven, settled("an idea about a parser", None)],
             ..BuildPlan::default()
         };
         let report = gate(&mut plan, &ev, None, None);
         assert_eq!(plan.open.len(), 1, "{plan:?}");
+        assert_eq!(plan.open[0].provenance, None);
         assert_eq!(plan.open[0].text, "proposed: We hire a team of five first");
         assert_eq!(plan.open[0].markers, ["opened: no supporting quote"]);
         assert_eq!(plan.settled.len(), 1);
@@ -410,6 +438,26 @@ mod tests {
             "an item whose own text grounds is kept"
         );
         assert_eq!(report.tally.get("opened"), Some(&1));
+    }
+
+    #[test]
+    fn g1_a_short_quote_is_opened_not_quarantined() {
+        let ev = Evidence::new("An idea about a parser.", CONVERSATION, &[]);
+        let mut plan = BuildPlan {
+            settled: vec![
+                settled("The owner froze the scope", Some("\"Freeze it.\"")),
+                settled("an idea about a parser", Some("")),
+            ],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, None);
+        assert!(plan.quarantined.is_empty(), "{plan:?}");
+        assert_eq!(
+            plan.open[0].markers,
+            ["opened: quote too short to prove anything"]
+        );
+        assert_eq!(plan.settled.len(), 1);
+        assert_eq!(plan.settled[0].provenance, Some(Provenance::Idea));
     }
 
     #[test]
@@ -445,6 +493,53 @@ Separately, the fork in the road is lunch.\n"
                 "Snapshots freeze at entry",
                 Some("zone snapshots freeze at entry"),
             )],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, None);
+        assert_eq!(plan.settled.len(), 1, "{plan:?}");
+    }
+
+    #[test]
+    fn g2_an_owner_decision_to_fork_stays_settled() {
+        let conv = "## user\nFork the upstream repo and patch it, that part is decided.\n";
+        let ev = Evidence::new("", conv, &[]);
+        let mut plan = BuildPlan {
+            settled: vec![settled(
+                "Fork the upstream repo and patch it",
+                Some("fork the upstream repo and patch it"),
+            )],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, None);
+        assert_eq!(plan.settled.len(), 1, "{plan:?}");
+    }
+
+    #[test]
+    fn g2_a_marker_just_before_the_quote_is_seen_and_a_far_one_is_not() {
+        let near = "## assistant\nUnresolved: zone snapshots freeze at entry for every position.\n";
+        let ev = Evidence::new("", near, &[]);
+        let item = || {
+            settled(
+                "Snapshots freeze at entry",
+                Some("zone snapshots freeze at entry"),
+            )
+        };
+        let mut plan = BuildPlan {
+            settled: vec![item()],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, None);
+        assert_eq!(
+            plan.open[0].markers,
+            ["opened from Settled: its quote sits beside \"unresolved\""]
+        );
+        let filler = "we talked about unrelated matters at length. ".repeat(10);
+        let far = format!(
+            "## assistant\nUnresolved lunch. {filler} Zone snapshots freeze at entry for every position.\n"
+        );
+        let ev = Evidence::new("", &far, &[]);
+        let mut plan = BuildPlan {
+            settled: vec![item()],
             ..BuildPlan::default()
         };
         gate(&mut plan, &ev, None, None);
@@ -624,12 +719,87 @@ Separately, the fork in the road is lunch.\n"
         assert!(plan.open[0]
             .text
             .starts_with("Which exchange feeds the backtest"));
-        assert!(plan.open[0].text.chars().count() <= 301, "clipped");
+        assert!(plan.open[0].text.len() <= 300, "clipped to 300 bytes");
         assert_eq!(plan.open[0].markers, ["from the audit"]);
         assert_eq!(
             plan.open[1].text, "Freeze the zone snapshot at entry or use dwell?",
             "a near-duplicate open-question finding is added once"
         );
+    }
+
+    #[test]
+    fn g3_an_audit_opened_item_is_not_appended_again() {
+        let conv = "## user\nSnapshots freeze entry zones daily for every desk.\n";
+        let ev = Evidence::new("", conv, &[]);
+        let audit = AuditView {
+            findings: vec![finding(
+                "Snapshots freeze entry, but maybe weekly bins matter",
+                "premortem",
+                Label::Uncertain,
+                "unclear",
+            )],
+            ..AuditView::default()
+        };
+        let mut plan = BuildPlan {
+            settled: vec![settled(
+                "Snapshots freeze entry zones daily",
+                Some("snapshots freeze entry zones daily"),
+            )],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, Some(&audit));
+        assert_eq!(plan.open.len(), 1, "{plan:?}");
+    }
+
+    #[test]
+    fn g3_a_failed_audit_still_carries_open_question_findings() {
+        let ev = Evidence::new("", CONVERSATION, &[]);
+        let audit = AuditView {
+            findings: vec![
+                finding(
+                    "The probe must stay read only forever",
+                    "premortem",
+                    Label::Uncertain,
+                    "default",
+                ),
+                finding(
+                    "Whether the parser ships before the probe release",
+                    "extract-open-questions",
+                    Label::Uncertain,
+                    "default",
+                ),
+                finding(
+                    "Which exchange feeds the backtest data?",
+                    "extract-open-questions",
+                    Label::Uncertain,
+                    "default",
+                ),
+            ],
+            failed: true,
+            ..AuditView::default()
+        };
+        let mut plan = BuildPlan {
+            settled: vec![
+                settled(
+                    "The probe must stay read only",
+                    Some("probe must stay read only"),
+                ),
+                settled(
+                    "The parser ships before the probe release",
+                    Some("ship the parser before the probe"),
+                ),
+            ],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, Some(&audit));
+        assert_eq!(plan.settled.len(), 1, "{plan:?}");
+        assert_eq!(plan.settled[0].text, "The probe must stay read only");
+        assert_eq!(plan.open.len(), 2, "{plan:?}");
+        assert_eq!(
+            plan.open[0].markers,
+            ["opened from Settled: matches an open question from the audit"]
+        );
+        assert_eq!(plan.open[1].text, "Which exchange feeds the backtest data?");
     }
 
     #[test]
