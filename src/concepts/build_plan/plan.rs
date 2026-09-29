@@ -261,8 +261,10 @@ impl BuildPlan {
         self.open.push(item);
     }
 
-    /// Move `item` to Quarantined with the reason it must not be built on.
+    /// Move `item` to Quarantined with the reason it must not be built on; its id before the move
+    /// is kept in the code-owned `was` field so a dependency written against it stays traceable.
     pub fn quarantine(&mut self, mut item: Item, reason: impl Into<String>) {
+        item.fields.insert("was".to_string(), item.id.clone());
         item.id = next_id(&self.quarantined, 'X');
         item.fields.insert("reason".to_string(), reason.into());
         self.quarantined.push(item);
@@ -359,10 +361,11 @@ const FIELD_KEYS: &[&str] = &[
     "model",
     "wave",
     "leaf",
+    "was",
 ];
 
 /// Fields the gates derive; a model answer cannot author them.
-const DERIVED_KEYS: &[&str] = &["score", "model", "wave", "leaf"];
+const DERIVED_KEYS: &[&str] = &["score", "model", "wave", "leaf", "was"];
 
 fn is_none(v: &str) -> bool {
     matches!(
@@ -1331,6 +1334,7 @@ Run the cheapest disproof before any Rust exists.
             ["opened: listed in the open-questions artifact"]
         );
         assert_eq!(plan.quarantined[0].id, "X1");
+        assert_eq!(plan.quarantined[0].field("was"), Some("S1"));
         assert_eq!(
             plan.quarantined[0].field("reason"),
             Some("quote not in the discussion")
@@ -1359,7 +1363,7 @@ Run the cheapest disproof before any Rust exists.
         plan.settled[0].provenance = Some(Provenance::Owner);
         plan.settled[1].provenance = Some(Provenance::Foil);
         plan.quarantine(
-            Item::new("", "The owner chose freeze at entry"),
+            Item::new("S3", "The owner chose freeze at entry"),
             "quote not in the discussion",
         );
         plan
@@ -1430,6 +1434,11 @@ Run the cheapest disproof before any Rust exists.
         let back = parse_artifact(&body).unwrap();
         assert_eq!(back.quarantined.len(), 1);
         assert_eq!(back.quarantined[0].text, "The owner chose freeze at entry");
+        assert_eq!(
+            back.quarantined[0].field("was"),
+            plan.quarantined[0].field("was")
+        );
+        assert_eq!(back.quarantined[0].field("was"), Some("S3"));
         assert_eq!(
             back.quarantined[0].field("reason"),
             Some("quote not in the discussion")
@@ -1651,10 +1660,10 @@ Run the cheapest disproof before any Rust exists.
 
     #[test]
     fn field_derived_keys_are_never_read_from_a_model_answer() {
-        let answer = "## Goal\nShip.\n## Plan\n- T1: One · wave: 1\n  score: 00000\n  touches: `a.rs` · model: sonnet | leaf: ok\n  Wave: 2\n";
+        let answer = "## Goal\nShip.\n## Plan\n- T1: One · wave: 1\n  score: 00000\n  touches: `a.rs` · model: sonnet | leaf: ok\n  Wave: 2\n  was: S9\n";
         let plan = parse(answer).unwrap();
         let t1 = &plan.tasks[0];
-        for key in ["score", "model", "wave", "leaf"] {
+        for key in ["score", "model", "wave", "leaf", "was"] {
             assert!(!t1.fields.contains_key(key), "{key}: {:?}", t1.fields);
         }
         assert_eq!(t1.text, "One");

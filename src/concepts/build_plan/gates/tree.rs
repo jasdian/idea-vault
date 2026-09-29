@@ -333,10 +333,11 @@ fn quarantine_deps(plan: &mut BuildPlan, report: &mut GateReport) {
             .filter(|e| !e.is_empty())
             .collect();
         for q in &plan.quarantined {
+            let was = q.field("was");
             let cited = entries.iter().any(|e| {
-                e.split(|c: char| !c.is_alphanumeric())
-                    .any(|w| w.eq_ignore_ascii_case(&q.id))
-                    || content_overlap(e, &q.text).at_least(QUARANTINE_RATIO, QUARANTINE_SHARED)
+                e.split(|c: char| !c.is_alphanumeric()).any(|w| {
+                    w.eq_ignore_ascii_case(&q.id) || was.is_some_and(|x| w.eq_ignore_ascii_case(x))
+                }) || content_overlap(e, &q.text).at_least(QUARANTINE_RATIO, QUARANTINE_SHARED)
             });
             if cited {
                 mark(task, format!("{QUARANTINED_DEP} {}", q.id));
@@ -692,6 +693,38 @@ mod tests {
         assert!(t1.needs_owner);
         assert!(t1.markers.contains(&format!("{QUARANTINED_DEP} X1")));
         assert_eq!(t1.field("score").map(|s| &s[..1]), Some("1"));
+    }
+
+    #[test]
+    fn a_task_citing_a_quarantined_items_original_id_needs_the_owner() {
+        let mut p = plan(vec![task(
+            "T1",
+            &[("touches", "src/a.rs"), ("depends", "S1 (the entry rule)")],
+        )]);
+        p.quarantine(
+            Item::new("S1", "Freeze applies before the first fill"),
+            "claimed quote is not in the discussion",
+        );
+        run(&mut p);
+        let t1 = get(&p, "T1");
+        assert!(t1.needs_owner, "{:?}", t1.markers);
+        assert!(t1.markers.contains(&format!("{QUARANTINED_DEP} X1")));
+    }
+
+    #[test]
+    fn a_depends_entry_sharing_two_words_with_a_quarantined_claim_is_not_flagged() {
+        let mut p = plan(vec![task(
+            "T1",
+            &[("touches", "src/a.rs"), ("depends", "freeze entry rule")],
+        )]);
+        p.quarantine(
+            Item::new("S1", "The owner chose freeze at entry"),
+            "claimed quote is not in the discussion",
+        );
+        run(&mut p);
+        let t1 = get(&p, "T1");
+        assert!(!t1.needs_owner, "{:?}", t1.markers);
+        assert!(!t1.markers.iter().any(|m| m.starts_with(QUARANTINED_DEP)));
     }
 
     #[test]
