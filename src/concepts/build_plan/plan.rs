@@ -1617,6 +1617,29 @@ Run the cheapest disproof before any Rust exists.
     }
 
     #[test]
+    fn template_kill_criteria_ask_for_both_wirings() {
+        let instructions = template_body().split("\nExample:\n").next().unwrap();
+        let at = instructions.find("\n## Kill criteria\n").unwrap() + 1;
+        let block: String = instructions[at..]
+            .lines()
+            .skip(2)
+            .take_while(|l| !l.trim().is_empty())
+            .enumerate()
+            .map(|(i, l)| {
+                let indent = if i == 0 { "- " } else { "  " };
+                format!("{indent}{}\n", l.replace("T#", "T1"))
+            })
+            .collect();
+        let plan = parse(&format!(
+            "## Goal\nShip.\n## Plan\n- T1: Build it\n  touches: a.rs\n  accept: `true` → exit 0\n## Kill criteria\n{block}"
+        ))
+        .unwrap();
+        let kill = plan.kills.first().expect("the template's kill row");
+        assert_eq!(kill.field("checked by"), Some("T1"), "{block}");
+        assert_eq!(kill.field("gates"), Some("T1"), "{block}");
+    }
+
+    #[test]
     fn template_stays_under_its_byte_cap() {
         let bytes = template_body().len();
         assert!(

@@ -33,6 +33,7 @@ accept: `one command` → pass condition, with a passed count when tests are nam
 Optional.
 K1: a result that stops the build
 checked by: T#
+gates: T#
 
 Leaf rule: a task title is one commit subject with no "and"; a task is one diff under one top-level directory with at most 3 non-test files. At most 8 tasks.
 
