@@ -444,8 +444,62 @@ fn runnable_accept(accept: &str) -> bool {
     !cmd.trim().is_empty() && condition.is_some_and(|c| !c.trim().is_empty())
 }
 
+const RUNNERS: &[&str] = &[
+    "cargo",
+    "npm",
+    "pnpm",
+    "yarn",
+    "pytest",
+    "go",
+    "make",
+    "grep",
+    "rg",
+    "bash",
+    "sh",
+    "python",
+    "node",
+    "just",
+    "docker compose",
+];
+
+const PROSE_SECOND_WORDS: &[&str] = &[
+    "sure", "to", "the", "a", "an", "it", "that", "this", "your", "you",
+];
+
+/// An accept that opens with a known runner command and carries `→`/`->` and a condition, but no
+/// backticks, as the backticked form. Anything else is left for the runnable-accept gate.
+fn repaired_accept(accept: &str) -> Option<String> {
+    let text = accept.trim();
+    if text.contains('`') {
+        return None;
+    }
+    let runner = RUNNERS.iter().find(|r| {
+        text.strip_prefix(**r)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    })?;
+    let arrow = [
+        text.find('→').map(|at| (at, '→'.len_utf8())),
+        text.find("->").map(|at| (at, 2)),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|(at, _)| *at)?;
+    let (command, condition) = (text[..arrow.0].trim(), text[arrow.0 + arrow.1..].trim());
+    let second = command[runner.len()..].split_whitespace().next()?;
+    if condition.is_empty() || PROSE_SECOND_WORDS.contains(&second.to_lowercase().as_str()) {
+        return None;
+    }
+    let written = &text[arrow.0..arrow.0 + arrow.1];
+    Some(format!("`{command}` {written} {condition}"))
+}
+
 fn executable_tasks(plan: &mut BuildPlan, report: &mut GateReport) {
     for task in &mut plan.tasks {
+        if let Some(fixed) = task.field("accept").and_then(repaired_accept) {
+            task.fields.insert("accept".to_string(), fixed);
+            mark(task, "accept repaired");
+            report.count("repaired");
+        }
         if !task.field("accept").is_some_and(runnable_accept) {
             mark(task, "no runnable accept");
             need_owner(task, report);

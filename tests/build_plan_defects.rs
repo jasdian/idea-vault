@@ -667,6 +667,82 @@ fn bp3_prose_acceptance_needs_the_owner() {
     assert_eq!(report.tally.get("needs_owner"), Some(&1));
 }
 
+fn accept_of(plan_line: &'static str) -> (BuildPlan, GateReport) {
+    gate(
+        "## user\nBuild the parser.\n",
+        Answer {
+            plan: plan_line,
+            ..Answer::default()
+        },
+    )
+}
+
+#[test]
+fn accept_repair_wraps_an_unbackticked_runner_command_and_keeps_the_task() {
+    for (written, fixed) in [
+        (
+            "cargo test --lib parser → exit 0",
+            "`cargo test --lib parser` → exit 0",
+        ),
+        (
+            "grep -c TODO src/a.rs -> prints 0",
+            "`grep -c TODO src/a.rs` -> prints 0",
+        ),
+        (
+            "docker compose config → exits 0",
+            "`docker compose config` → exits 0",
+        ),
+    ] {
+        let line: &'static str =
+            Box::leak(format!("- [ ] T1: Parse\n  accept: {written}").into_boxed_str());
+        let (plan, report) = accept_of(line);
+        let task = only(&plan.tasks, "Plan");
+        assert_eq!(task.field("accept"), Some(fixed));
+        assert!(!task.needs_owner, "{written}: {}", markers(task));
+        assert!(
+            markers(task).contains("accept repaired"),
+            "{}",
+            markers(task)
+        );
+        assert!(!markers(task).contains("no runnable accept"));
+        assert_eq!(report.tally.get("needs_owner"), None);
+    }
+}
+
+#[test]
+fn accept_repair_leaves_prose_and_conditionless_accepts_owner_bound() {
+    for written in [
+        "the owner confirms the chart looks right",
+        "make sure the parser works → it does",
+        "cargo test →",
+        "terraform apply → exit 0",
+        "cargo test passes",
+    ] {
+        let line: &'static str =
+            Box::leak(format!("- [ ] T1: Parse\n  accept: {written}").into_boxed_str());
+        let (plan, _) = accept_of(line);
+        let task = only(&plan.tasks, "Plan");
+        assert!(task.needs_owner, "{written}");
+        assert!(markers(task).contains("no runnable accept"), "{written}");
+        assert!(!markers(task).contains("accept repaired"), "{written}");
+        assert_eq!(task.field("accept"), Some(written));
+    }
+}
+
+#[test]
+fn accept_repair_does_not_launder_a_destructive_command() {
+    let (plan, report) =
+        accept_of("- [ ] T1: Reset\n  accept: docker compose down -v → volumes gone");
+    let task = only(&plan.tasks, "Plan");
+    assert!(task.needs_owner);
+    assert!(
+        markers(task).contains("destructive command"),
+        "{}",
+        markers(task)
+    );
+    assert_eq!(report.tally.get("needs_owner"), Some(&1));
+}
+
 const GATE_SOURCES: [(&str, &str); 5] = [
     (
         "build_plan/plan.rs",
