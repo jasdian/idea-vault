@@ -114,6 +114,29 @@ fn by_id<'a>(plan: &'a BuildPlan, id: &str) -> &'a Item {
 }
 
 #[test]
+fn tree_gate_repairs_a_self_edge_without_calling_it_a_cycle() {
+    let answer = format!(
+        "## Goal\nShip the parser.\n\n## Plan\n{}",
+        task(
+            "T1",
+            "Add the parser",
+            &[
+                ("touches", "`src/a.rs`"),
+                ("depends", "T1"),
+                ("accept", COUNTED),
+            ],
+        )
+    );
+    let (plan, _) = gate(&answer);
+    let t1 = by_id(&plan, "T1");
+    assert!(
+        !t1.markers.iter().any(|m| m.contains("dependency cycle")) && !t1.needs_owner,
+        "a self-edge is repaired, not an owner block: {t1:?}"
+    );
+    assert_eq!(t1.field("wave"), Some("1"));
+}
+
+#[test]
 fn tree_gate_names_cycles_and_dangling_refs_and_inherits_owner_blocks() {
     let (plan, report) = gate(&answer());
     assert!(

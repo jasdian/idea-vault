@@ -213,12 +213,16 @@ fn task_deps(task: &Item) -> Vec<String> {
     task.depends_tasks()
 }
 
+// A self-edge is not a cycle: the task-graph gate drops it as a repair.
 fn depends_of(plan: &BuildPlan, id: &str) -> Vec<String> {
     plan.tasks
         .iter()
         .find(|t| t.id == id)
         .map(task_deps)
         .unwrap_or_default()
+        .into_iter()
+        .filter(|dep| dep != id)
+        .collect()
 }
 
 fn reaches(plan: &BuildPlan, from: &str, to: &str) -> bool {

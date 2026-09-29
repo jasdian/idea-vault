@@ -465,18 +465,11 @@ pub fn score(plan: &BuildPlan, task: &Item) -> Score {
     let open = ids(&plan.open);
     let fence = fence_paths(plan);
     let touches = task.list("touches");
-    let everything = format!(
-        "{} {} {}",
-        task.text,
-        task.markers.join(" "),
-        task.fields.values().cloned().collect::<Vec<_>>().join(" ")
-    )
-    .to_lowercase();
     let non_test = touches.iter().filter(|p| !is_test_path(p)).count();
     let marked = |prefix: &str| task.markers.iter().any(|m| m.starts_with(prefix));
     Score {
         d: task.depends_questions().iter().any(|q| open.contains(q))
-            || everything.contains(REFUTED_UPSTREAM)
+            || marked(REFUTED_UPSTREAM)
             || marked(QUARANTINED_DEP),
         b: touches.is_empty() || non_test > 1 || roots(&touches).len() > 1,
         v: !task.field("accept").is_some_and(runnable_accept)
@@ -783,6 +776,15 @@ mod tests {
         let mut p = plan(vec![task("T1", &[("touches", "src/a.rs, tests/a.rs")])]);
         run(&mut p);
         assert_eq!(get(&p, "T1").field("score"), Some("00000"));
+
+        let mut p = plan(vec![task("T1", &[("touches", "src/a.rs, tests/a.rs")])]);
+        p.tasks[0].text = "Ship it, refuted upstream by nobody".into();
+        run(&mut p);
+        assert_eq!(
+            get(&p, "T1").field("score"),
+            Some("00000"),
+            "model prose cannot raise its own score"
+        );
     }
 
     #[test]
