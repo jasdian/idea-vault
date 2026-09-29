@@ -29,8 +29,8 @@ pub async fn health(State(state): State<AppState>) -> Response {
         AiHealth::Unreachable => "unreachable",
     };
     let backend = match state.llm.settings().backend {
-        crate::config::LlmBackendKind::Ollama => "ollama",
-        crate::config::LlmBackendKind::ClaudeCode => "claude-code",
+        crate::ai::LlmBackendKind::Ollama => "ollama",
+        crate::ai::LlmBackendKind::ClaudeCode => "claude-code",
     };
 
     let vault_dir = &state.config.vault_dir;

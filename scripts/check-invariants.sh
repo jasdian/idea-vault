@@ -84,4 +84,11 @@ unsafes=$({ grep -rnE '\bunsafe[[:space:]]*(\{|fn\b|impl\b)' src --include='*.rs
 [ "$unsafes" -le "$UNSAFE_FLOOR" ] || fail "$rule" "  unsafe blocks: $unsafes (floor $UNSAFE_FLOOR)"
 ok "$rule"
 
+# 8. D4 one-way module deps (docs/02-module-reference.md): the lower layers never reach up
+#    into the bin-level `config` leaf.
+rule="D4: ai, domain, mcp and sources never import crate::config"
+hits=$({ grep -rn 'crate::config' src/ai src/domain src/mcp.rs src/sources.rs --include='*.rs' || true; } | strip_rust_comments)
+[ -z "$hits" ] || fail "$rule" "$hits"
+ok "$rule"
+
 printf '\033[32mall invariants hold.\033[0m\n'

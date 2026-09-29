@@ -34,7 +34,7 @@ pub mod sources;
 pub mod stream;
 pub mod web;
 
-pub use backend::{LlmBackend, LlmSettings, RoleProfile};
+pub use backend::{LlmBackend, LlmBackendKind, LlmSettings, RoleProfile};
 pub use claude_code::ClaudeCodeClient;
 pub use ollama::{AiHealth, OllamaClient};
 

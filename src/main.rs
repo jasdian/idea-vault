@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use idea_vault::ai::claude_code::ClaudeCodeConfig;
-use idea_vault::ai::{LlmBackend, OllamaClient};
+use idea_vault::ai::{LlmBackend, LlmBackendKind, OllamaClient};
 use idea_vault::app::{build_router, AppState};
-use idea_vault::config::{ClaudeSettings, Config, LlmBackendKind};
+use idea_vault::config::{ClaudeSettings, Config};
 use idea_vault::{import, index, sources, vault};
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;

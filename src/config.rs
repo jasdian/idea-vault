@@ -8,6 +8,9 @@
 
 use std::path::PathBuf;
 
+// Re-exported so the public `config::LlmBackendKind` path keeps working for callers of `Config`.
+pub use crate::ai::LlmBackendKind;
+
 /// Resolved runtime configuration for the whole crate.
 ///
 /// Constructed once at boot ([D25](../docs/01-architecture.md)) and passed down as shared state;
@@ -90,13 +93,6 @@ pub struct Config {
     /// (mirrors the "detect absence, surface a clear state" discipline applied elsewhere, e.g.
     /// Ollama's own absence).
     pub mcp_server_token: Option<String>,
-}
-
-/// The selectable LLM backend (docs/adr/0009). Defaults to Ollama for an offline local run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LlmBackendKind {
-    Ollama,
-    ClaudeCode,
 }
 
 /// Settings for the claude-code backend. `cwd` deliberately defaults to the vault dir (never the

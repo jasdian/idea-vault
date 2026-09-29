@@ -118,7 +118,7 @@ mod tests {
             ai_concurrency: 1,
             ollama_timeout: std::time::Duration::from_secs(5),
             ollama_temperature: 0.7,
-            llm_backend: crate::config::LlmBackendKind::Ollama,
+            llm_backend: crate::ai::LlmBackendKind::Ollama,
             claude: crate::config::ClaudeSettings {
                 binary: "claude".to_string(),
                 cwd: vault_dir.clone(),

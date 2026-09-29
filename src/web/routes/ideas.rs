@@ -292,8 +292,8 @@ pub(crate) fn transcript_inner(
 /// The trailing sentence fragment in the swarm/workflow/extract tooltips, worded for whichever
 /// backend is actually going to run the call — see `Actions::backend_note` doc. Split out for the
 /// same unit-testability reason `availability_hint` is.
-fn backend_note(backend: crate::config::LlmBackendKind) -> String {
-    use crate::config::LlmBackendKind;
+fn backend_note(backend: crate::ai::LlmBackendKind) -> String {
+    use crate::ai::LlmBackendKind;
     let via = match backend {
         LlmBackendKind::Ollama => "on your local Ollama model",
         LlmBackendKind::ClaudeCode => "via claude-code",
@@ -320,7 +320,7 @@ pub(crate) fn render_actions(
     conversation: &str,
     can_store: bool,
     busy: bool,
-    backend: crate::config::LlmBackendKind,
+    backend: crate::ai::LlmBackendKind,
     oob: bool,
 ) -> Result<String, WebError> {
     use crate::domain::SkillStage;
@@ -705,12 +705,12 @@ pub async fn delete_idea(
 /// `ModelMissing` is an Ollama-only signal (the claude probe never returns it), so its copy stays
 /// Ollama-worded; `Unreachable` is reachable by both backends and so is worded per-backend.
 fn availability_hint(
-    backend: crate::config::LlmBackendKind,
+    backend: crate::ai::LlmBackendKind,
     health: crate::ai::AiHealth,
     model: &str,
 ) -> (bool, String) {
     use crate::ai::AiHealth;
-    use crate::config::LlmBackendKind;
+    use crate::ai::LlmBackendKind;
     match health {
         AiHealth::Available => (true, String::new()),
         AiHealth::ModelMissing => (false, format!("pull a model: `ollama pull {model}`")),
@@ -735,7 +735,7 @@ pub(crate) fn build_discussion(
     slug: &str,
     conversation: &str,
     health: crate::ai::AiHealth,
-    backend: crate::config::LlmBackendKind,
+    backend: crate::ai::LlmBackendKind,
     model: &str,
     can_store: bool,
     skills: &crate::concepts::skills::SkillRegistry,
@@ -783,7 +783,7 @@ fn render_panel(
     idea: &Idea,
     conversation: &str,
     health: crate::ai::AiHealth,
-    backend: crate::config::LlmBackendKind,
+    backend: crate::ai::LlmBackendKind,
     model: &str,
     skills: &crate::concepts::skills::SkillRegistry,
     pending: crate::web::jobs::Pending,
@@ -1416,7 +1416,7 @@ pub async fn search(
 mod tests {
     use super::{availability_hint, highlight_snippet, kind_chip};
     use crate::ai::AiHealth;
-    use crate::config::LlmBackendKind;
+    use crate::ai::LlmBackendKind;
     use crate::index::{SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
 
     #[test]

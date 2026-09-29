@@ -25,9 +25,16 @@ use crate::ai::claude_code::{ClaudeCodeClient, ClaudeCodeConfig};
 use crate::ai::mcp::{McpClient, McpSession, McpTool};
 use crate::ai::ollama::{ChatMessage, ChatOptions, OllamaClient, TokenStream};
 use crate::ai::{AiError, AiHealth};
-use crate::config::LlmBackendKind;
 use crate::mcp::{McpRegistry, McpServerConfig};
 use crate::sources::ResolvedSource;
+
+/// The selectable LLM backend (docs/adr/0009). The boot default is Ollama, for an offline local
+/// run (`config::Config::from_env`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmBackendKind {
+    Ollama,
+    ClaudeCode,
+}
 
 /// Assumed Ollama context window (tokens) until `/api/show` answers — equal to the crate's
 /// pre-dynamic-budget fixed 16 KiB byte budget (`ContextBudget::for_model_tokens(8192)`), so a
