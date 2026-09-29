@@ -19,7 +19,9 @@ use crate::ai::sources::SourceProbe;
 use crate::concepts::audit::{AuditReport, Finding, Label};
 use crate::concepts::build_plan::plan::{BuildPlan, Provenance};
 use crate::domain::evidence::{locate, normalize_for_match};
-use crate::vault::store::{parse_turn_heading, split_turns, turn_role, TurnSource};
+use crate::vault::store::{
+    is_pointer_turn, parse_turn_heading, split_turns, turn_role, TurnSource,
+};
 
 /// One evidence turn: who wrote it, its raw text and its normalized form (for quote matching).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,8 +41,9 @@ pub struct Evidence {
 
 impl Evidence {
     /// Evidence from `idea_body` and `conversation` (the raw `conversation.md`). A turn headed
-    /// `skill: <n>` or `workflow: <n>` with `n` in `capstones` is excluded; `## user` turns are
-    /// the owner's, every other turn is the foil's.
+    /// `skill: <n>` or `workflow: <n>` with `n` in `capstones`, or any assistant turn whose body
+    /// is a build-plan pointer, is excluded; `## user` turns are the owner's, every other turn is
+    /// the foil's.
     pub fn new(idea_body: &str, conversation: &str, capstones: &[&str]) -> Self {
         let mut turns = Vec::new();
         if !idea_body.trim().is_empty() {
@@ -51,6 +54,9 @@ impl Evidence {
             });
         }
         for turn in split_turns(conversation) {
+            if is_pointer_turn(&turn) {
+                continue;
+            }
             let speaker = match parse_turn_heading(turn_role(&turn)) {
                 TurnSource::User => Provenance::Owner,
                 TurnSource::Skill(n) | TurnSource::Workflow(n)

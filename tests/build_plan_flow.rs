@@ -194,6 +194,44 @@ fn finish_excludes_pointer_turns_from_the_next_haystack() {
 }
 
 #[test]
+fn finish_owner_skill_pointer_never_grounds() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let probe = SourceProbe::default();
+    let first = finish(PlanInputs {
+        vault_dir: dir.path(),
+        idea_slug: SLUG,
+        answer: ANSWER,
+        turn_role: "assistant (skill: house-plan)",
+        lens: "house-plan",
+        model: "llama3.2".into(),
+        audit: None,
+        probe: &probe,
+        now: Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap(),
+    })
+    .unwrap();
+    let pointer_words = "Freeze the zone snapshot at entry, or dwell on the live label";
+    assert!(first.pointer.contains(pointer_words));
+
+    let echo = format!(
+        "## Goal\nShip.\n\n## Settled\n- S1: We freeze or dwell.\n  quote: \"{pointer_words}\"\n\n## Plan\n- [ ] T1: Build it\n  accept: `cargo test` → exit 0"
+    );
+    let second = run(dir.path(), &echo, 1).unwrap();
+    assert!(
+        second.plan.settled.is_empty() && second.plan.quarantined.len() == 1,
+        "a pointer under an owner-chosen name does not ground: {:?}",
+        second.plan
+    );
+    let body = store::read_artifact(dir.path(), SLUG, &second.artifact_slug)
+        .unwrap()
+        .body;
+    assert!(
+        body.contains("· 1 capstone turn(s) excluded from evidence"),
+        "{body}"
+    );
+}
+
+#[test]
 fn finish_with_an_unusable_plan_persists_nothing() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());

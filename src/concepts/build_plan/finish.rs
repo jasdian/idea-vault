@@ -18,7 +18,7 @@ use crate::concepts::build_plan::gates::{
 };
 use crate::concepts::build_plan::plan::{self, BuildPlan, Provenance};
 use crate::concepts::ConceptError;
-use crate::domain::evidence::CAPSTONE_TURNS;
+use crate::domain::evidence::{CAPSTONE_TURNS, POINTER_PREFIX};
 use crate::domain::frontmatter::ArtifactFrontmatter;
 use crate::domain::{slug, Artifact, ArtifactKind};
 use crate::vault::store;
@@ -178,7 +178,7 @@ fn pointer_turn(
     report: &GateReport,
 ) -> String {
     let mut out = format!(
-        "**Build plan** → [{file_slug}](/idea/{}/artifact/{file_slug}.md) · {}\n\n{}\n",
+        "{POINTER_PREFIX}{file_slug}](/idea/{}/artifact/{file_slug}.md) · {}\n\n{}\n",
         inputs.idea_slug,
         mode_label(inputs.audit),
         tally_line(plan, report),

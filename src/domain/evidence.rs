@@ -37,6 +37,16 @@ pub fn normalize_for_match(text: &str) -> String {
 /// for a later plan's quotes, and not for store-time memory quotes.
 pub const CAPSTONE_TURNS: &[&str] = &["build-prompt", "ready-to-build"];
 
+/// The line prefix the code writes at the start of every build-plan pointer turn, whatever
+/// skill or workflow produced it. Writer and detector share it so they cannot drift.
+pub const POINTER_PREFIX: &str = "**Build plan** → [";
+
+/// True when `body` (a turn's text after its heading line) is a build-plan pointer: it starts
+/// with [`POINTER_PREFIX`]. Pure.
+pub fn is_pointer_body(body: &str) -> bool {
+    body.trim_start().starts_with(POINTER_PREFIX)
+}
+
 /// Minimum words a supporting quote must carry — anything shorter ("yes", "the market") matches
 /// almost any discussion and proves nothing.
 pub const MIN_QUOTE_WORDS: usize = 3;
@@ -230,5 +240,17 @@ mod tests {
             !grounded("revenue first … we ship", &hay),
             "segments must occur in order"
         );
+    }
+    #[test]
+    fn pointer_body_is_recognised_by_its_prefix() {
+        assert!(is_pointer_body(&format!("{POINTER_PREFIX}x](/a) · quick")));
+        assert!(is_pointer_body(&format!("\n{POINTER_PREFIX}x](/a)")));
+    }
+
+    #[test]
+    fn pointer_body_rejects_text_that_merely_mentions_it() {
+        assert!(!is_pointer_body("see **Build plan** → [x](/a)"));
+        assert!(!is_pointer_body("Build plan → [x]"));
+        assert!(!is_pointer_body(""));
     }
 }

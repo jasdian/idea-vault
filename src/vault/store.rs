@@ -489,13 +489,26 @@ fn memory_index_line(fact: &MemoryFact) -> (MemoryIndexEntry, String) {
 }
 
 /// True for a build-plan turn or its pointer: headed `skill: <n>` or `workflow: <n>` with `n` in
-/// [`CAPSTONE_TURNS`](crate::domain::evidence::CAPSTONE_TURNS) (docs/adr/0030).
+/// [`CAPSTONE_TURNS`](crate::domain::evidence::CAPSTONE_TURNS), or pointer-shaped
+/// ([`is_pointer_turn`]) whatever its name (docs/adr/0030).
 pub fn is_capstone_turn(turn: &str) -> bool {
-    matches!(
+    let named = matches!(
         parse_turn_heading(turn_role(turn)),
         TurnSource::Skill(ref n) | TurnSource::Workflow(ref n)
             if crate::domain::evidence::CAPSTONE_TURNS.contains(&n.as_str())
-    )
+    );
+    named || is_pointer_turn(turn)
+}
+
+/// True for an assistant turn whose body is a build-plan pointer; a user turn quoting the
+/// pointer text is not one.
+pub fn is_pointer_turn(turn: &str) -> bool {
+    match parse_turn_heading(turn_role(turn)) {
+        TurnSource::User | TurnSource::Other(_) => false,
+        _ => crate::domain::evidence::is_pointer_body(
+            turn.split_once('\n').map_or("", |(_, rest)| rest),
+        ),
+    }
 }
 
 /// Split an append-only `conversation.md` transcript into turns: a turn starts at each
@@ -794,6 +807,25 @@ mod tests {
 
     use super::*;
     use crate::domain::{ArtifactKind, IdeaFrontmatter, IdeaState, MemoryFactFrontmatter};
+
+    #[test]
+    fn pointer_turn_is_recognised_by_shape_for_assistant_turns_only() {
+        let body = "**Build plan** → [p](/idea/x/artifact/p.md) · quick\n";
+        assert!(is_capstone_turn(&format!(
+            "## assistant (skill: mine)\n{body}"
+        )));
+        assert!(is_capstone_turn(&format!(
+            "## assistant (workflow: mine)\n{body}"
+        )));
+        assert!(is_capstone_turn(&format!("## assistant\n{body}")));
+        assert!(!is_capstone_turn(&format!("## user\n{body}")));
+        assert!(!is_capstone_turn(
+            "## assistant (skill: mine)\nA plain answer.\n"
+        ));
+        assert!(is_capstone_turn(
+            "## assistant (skill: build-prompt)\nplain\n"
+        ));
+    }
 
     fn sample_idea(slug: &str) -> Idea {
         Idea {
