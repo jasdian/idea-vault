@@ -211,9 +211,11 @@ defaulting to open.
 
 **In (this pass):** `list_ideas`, `get_idea`, `search`, `create_idea`, `chat`, `store_idea`,
 `reopen_idea`, plus the two-prompt catalog. `chat`/`store_idea` are callable both as a task and
-plainly (bounded wait, ADR-0028); the task path is the primary one and the only one a
-Task-unaware client can cancel from (a plain caller holding the task id from a "still running"
-note can `tasks/cancel` it too, if it speaks that method).
+plainly (bounded wait, ADR-0028). A Task-unaware client cannot use the task path. Its plain call
+runs as a real task (`tasks::TaskRegistry::call_sync_bounded`), and when the turn outlives the
+3 s `SYNC_WAIT_BUDGET`, the "still running" note returns that task's id. `tasks/cancel`
+(`tasks::TaskRegistry::cancel`) accepts an id from either path, for any client that speaks that
+method.
 
 **Deferred:** skills/swarm/workflow/extract/compact tools, fork/tags/sources-management/delete-*
 tools, MCP `resources` (idea.md/conversation.md as `resources/read` + `resources/subscribe`
