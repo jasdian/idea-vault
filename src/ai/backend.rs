@@ -196,7 +196,7 @@ impl LlmBackend {
         scoped
     }
 
-    /// A bounded, read-only probe over this turn's attached sources (docs/adr/0029), used by the
+    /// A bounded, read-only probe over this turn's attached sources (docs/adr/0030), used by the
     /// build-plan gates to check anchors and tokens without a model call. Empty on an unscoped
     /// backend, so every check reports `Unverified`.
     pub fn source_probe(&self) -> crate::ai::sources::SourceProbe {

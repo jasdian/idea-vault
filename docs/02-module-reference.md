@@ -52,7 +52,7 @@ flowchart TB
             A_WEB["web.rs — keyless web_search/fetch_url + tool defs (ADR-0017)"]
             A_MCP["mcp.rs — MCP Streamable-HTTP wire client (init/session/tools-list/tools-call, ADR-0018)"]
             A_CONTRACT["contract.rs — pure output-contract validate/repair/items/trim_sections (ADR-0023)"]
-            A_SRC["sources.rs — deterministic source_list/source_grep/source_read tool leaves (ADR-0021)\n+ SourceProbe: bounded anchor/token checks for the build-plan gates (ADR-0029)"]
+            A_SRC["sources.rs — deterministic source_list/source_grep/source_read tool leaves (ADR-0021)\n+ SourceProbe: bounded anchor/token checks for the build-plan gates (ADR-0030)"]
         end
 
         MCP["mcp.rs — owner-global MCP server registry: McpServerConfig, McpRegistry\npersisted .mcp-servers.json (ADR-0018)"]
@@ -74,7 +74,9 @@ flowchart TB
             C_KNOW["knowledge.rs — extraction: fan-out lenses + persist artifacts (D30, ADR-0015)"]
             C_AUDIT["audit.rs — factored audit: findings, Auditor call, parse, appendix (ADR-0023)"]
             C_COVER["coverage.rs — spine coverage + next-move + chat skill book (docs/06-concepts/skills.md)"]
-            C_PLAN["build_plan/plan.rs — BuildPlan: tolerant parse + canonical render of the capstone's plan (docs/adr/0029)"]
+            C_PLAN["build_plan/plan.rs — BuildPlan: tolerant parse + canonical render of the capstone's plan (docs/adr/0030)"]
+            C_GATES["build_plan/gates/ — mod.rs, claims.rs, sources.rs, tasks.rs: deterministic gates G1–G12, no model call (docs/adr/0030)"]
+            C_FINISH["build_plan/finish.rs — finish: gate, write the build-plan artifact, append the pointer turn (docs/adr/0030)"]
         end
 
         subgraph web["web/ (HTTP surface)"]

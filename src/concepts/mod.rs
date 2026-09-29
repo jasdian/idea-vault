@@ -31,7 +31,7 @@ pub enum ConceptError {
     #[error("swarm produced no usable agent results to synthesize")]
     NothingToSynthesize,
     /// The planner's answer named neither a goal nor a task, so no build plan was persisted
-    /// (docs/adr/0029).
+    /// (docs/adr/0030).
     #[error("the model's answer had neither a goal nor a task — nothing was saved; try again")]
     PlanUnusable,
 }

@@ -547,7 +547,7 @@ struct Walk {
 }
 
 /// A read-only, bounded view over the reference sources attached to one idea (ADR-0021), used
-/// by the build-plan gates (docs/adr/0029) to check that a cited file and symbol exist. It never
+/// by the build-plan gates (docs/adr/0030) to check that a cited file and symbol exist. It never
 /// runs a command and never leaves a source root: exact paths go through [`resolve_rel`], suffix
 /// matches come from the same hidden-pruned, symlink-free walk as `source_grep` (done once per
 /// probe, capped at [`MAX_GREP_FILES`] files and [`PROBE_MAX_TOTAL_BYTES`]), and no file larger

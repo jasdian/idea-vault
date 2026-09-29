@@ -196,7 +196,7 @@ struct Candidate {
 }
 
 /// What a store-time quote may ground in: the pre-store idea body and the transcript, minus
-/// build-plan turns and their pointers (model-authored plan text, docs/adr/0029), normalized.
+/// build-plan turns and their pointers (model-authored plan text, docs/adr/0030), normalized.
 fn evidence_haystack(original_body: &str, conversation: &str) -> String {
     let said: String = store::split_turns(conversation)
         .into_iter()

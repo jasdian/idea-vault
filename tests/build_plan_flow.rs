@@ -1,4 +1,4 @@
-//! The build-plan persist boundary (docs/adr/0029): a gated plan lands as an artifact, the
+//! The build-plan persist boundary (docs/adr/0030): a gated plan lands as an artifact, the
 //! transcript gets only a pointer turn, and pointer turns never ground a later plan. Both
 //! capstone paths (the quick skill and the audited workflow) reach it against the mock Ollama.
 

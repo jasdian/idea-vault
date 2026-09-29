@@ -129,4 +129,4 @@ builder can trust, or at least one that says exactly what it didn't verify.
 - What I said is pinned; what only the foil concluded is labelled for confirmation.
 - The plan page gives me copy-ready `PROMPT.md` and `@plan.md` blocks.
 - A backslash-escaped quote grounds like the plain quote.
-- ADR-0029 records the decision; ADR-0022 and ADR-0023 are amended, not rewritten.
+- ADR-0030 records the decision; ADR-0022 and ADR-0023 are amended, not rewritten.

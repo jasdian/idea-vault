@@ -1,4 +1,4 @@
-//! The build-plan artifact page (docs/adr/0029): the "Use it" box offers `PROMPT.md` and
+//! The build-plan artifact page (docs/adr/0030): the "Use it" box offers `PROMPT.md` and
 //! `@plan.md` copy blocks derived at view time, escaped, and only for build-plan artifacts.
 
 mod support;

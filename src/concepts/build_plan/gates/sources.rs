@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn g6_ports_years_ids_and_step_numbers_are_not_counts() {
-        let mut plan = settled("In 2026 step 3 is done on port 3000 under ADR 0029.");
+        let mut plan = settled("In 2026 step 3 is done on port 3000 under ADR 0030.");
         run(&mut plan, &SourceProbe::default());
         assert_eq!(plan.settled.len(), 1, "{:?}", plan.verify);
     }

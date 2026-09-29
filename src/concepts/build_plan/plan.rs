@@ -1,4 +1,4 @@
-//! The build-plan grammar (docs/adr/0029): a tolerant parser from the model's markdown into a
+//! The build-plan grammar (docs/adr/0030): a tolerant parser from the model's markdown into a
 //! typed [`BuildPlan`], and the canonical renderer back. Pure — no I/O, no model call.
 //!
 //! The model writes `## Goal`, `## Settled`, `## Verify first`, `## Open questions`, `## Plan` and

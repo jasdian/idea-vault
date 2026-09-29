@@ -1,4 +1,4 @@
-//! The deterministic build-plan gates G1–G12 (docs/adr/0029). Each gate reads the parsed
+//! The deterministic build-plan gates G1–G12 (docs/adr/0030). Each gate reads the parsed
 //! [`BuildPlan`] plus the evidence it was given and moves claims between sections — Settled to
 //! Open questions, Verify first or Quarantined — adding `⟨…⟩` markers and header notes. No gate
 //! calls a model or runs a command; the only I/O is the bounded [`SourceProbe`], so [`run`] is

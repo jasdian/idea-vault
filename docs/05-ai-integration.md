@@ -65,7 +65,7 @@ Submodules:
   bounded (`MAX_LIST_ENTRIES` 200 entries, `MAX_GREP_FILES` 2,000 files scanned, `MAX_GREP_MATCHES`
   40 lines, `READ_MAX_CHARS` 12,000 characters) and deterministic (sorted walks, hidden trees skipped).
   The same module owns `SourceProbe`, which `LlmBackend::source_probe()` builds over a turn's
-  attached sources for the build-plan gates ([ADR-0029](./adr/0029-gated-build-plan.md)). It makes
+  attached sources for the build-plan gates ([ADR-0030](./adr/0030-gated-build-plan.md)). It makes
   no model call. `check_anchor` reports whether a cited `path:first-last` plus symbol is `Resolved`,
   `Moved`, `SymbolMissing`, `NoFile`, `Ambiguous` or `Unverified`. `find_tokens` returns a
   `TokenScan` whose `complete` flag is false when the walk hit a cap. It walks once per probe with

@@ -1,4 +1,4 @@
-# ADR-0029 — A gated build plan replaces the raw build prompt
+# ADR-0030 — A gated build plan replaces the raw build prompt
 
 - **Status:** Proposed
 - **Date:** 2026-09-29

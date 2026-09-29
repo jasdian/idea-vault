@@ -1,4 +1,4 @@
-//! The build-plan persist boundary (docs/adr/0029): parse the planner's answer, run the gates
+//! The build-plan persist boundary (docs/adr/0030): parse the planner's answer, run the gates
 //! over it against the idea's evidence, write the gated plan as `artifacts/<stamp>-build-plan.md`
 //! and append a short pointer turn to `conversation.md`. The plan body never enters the
 //! transcript, and build-plan turns are excluded from every evidence haystack

@@ -1,6 +1,6 @@
 //! The evidence gate: does a quoted claim occur, verbatim after normalization, in the text it
 //! claims to come from? Pure string matching with no model call, shared by store-time memory
-//! extraction and the build-plan gates (docs/adr/0023, docs/adr/0029).
+//! extraction and the build-plan gates (docs/adr/0023, docs/adr/0030).
 
 /// Fold text for quote matching: lowercase, typographic quotes and dashes made plain, markdown
 /// emphasis/quote/heading marks and backslash escapes dropped, whitespace collapsed — so a quote
@@ -33,7 +33,7 @@ pub fn normalize_for_match(text: &str) -> String {
 }
 
 /// The skill/workflow names whose transcript turns are build plans or their pointers
-/// (docs/adr/0029). Those turns are model-authored plan text, so they are never evidence: not
+/// (docs/adr/0030). Those turns are model-authored plan text, so they are never evidence: not
 /// for a later plan's quotes, and not for store-time memory quotes.
 pub const CAPSTONE_TURNS: &[&str] = &["build-prompt", "ready-to-build"];
 
