@@ -20,6 +20,14 @@ fn fake_claude() -> String {
 /// Build a client pointed at the fake, selecting its behavior via the `model` field (which the
 /// fake reads from `--model`).
 fn client(binary: &str, mode: Option<&str>) -> ClaudeCodeClient {
+    client_with_timeout(binary, mode, Duration::from_secs(10))
+}
+
+fn client_with_timeout(
+    binary: &str,
+    mode: Option<&str>,
+    token_timeout: Duration,
+) -> ClaudeCodeClient {
     ClaudeCodeClient::new(ClaudeCodeConfig {
         binary: binary.to_string(),
         cwd: PathBuf::from("."),
@@ -29,7 +37,7 @@ fn client(binary: &str, mode: Option<&str>) -> ClaudeCodeClient {
         model: mode.map(str::to_string),
         system_prompt: None,
         skip_permissions: true,
-        token_timeout: Duration::from_secs(10),
+        token_timeout,
         mcp_config_json: None,
     })
 }
@@ -108,5 +116,24 @@ async fn spawn_failure_is_a_backend_error() {
         Err(AiError::Backend(_)) => {}
         Err(other) => panic!("expected spawn Backend error, got {other:?}"),
         Ok(_) => panic!("expected spawn to fail"),
+    }
+}
+
+#[tokio::test]
+async fn prompt_write_to_a_cli_that_never_reads_stdin_times_out() {
+    // A prompt larger than the pipe buffer blocks the write until the CLI reads; it never does.
+    let c = client_with_timeout(
+        &fake_claude(),
+        Some("stalledstdin"),
+        Duration::from_millis(500),
+    );
+    let prompt = "x".repeat(1 << 20);
+    let outcome = tokio::time::timeout(Duration::from_secs(10), c.chat_stream(msg(&prompt)))
+        .await
+        .expect("the stdin write must be bounded by the token timeout, not hang");
+    match outcome {
+        Err(AiError::Timeout) => {}
+        Err(other) => panic!("expected Timeout, got {other:?}"),
+        Ok(_) => panic!("expected the prompt write to time out"),
     }
 }

@@ -9,6 +9,8 @@ for ((i=0; i<${#args[@]}; i++)); do
     --model)   mode="${args[$((i+1))]}" ;;
   esac
 done
+# A CLI that never reads its prompt: the client's stdin write must time out, not hang.
+[ "$mode" = "stalledstdin" ] && exec sleep 30
 # Drain stdin (the client writes one user message then closes it).
 cat >/dev/null 2>&1 || true
 case "$mode" in

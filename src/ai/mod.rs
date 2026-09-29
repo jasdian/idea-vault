@@ -9,7 +9,8 @@
 //!   outside `config.rs`; the base URL is always passed in).
 //! - [`claude_code`] — a second backend that shells out to the local `claude` CLI and streams its
 //!   `stream-json` output (docs/adr/0009). Brings agentic file tools to the foil.
-//! - [`backend`] — the [`LlmBackend`] enum that lets callers target either backend behind one API.
+//! - [`backend`] — the [`LlmBackend`] router struct that lets callers target either backend behind
+//!   one API.
 //! - [`stream`] — adapts a backend's token stream into SSE events (D11).
 //! - [`budget`] — assembles a prompt within the model's context limit (D21).
 //! - [`contract`] — pure output-shape checks + repair for skill answers (docs/adr/0023).

@@ -116,8 +116,12 @@ flowchart TD
     sources["sources"]
     config["config (bin-level leaf)"]
     app["app (bin-level)"]
+    import["import (bin-level)"]
 
     app --> web
+    import --> index
+    import --> vault
+    import --> domain
     web --> config
     config --> ai
     web --> concepts
@@ -153,6 +157,7 @@ flowchart TD
     classDef base fill:#2ea04322,stroke:#2ea043;
     class web top;
     class app top;
+    class import top;
     class domain base;
     class mcp base;
     class sources base;
@@ -173,6 +178,7 @@ flowchart TD
 | `config` (bin-level leaf) | `ai` (re-exports `ai::LlmBackendKind`) | everything else internal |
 | `web` | everything below, including `config` (`web::state::AppState` holds `Arc<Config>`) | `app` (no library module may depend on `web`) |
 | `app` (bin-level) | `web` only (re-exports `web::state::AppState`) | everything else internal |
+| `import` (bin-level, used only by `main`) | `index`, `vault`, `domain` | everything else internal; no library module may depend on `import` |
 
 > Rationale for a couple of edges that might surprise: `index` depends on `vault` because reindex
 > reads markdown to rebuild ([ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md)). `ai`

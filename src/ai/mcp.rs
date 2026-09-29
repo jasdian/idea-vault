@@ -323,15 +323,12 @@ fn parse_sse_body(body: &str, want_id: u64) -> Result<Value, String> {
     }
     flush(&mut data_lines, &mut events); // a final event with no trailing blank line
 
-    if events.is_empty() {
-        return Err("mcp response: SSE stream contained no parsable JSON-RPC event".to_string());
-    }
-    let matched = events
+    events
         .iter()
-        .find(|e| e.get("id").and_then(Value::as_u64) == Some(want_id));
-    Ok(matched
+        .find(|e| e.get("id").and_then(Value::as_u64) == Some(want_id))
+        .or_else(|| events.last())
         .cloned()
-        .unwrap_or_else(|| events.last().unwrap().clone()))
+        .ok_or_else(|| "mcp response: SSE stream contained no parsable JSON-RPC event".to_string())
 }
 
 /// Unwrap a JSON-RPC envelope (`{"jsonrpc","id","result"}` or `{"jsonrpc","id","error"}`) into

@@ -240,14 +240,21 @@ impl ClaudeCodeClient {
             .take()
             .ok_or_else(|| AiError::Backend("claude stdin unavailable".into()))?;
         let line = format!("{user_message}\n");
-        stdin
-            .write_all(line.as_bytes())
+        // Bounded like every stdout read (D20): a prompt larger than the pipe buffer blocks until
+        // the CLI reads it, and a CLI that never does would otherwise hang the turn.
+        let write = async {
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|e| AiError::Backend(format!("writing prompt to claude: {e}")))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| AiError::Backend(format!("flushing prompt to claude: {e}")))
+        };
+        tokio::time::timeout(self.token_timeout, write)
             .await
-            .map_err(|e| AiError::Backend(format!("writing prompt to claude: {e}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| AiError::Backend(format!("flushing prompt to claude: {e}")))?;
+            .map_err(|_| AiError::Timeout)??;
         drop(stdin);
 
         let stdout = child
@@ -401,16 +408,12 @@ fn classify_line(line: &str) -> Line {
     };
     match v.get("type").and_then(|t| t.as_str()) {
         // Streaming text lives inside stream_event → content_block_delta → text_delta.
-        Some("stream_event") => {
-            let inner = v.get("event");
-            let inner_type = inner.and_then(|e| e.get("type")).and_then(|t| t.as_str());
-            if inner_type == Some("content_block_delta") {
-                if let Some(text) = text_delta(inner.unwrap()) {
-                    return Line::Token(text);
-                }
-            }
-            Line::Ignore
-        }
+        Some("stream_event") => v
+            .get("event")
+            .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
+            .and_then(text_delta)
+            .map(Line::Token)
+            .unwrap_or(Line::Ignore),
         // Legacy top-level delta (non-stream_event mode).
         Some("content_block_delta") => text_delta(&v).map(Line::Token).unwrap_or(Line::Ignore),
         // An auth/API failure is reported on the assistant event's `error` field.
