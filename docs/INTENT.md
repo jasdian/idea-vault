@@ -1,3 +1,21 @@
+# Intent — build-plan fixes from the first live run
+
+"fix bugs on `main` branch, including task dependency and anything worth adjusting, based on
+your report." Both build chips ran live on `platform-map` with the claude-code backend; the
+report found commands that fail when copied from `plan.md`, a dropped fence, noisy kill flags and
+tasks that depend on no premise.
+
+## Acceptance criteria
+
+- A command copied from a `plan.md` cell can be run correctly: the header says `\|` is `|`.
+- A Fence item is never quarantined or moved; an unproven one stays fenced, marked unverified.
+- An absolute path at or under an attached source root counts as inside that source, for paths
+  and anchors alike, at that exact place only; a path climbing out with `..` never does.
+- A wired kill row is not flagged for lacking a stop word.
+- The template asks each task to list the `P#` it relies on, and premise wiring also matches
+  record ids such as `ADR-002` (not `UTF-8`, `SHA-256` or `ISO-4217`).
+- Every change is observed failing first, and `bash scripts/gate.sh` is green.
+
 # Intent — query-driven fact retrieval with snippets (experiment first)
 
 "add query-driven fact retrieval with snippets alongside the current graph, not instead of it,

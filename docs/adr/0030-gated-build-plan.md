@@ -151,8 +151,11 @@ The task graph is checked as a whole:
 - duplicate ids are renumbered, and dangling `T#`/`P#`/`Q#` references and self-edges are dropped
   with a note;
 - **premise wiring:** a Verify-first `P#` joins the `depends` of every task whose `touches` or
-  backticked text names one of the tokens in the premise's backticked spans (`premise P# wired`).
-  Plain words outside backticks never wire. A one-word span wires only when it is path-like or
+  backticked text names one of the tokens in the premise's backticked spans (`premise P# wired`),
+  or that shares a record id with the premise anywhere in its text (`ADR-002`, `JIRA-1234`: two or
+  more uppercase letters, a hyphen, two or more digits; one-digit names such as `UTF-8` and
+  standard prefixes such as `SHA-256`, `ISO-4217` or `RFC-9110` do not count). Other
+  plain words outside backticks never wire. A one-word span wires only when it is path-like or
   identifier-shaped; a directory-level path never wires by overlap; decimals, versions and
   unit-suffixed numbers (`0.7`, `v1.2`, `1.5x`) are not paths;
 - every kill row must gate a real task (`gates no task`);
@@ -201,8 +204,9 @@ In order:
 ### `plan.md` — the `/attack --loop` table
 
 - Header lines: `Goal:`, `Rules: PROMPT.md (How to run this, PINNED, Fence)`, `Selection rule:`
-  (the topmost `[ ]` whose Depends are all `[x]`, never `[?]`), `Fence:` and one STOP line per kill
-  row.
+  (the topmost `[ ]` whose Depends are all `[x]`, never `[?]`), `Commands:` (a `\|` in a cell is
+  the markdown table escape for `|`; run the command with a plain `|`), `Fence:` and one STOP line
+  per kill row.
 - Columns: `[ ] | T | Task | Depends | wave | score | model | touches | accept`. On task rows,
   `wave`, `score` and `model` come from G14, never from the model.
 - Only when Verify-first premises exist, a `T0` bootstrap row comes first. Its `0 | 00000 | haiku`
@@ -230,12 +234,38 @@ In order:
   (or `not audited`, when an audit ran) for findings past the audit cap, and
   `_k of N angles answered; missing: …_` when an angle returned nothing.
 
+### After the first live run (2026-09-29)
+
+Both chips were run against a copy of the vault with the claude-code backend on an idea with an
+attached source. Four defects were fixed:
+- **A fence is never removed.** G5 treats a Fence item as a guard, not a claim: an unproven path
+  stays fenced with an `unverified fence path: …` marker instead of moving to Quarantined, which
+  had left `plan.md` with `Fence: none` over the owner's read-only reference docs.
+- **An absolute source path resolves.** On claude-code the model sees a source by its absolute
+  root, so `SourceProbe::has_path` and `check_anchor` read a path at or under a root
+  root-relative, at that exact place in that root only (no suffix match, no other root). That
+  path had read as absent.
+- **A kill row needs no stop word.** G10 no longer requires "stop"/"kill"/"halt" in the row text:
+  every row is projected as `STOP if …`, and 5 of 6 live rows were flagged for lacking the word.
+  `checked by`, `gates` and the continue-anyway check remain.
+- **Tasks cite the premises they rely on.** The template's `depends:` line asks for `P#`, and
+  premise wiring also matches record ids (above). In the live run no task depended on any premise,
+  so `T0` gated nothing.
+
+The `plan.md` header also gained the `Commands:` line: copied literally, `grep -cE "A\|B"` counts
+0 where `grep -cE "A|B"` counts 2.
+
 ## Known misses
 
 These are named here rather than in each plan:
 - prose contradictions not written as K rows;
 - a benchmark claim transferred beyond its scope;
 - lowercase invented names that are not backticked;
+- a Settled claim that says more than its quote: G1 checks that the quote is the owner's verbatim
+  words, not that the claim follows from them. Live, a quoted owner question carried the foil's
+  answer into PINNED;
+- an UNCERTAIN harvested finding that restates the owner's own words moves them to Open, so the
+  audit's doubt can outrank the owner's statement;
 - whether hydration clipped the discussion: only the audited (`ready-to-build`) planner is told,
   the quick path is not, and the artifact header records it for neither, so the trust line reads
   `truncation not recorded`.
