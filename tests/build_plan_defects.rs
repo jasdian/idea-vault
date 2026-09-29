@@ -691,6 +691,10 @@ fn accept_repair_wraps_an_unbackticked_runner_command_and_keeps_the_task() {
             "`cargo test --lib parser` → exit 0",
         ),
         (
+            "cargo test --lib parser → it doesn't panic, 3 passed",
+            "`cargo test --lib parser` → it doesn't panic, 3 passed",
+        ),
+        (
             "grep -c TODO src/a.rs -> prints 0",
             "`grep -c TODO src/a.rs` -> prints 0",
         ),

@@ -480,23 +480,17 @@ const COMMAND_WORDS: usize = 12;
 // none or a quote is left open.
 fn unquoted_arrow(text: &str) -> Option<(usize, usize)> {
     let mut quote: Option<char> = None;
-    let mut found = None;
     for (at, ch) in text.char_indices() {
         match (quote, ch) {
             (Some(q), c) if c == q => quote = None,
             (Some(_), _) => {}
             (None, '\'' | '"') => quote = Some(ch),
-            (None, '→') if found.is_none() => found = Some((at, '→'.len_utf8())),
-            (None, '-') if found.is_none() && text[at..].starts_with("->") => {
-                found = Some((at, 2));
-            }
+            (None, '→') => return Some((at, '→'.len_utf8())),
+            (None, '-') if text[at..].starts_with("->") => return Some((at, 2)),
             _ => {}
         }
     }
-    if quote.is_some() {
-        return None;
-    }
-    found
+    None
 }
 
 fn without_quoted(text: &str) -> String {
