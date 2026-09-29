@@ -127,6 +127,6 @@ builder can trust, or at least one that says exactly what it didn't verify.
   Settled and say why, in a Quarantined section that is never copied as buildable.
 - REFUTED audit findings never reach Settled in the audited depth.
 - What I said is pinned; what only the foil concluded is labelled for confirmation.
-- The plan page gives me copy-ready `PROMPT.md` and `@plan.md` blocks.
+- The plan page gives me copy-ready `PROMPT.md` and `plan.md` blocks.
 - A backslash-escaped quote grounds like the plain quote.
 - ADR-0030 records the decision; ADR-0022 and ADR-0023 are amended, not rewritten.

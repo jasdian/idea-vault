@@ -1,5 +1,5 @@
 //! The build-plan artifact page (docs/adr/0030): the "Use it" box offers `PROMPT.md` and
-//! `@plan.md` copy blocks derived at view time, escaped, and only for build-plan artifacts.
+//! `plan.md` copy blocks derived at view time, escaped, and only for build-plan artifacts.
 
 mod support;
 
@@ -89,7 +89,12 @@ async fn artifact_page_offers_prompt_and_attack_plan_copy_blocks() {
         2,
         "{body}"
     );
-    assert!(body.contains("Use it") && body.contains("PROMPT.md") && body.contains("@plan.md"));
+    assert!(body.contains("Use it") && body.contains("PROMPT.md"));
+    assert!(
+        body.contains(r#"<h3 class="useit__label">plan.md</h3>"#)
+            && !body.contains(concat!("@", "plan")),
+        "{body}"
+    );
     assert!(body.contains("# Build: Ship the parser."), "{body}");
     assert!(body.contains("## PINNED — the owner said it"));
     assert!(body.contains("| [ ] | T | Task | Depends | wave | score | model | touches | accept |"));

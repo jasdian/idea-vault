@@ -1101,16 +1101,18 @@ fn trust_line(h: &RunHeader) -> String {
 
 /// The fixed run protocol every `PROMPT.md` carries, whatever the model wrote.
 const RUN_PROTOCOL: &str = "## How to run this
-1. Run every Bootstrap check first; a failing P# stops the tasks that depend on it.
-2. Never start a [?] task; ask the owner the listed Q# instead.
-3. Foil conclusions are hypotheses: confirm one before building on it.
-4. Edit only the paths a task's files: line names, never a Fence path. Needing any other file means stop and report.
-5. Build in wave order, one commit per task, with the commit subject equal to the task title.
-6. When a task has red-first, run it before the edit and confirm the stated failure. Take the baseline by copying files to a scratch directory, never with git stash, reset or checkout.
-7. A task passes when its acceptance exits as stated AND the test count matches.
-8. Stop after 3 failed attempts at a task and report it.
-9. Never run destructive or git-history commands.
-10. End each task's report with: files / accept exit=<code> <counts> / red-first / deviations.
+1. Before any edit, create one entry in your own task tracker (Claude Code task list / todo list) per T-row plus T0 (the Bootstrap checks), grouped by wave. Mark an entry in progress when you start it and completed only when its accept passed as stated (count included); leave a blocked or [?] entry open with the reason. plan.md (or, without one, this file's Plan) stays the source of truth.
+2. Run every Bootstrap check first; a failing P# stops the tasks that depend on it.
+3. Never start a [?] task; ask the owner the listed Q# instead.
+4. Foil conclusions are hypotheses: confirm one before building on it.
+5. Edit only the paths a task's files: line names, never a Fence path. Needing any other file means stop and report.
+6. Build in wave order, one commit per task, with the commit subject equal to the task title.
+7. Parallel waves: run T0 first; it is read-only and makes no commit. Tasks in the same wave touch disjoint files and do not depend on each other, so they MAY run in parallel, each in its own isolated worktree or subagent. A task that needs a file outside its files: line stops and reports, because it would break disjointness. At each wave boundary, integrate the finished tasks, re-run every finished task's accept and the project's full gate/test command, and only then start the next wave. A failed task blocks only its dependents; its wave siblings finish.
+8. When a task has red-first, run it before the edit and confirm the stated failure. Take the baseline by copying files to a scratch directory, never with git stash, reset or checkout.
+9. A task passes when its acceptance exits as stated AND the test count matches.
+10. Stop after 3 failed attempts at a task and report it.
+11. Never run destructive or git-history commands.
+12. End each task's report with: files / accept exit=<code> <counts> / red-first / deviations.
 ";
 
 /// `Waves: 1 → T2, T3 · 2 → T4 · unscheduled → T1` — a task with no derived wave (an owner
@@ -1315,7 +1317,7 @@ fn table_cell(text: &str) -> String {
         .replace('|', "\\|")
 }
 
-/// The id of the `@plan.md` row that runs every Verify-first check before any task.
+/// The id of the `plan.md` row that runs every Verify-first check before any task.
 const BOOTSTRAP_ID: &str = "T0";
 
 /// A table cell's text, or `—` when it is empty.
@@ -1328,7 +1330,7 @@ fn cell_or_dash(text: &str) -> String {
     }
 }
 
-/// Project a plan to an `/attack`-style `@plan.md`: header lines (goal, rules, selection rule,
+/// Project a plan to an `/attack`-style `plan.md`: header lines (goal, rules, selection rule,
 /// fence paths, one STOP line per kill criterion), then one table row per task with the
 /// gate-derived `wave`, `score` and `model`, its `touches` and `accept`. A `T0` bootstrap row
 /// whose accept is the joined Verify-first checks comes first, and every task relying on a
@@ -2275,6 +2277,76 @@ Run the cheapest disproof before any Rust exists.
             "{prompt}"
         );
         assert!(!prompt.contains("stops the run"), "{prompt}");
+    }
+
+    fn protocol_lines(prompt: &str) -> Vec<&str> {
+        let at = prompt.find("## How to run this\n").expect("the protocol");
+        prompt[at..]
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn prompt_task_list_is_the_first_step() {
+        let prompt = render_prompt(&leaf_plan(), &RunHeader::default(), "T", "s");
+        let lines = protocol_lines(&prompt);
+        let first = lines.first().copied().unwrap_or_default();
+        assert!(first.starts_with("1. "), "{prompt}");
+        let mut from = 0;
+        for phrase in [
+            "create one entry in your own task tracker (Claude Code task list / todo list) per T-row plus T0",
+            "grouped by wave",
+            "in progress when you start it",
+            "completed only when its accept passed as stated (count included)",
+            "leave a blocked or [?] entry open with the reason",
+            "plan.md",
+            "stays the source of truth",
+        ] {
+            let at = first[from..]
+                .find(phrase)
+                .unwrap_or_else(|| panic!("{phrase} missing or out of order in {first}"));
+            from += at + phrase.len();
+        }
+        let bootstrap = lines
+            .iter()
+            .position(|l| l.contains("Run every Bootstrap check first"))
+            .expect("the bootstrap step");
+        assert!(bootstrap > 0, "{prompt}");
+    }
+
+    #[test]
+    fn prompt_waves_may_run_in_parallel_and_integrate_at_each_boundary() {
+        let prompt = render_prompt(&leaf_plan(), &RunHeader::default(), "T", "s");
+        let lines = protocol_lines(&prompt);
+        let waves = lines
+            .iter()
+            .find(|l| l.contains("MAY run in parallel"))
+            .unwrap_or_else(|| panic!("no wave rule in {prompt}"));
+        let mut from = 0;
+        for phrase in [
+            "run T0 first",
+            "Tasks in the same wave touch disjoint files and do not depend on each other",
+            "MAY run in parallel, each in its own isolated worktree or subagent",
+            "A task that needs a file outside its files: line stops and reports",
+            "it would break disjointness",
+            "At each wave boundary, integrate the finished tasks",
+            "re-run every finished task's accept and the project's full gate/test command",
+            "only then start the next wave",
+            "A failed task blocks only its dependents; its wave siblings finish",
+        ] {
+            let at = waves[from..]
+                .find(phrase)
+                .unwrap_or_else(|| panic!("{phrase} missing or out of order in {waves}"));
+            from += at + phrase.len();
+        }
+        let build = lines
+            .iter()
+            .position(|l| l.contains("Build in wave order"))
+            .expect("the build step");
+        let rule = lines.iter().position(|l| l == waves).unwrap();
+        assert_eq!(rule, build + 1, "{prompt}");
     }
 
     #[test]

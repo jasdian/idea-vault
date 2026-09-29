@@ -330,7 +330,7 @@ pub struct ArtifactPage {
     pub file_name: String,
     pub meta: String,
     pub content_html: String,
-    /// `PROMPT.md` and `@plan.md` projections of a build plan, derived at view time.
+    /// `PROMPT.md` and `plan.md` projections of a build plan, derived at view time.
     pub prompt_md: Option<String>,
     pub attack_plan_md: Option<String>,
 }

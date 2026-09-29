@@ -270,7 +270,7 @@ fn same_token(a: &str, b: &str) -> bool {
 
 /// Add each Verify-first `P#` to the `depends` of every task whose `touches` or backticked text
 /// names one of the premise's backticked or path tokens. The edge is advisory for waves:
-/// `derive_waves` follows only `T#` edges, and the `@plan.md` projection orders a wired `P#`
+/// `derive_waves` follows only `T#` edges, and the `plan.md` projection orders a wired `P#`
 /// through its T0 bootstrap row. A one-word span wires only when path-like or identifier-shaped,
 /// and a directory-level path never wires by overlap.
 fn wire_premises(plan: &mut BuildPlan, report: &mut GateReport) {
@@ -620,8 +620,9 @@ fn derive_scores(plan: &mut BuildPlan) -> Vec<Score> {
 
 /// Topological layers over the ready tasks: a task lands in the first wave after all its
 /// dependencies whose members share no touched path with it and that holds fewer than
-/// [`WAVE_CAP`] tasks ([`WAVE_CAP_REVIEWED`] once any member touches the gate surface). Owner
-/// tasks and tasks on a cycle get no wave.
+/// [`WAVE_CAP`] tasks ([`WAVE_CAP_REVIEWED`] once any member touches the gate surface). A task
+/// with no `touches` could edit anything, so it sits alone in its wave. Owner tasks and tasks on
+/// a cycle get no wave.
 fn derive_waves(plan: &mut BuildPlan, scores: &[Score], report: &mut GateReport) {
     let edges = edges(plan);
     let n = plan.tasks.len();
@@ -662,11 +663,13 @@ fn derive_waves(plan: &mut BuildPlan, scores: &[Score], report: &mut GateReport)
             } else {
                 WAVE_CAP
             };
-            let clash = here.iter().any(|m| {
-                touches[*m]
-                    .iter()
-                    .any(|a| touches[i].iter().any(|b| paths_overlap(a, b)))
-            });
+            let unscoped = touches[i].is_empty() || here.iter().any(|m| touches[*m].is_empty());
+            let clash = (unscoped && !here.is_empty())
+                || here.iter().any(|m| {
+                    touches[*m]
+                        .iter()
+                        .any(|a| touches[i].iter().any(|b| paths_overlap(a, b)))
+                });
             if here.len() < cap && !clash {
                 break;
             }
@@ -1006,6 +1009,107 @@ mod tests {
         run(&mut p);
         let waves: Vec<_> = ["T1", "T2", "T3"].iter().map(|id| wave(&p, id)).collect();
         assert_eq!(waves, [Some("1"), Some("1"), Some("2")]);
+    }
+
+    fn synthetic_plans() -> Vec<BuildPlan> {
+        const POOL: [&str; 6] = [
+            "src/a.rs",
+            "src/b.rs",
+            "src/web",
+            "src/web/r.rs",
+            "tests/a.rs",
+            "docs/x.md",
+        ];
+        let mut plans = vec![plan(vec![
+            task("T1", &[]),
+            task("T2", &[("touches", "src/a.rs")]),
+            task("T3", &[("touches", "src/b.rs")]),
+        ])];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        for _ in 0..60 {
+            let n = 3 + next(6) as usize;
+            let mut tasks = Vec::new();
+            for i in 1..=n {
+                let touches: Vec<&str> = (0..next(3))
+                    .map(|_| POOL[next(POOL.len() as u64) as usize])
+                    .collect();
+                let depends: Vec<String> = (1..=n)
+                    .filter(|j| *j != i && next(4) == 0)
+                    .map(|j| format!("T{j}"))
+                    .collect();
+                let mut t = task(&format!("T{i}"), &[]);
+                if !touches.is_empty() {
+                    t.fields.insert("touches".into(), touches.join(", "));
+                }
+                if !depends.is_empty() {
+                    t.fields.insert("depends".into(), depends.join(", "));
+                }
+                t.needs_owner = next(8) == 0;
+                tasks.push(t);
+            }
+            plans.push(plan(tasks));
+        }
+        plans
+    }
+
+    #[test]
+    fn wave_invariant_holds_over_synthetic_plans() {
+        for (n, mut p) in synthetic_plans().into_iter().enumerate() {
+            run(&mut p);
+            let wave_of = |id: &str| -> Option<usize> { wave(&p, id).and_then(|w| w.parse().ok()) };
+            for t in &p.tasks {
+                let Some(w) = wave_of(&t.id) else {
+                    continue;
+                };
+                assert!(!t.needs_owner, "plan {n}: [?] {} has wave {w}", t.id);
+                for d in t.depends_tasks() {
+                    assert!(
+                        wave_of(&d).is_some_and(|dw| dw < w),
+                        "plan {n}: {} in wave {w} depends on {d} in {:?}",
+                        t.id,
+                        wave_of(&d)
+                    );
+                }
+                let siblings: Vec<&Item> = p
+                    .tasks
+                    .iter()
+                    .filter(|o| o.id != t.id && wave_of(&o.id) == Some(w))
+                    .collect();
+                if t.list("touches").is_empty() {
+                    assert!(
+                        siblings.is_empty(),
+                        "plan {n}: unscoped {} shares wave {w}",
+                        t.id
+                    );
+                }
+                for o in siblings {
+                    assert!(
+                        !t.depends_tasks().contains(&o.id),
+                        "plan {n}: {} and {} share wave {w}",
+                        t.id,
+                        o.id
+                    );
+                    let clash = t
+                        .list("touches")
+                        .iter()
+                        .any(|a| o.list("touches").iter().any(|b| paths_overlap(a, b)));
+                    assert!(
+                        !clash,
+                        "plan {n}: {} and {} overlap in wave {w}",
+                        t.id, o.id
+                    );
+                }
+            }
+            for t in p.tasks.iter().filter(|t| t.needs_owner) {
+                assert_eq!(wave(&p, &t.id), None, "plan {n}: [?] {}", t.id);
+            }
+        }
     }
 
     #[test]

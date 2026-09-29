@@ -73,9 +73,9 @@ serve here. Its rules do transfer.
    headings and the coverage spine are unchanged. Both persist boundaries (`skills::invoke` and
    `run_workflow`) route through one `build_plan::finish`.
 5. **Copy-ready projections are derived at view time.** The artifact page offers a `PROMPT.md` and an
-   `@plan.md` (for `/attack --loop`). Neither is stored, and both are escaped.
+   `plan.md` (for `/attack --loop`). Neither is stored, and both are escaped.
    - `PROMPT.md` splits PINNED (the owner's own words) from Foil conclusions (confirm at bootstrap).
-   - In `@plan.md`, `score` and `model` are left as `?`.
+   - In `plan.md`, `score` and `model` are left as `?`.
 6. **The workflow's findings block** carries the auditor's reason and the swarm's CONFIRMED / UNCERTAIN /
    REFUTED guidance, is unlabelled when the audit failed, and is clipped. An empty harvest skips the
    audit with a note.
