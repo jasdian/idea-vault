@@ -694,6 +694,41 @@ impl SourceProbe {
         }
     }
 
+    /// Whether `path` (root-relative or a unique-or-not path suffix, a file or a directory)
+    /// exists in an attached source. `None` when no source is attached, the path has a hidden
+    /// component, or the walk hit its cap before the path turned up.
+    pub fn has_path(&self, path: &str) -> Option<bool> {
+        let path = path.trim().trim_start_matches("./").trim_end_matches('/');
+        if self.roots.is_empty()
+            || path.is_empty()
+            || Path::new(path)
+                .components()
+                .any(|c| matches!(c, Component::Normal(n) if is_hidden(n)))
+        {
+            return None;
+        }
+        if self
+            .roots
+            .iter()
+            .any(|(_, root)| resolve_rel(root, path).is_ok())
+        {
+            return Some(true);
+        }
+        let walk = self.walk();
+        let (suffix, inside, below) = (format!("/{path}"), format!("/{path}/"), format!("{path}/"));
+        let hit = walk.files.iter().any(|(_, rel, _)| {
+            rel == path
+                || rel.ends_with(&suffix)
+                || rel.starts_with(&below)
+                || rel.contains(&inside)
+        });
+        match (hit, walk.truncated) {
+            (true, _) => Some(true),
+            (false, true) => None,
+            (false, false) => Some(false),
+        }
+    }
+
     /// Which of `tokens` occur in any attached source file, over the probe's one bounded walk.
     /// Blank tokens are ignored. With no source attached nothing is found and the scan is
     /// incomplete.
@@ -1278,6 +1313,26 @@ mod tests {
         let scan = probe.find_tokens(&["two".to_string()]);
         assert!(scan.found.is_empty());
         assert!(!scan.complete, "a capped walk leaves absent tokens unknown");
+    }
+
+    #[test]
+    fn probe_has_path_sees_files_and_directories() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        assert_eq!(probe.has_path("a/mod.rs"), Some(true));
+        assert_eq!(probe.has_path("src/calculator.rs"), Some(true));
+        assert_eq!(probe.has_path("risk/src/"), Some(true));
+        assert_eq!(probe.has_path("gone/mod.rs"), Some(false));
+        assert_eq!(probe.has_path("/etc/passwd"), Some(false));
+        assert_eq!(probe.has_path(".git/config"), None);
+        assert_eq!(SourceProbe::default().has_path("a/mod.rs"), None);
+        let mut capped = SourceProbe::new(&[source(&root)]);
+        capped.max_files = 1;
+        assert_eq!(
+            capped.has_path("gone/mod.rs"),
+            None,
+            "a capped walk is unknown"
+        );
     }
 
     #[test]

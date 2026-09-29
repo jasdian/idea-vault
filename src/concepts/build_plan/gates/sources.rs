@@ -7,7 +7,7 @@
 //! only a complete scan (or no attached source at all) can quarantine.
 
 use super::{GateInputs, GateReport};
-use crate::ai::sources::{AnchorCheck, SourceProbe};
+use crate::ai::sources::{AnchorCheck, SourceProbe, TokenScan};
 use crate::concepts::build_plan::plan::{BuildPlan, Item, Provenance};
 
 const NEGATION_CUES: [&str; 7] = [
@@ -15,9 +15,26 @@ const NEGATION_CUES: [&str; 7] = [
 ];
 const SUBTRACTION_CUES: [&str; 5] = ["excluding", "remaining", "minus", "without", "less"];
 const FRESHNESS_CUES: [&str; 3] = ["next free", "current max", "as of"];
+const NEGATION_WINDOW: usize = 4;
+const KNOWN_UNITS: [&str; 30] = [
+    "ms", "s", "sec", "secs", "second", "seconds", "min", "mins", "minute", "minutes", "h", "hr",
+    "hrs", "hour", "hours", "day", "days", "week", "weeks", "month", "months", "year", "kb", "mb",
+    "gb", "tb", "byte", "bytes", "line", "lines",
+];
+const NOT_PLURALS: [&str; 8] = [
+    "does",
+    "goes",
+    "less",
+    "plus",
+    "always",
+    "perhaps",
+    "sometimes",
+    "versus",
+];
 const FILE_EXTENSIONS: [&str; 12] = [
     "rs", "md", "toml", "json", "js", "ts", "py", "html", "yml", "yaml", "sh", "txt",
 ];
+const PLAINLY: &str = "name it plainly: no safe check for this text";
 const RECHECK: &str = "freshness: re-check at bootstrap";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,10 +57,12 @@ struct Ctx<'a> {
     owner_idea: String,
     foil: String,
     all: String,
+    scan: TokenScan,
+    complete: bool,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(inputs: &GateInputs<'a>) -> Self {
+    fn new(inputs: &GateInputs<'a>, plan: &BuildPlan) -> Self {
         let evidence = inputs.evidence;
         let join = |who: &[Provenance]| {
             who.iter()
@@ -52,8 +71,21 @@ impl<'a> Ctx<'a> {
                 .join("\n")
                 .to_lowercase()
         };
+        let gated = plan
+            .settled
+            .iter()
+            .chain(&plan.kills)
+            .chain(&plan.fence)
+            .flat_map(|i| tokens(&claim_text(i)));
+        let planned = plan.tasks.iter().flat_map(|t| tokens(&t.text));
+        let mut wanted: Vec<String> = gated.chain(planned).collect();
+        wanted.sort();
+        wanted.dedup();
+        let scan = inputs.probe.find_tokens(&wanted);
         Ctx {
             probe: inputs.probe,
+            complete: inputs.probe.is_empty() || scan.complete,
+            scan,
             owner_idea: join(&[Provenance::Owner, Provenance::Idea]),
             foil: join(&[Provenance::Foil]),
             all: join(&[Provenance::Owner, Provenance::Idea, Provenance::Foil]),
@@ -62,7 +94,7 @@ impl<'a> Ctx<'a> {
 }
 
 pub fn apply(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateReport) {
-    let ctx = Ctx::new(inputs);
+    let ctx = Ctx::new(inputs, plan);
     for item in &mut plan.verify {
         match g4(item, ctx.probe) {
             Some(G4::Unpaired(anchor)) => item.markers.push(unpaired_marker(&anchor)),
@@ -112,12 +144,7 @@ fn judge(item: &mut Item, kind: Kind, ctx: &Ctx, report: &mut GateReport) -> Ver
                     marker: unpaired_marker(&anchor),
                 }
             }
-            Some(G4::Faulty { check, marker }) => {
-                return Verdict::Verify {
-                    check: Some(check),
-                    marker,
-                }
-            }
+            Some(G4::Faulty { check, marker }) => return Verdict::Verify { check, marker },
             Some(G4::Resolved(markers)) => {
                 for _ in &markers {
                     report.count("anchors_ok");
@@ -144,8 +171,10 @@ fn judge(item: &mut Item, kind: Kind, ctx: &Ctx, report: &mut GateReport) -> Ver
 fn mark_task(task: &mut Item, ctx: &Ctx) {
     let mut found = Vec::new();
     for token in tokens(&task.text) {
-        let scan = ctx.probe.find_tokens(std::slice::from_ref(&token));
-        if !scan.found.contains(&token) && !word_in(&ctx.owner_idea, &token.to_lowercase()) {
+        let name_like = token
+            .chars()
+            .any(|c| c == '.' || c == '/' || c.is_uppercase());
+        if name_like && !known(ctx, &token) && !word_in(&ctx.owner_idea, &token.to_lowercase()) {
             found.push(format!("new: {token}"));
         }
     }
@@ -216,21 +245,70 @@ struct Anchor {
 
 fn parse_anchor(span: &str) -> Option<Anchor> {
     let (path, range) = span.rsplit_once(':')?;
-    if path.is_empty() || path.contains(char::is_whitespace) {
+    if path.is_empty() || path.contains(char::is_whitespace) || !file_like(path) || host_like(path)
+    {
         return None;
     }
     let (a, b) = range.split_once('-').unwrap_or((range, range));
-    Some(Anchor {
+    let (first, last): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+    (first <= last).then(|| Anchor {
         label: span.to_string(),
         path: path.to_string(),
-        first: a.parse().ok()?,
-        last: b.parse().ok()?,
+        first,
+        last,
     })
+}
+
+fn has_extension(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && FILE_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+    })
+}
+
+fn file_like(path: &str) -> bool {
+    path.contains('/') || has_extension(path)
+}
+
+fn host_like(path: &str) -> bool {
+    path.contains("://") || path.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+fn host_port(token: &str) -> bool {
+    token.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+fn path_like(token: &str) -> bool {
+    !token.contains("://")
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        && file_like(token)
+}
+
+fn shell_safe(text: &str) -> bool {
+    !text.is_empty()
+        && !text
+            .chars()
+            .any(|c| c == '\n' || c == '\\' || "`;|&$()<>\"'*?!".contains(c))
+}
+
+fn quote(text: &str) -> String {
+    format!("'{text}'")
+}
+
+/// Whether the token is in the scanned sources, by content or (for a path) by existence.
+fn known(ctx: &Ctx, token: &str) -> bool {
+    ctx.scan.found.contains(token) || (path_like(token) && ctx.probe.has_path(token) == Some(true))
 }
 
 enum G4 {
     Unpaired(String),
-    Faulty { check: String, marker: String },
+    Faulty {
+        check: Option<String>,
+        marker: String,
+    },
     Resolved(Vec<String>),
 }
 
@@ -271,13 +349,21 @@ fn g4(item: &Item, probe: &SourceProbe) -> Option<G4> {
             }
             AnchorCheck::Unverified => format!("unverified: could not check {}", a.path),
         };
-        return Some(G4::Faulty {
-            check: format!(
-                "`sed -n {},{}p {} | grep -nF {symbol}`",
-                a.first, a.last, a.path
-            ),
-            marker: faulty,
+        let check = (shell_safe(&a.path) && shell_safe(symbol)).then(|| {
+            format!(
+                "`sed -n {},{}p -- {} | grep -nF -- {}`",
+                a.first,
+                a.last,
+                quote(&a.path),
+                quote(symbol)
+            )
         });
+        let marker = if check.is_some() {
+            faulty
+        } else {
+            format!("{faulty}; {PLAINLY}")
+        };
+        return Some(G4::Faulty { check, marker });
     }
     Some(G4::Resolved(ok))
 }
@@ -334,6 +420,7 @@ fn tokens(text: &str) -> Vec<String> {
             && !t.contains(char::is_whitespace)
             && !numeric
             && parse_anchor(&t).is_none()
+            && !host_port(&t)
         {
             push(&t);
         }
@@ -347,57 +434,80 @@ fn tokens(text: &str) -> Vec<String> {
     out
 }
 
-fn grep_check(token: &str) -> String {
-    format!("`grep -rnF {token} .`")
+fn grep_verdict(token: &str, marker: String) -> Verdict {
+    if shell_safe(token) {
+        Verdict::Verify {
+            check: Some(format!("`grep -rnF -- {} .`", quote(token))),
+            marker,
+        }
+    } else {
+        Verdict::Verify {
+            check: None,
+            marker: format!("{marker}; {PLAINLY}"),
+        }
+    }
+}
+
+/// Whether a negation cue sits within a few words of the token in the item's own words.
+fn negated_near(text: &str, token: &str) -> bool {
+    let ws = words(text);
+    let needle = words(token);
+    if needle.is_empty() || ws.len() < needle.len() {
+        return false;
+    }
+    let cue = |w: &String| NEGATION_CUES.contains(&w.as_str());
+    (0..=ws.len() - needle.len())
+        .filter(|&at| ws[at..at + needle.len()] == needle[..])
+        .any(|at| {
+            let end = at + needle.len();
+            ws[at.saturating_sub(NEGATION_WINDOW)..at].iter().any(cue)
+                || ws[end..(end + NEGATION_WINDOW).min(ws.len())]
+                    .iter()
+                    .any(cue)
+        })
 }
 
 fn g5(item: &Item, ctx: &Ctx, report: &mut GateReport) -> Option<Verdict> {
-    let found_tokens = tokens(&claim_text(item));
-    if found_tokens.is_empty() {
-        return None;
-    }
-    let scan = ctx.probe.find_tokens(&found_tokens);
-    let complete = ctx.probe.is_empty() || scan.complete;
-    let mut nowhere = Vec::new();
-    let mut foil = Vec::new();
-    for t in &found_tokens {
+    let text = claim_text(item);
+    let mut nowhere: Vec<(String, bool)> = Vec::new();
+    let mut foil: Vec<String> = Vec::new();
+    for t in tokens(&text) {
         let lower = t.to_lowercase();
-        if scan.found.contains(t) || word_in(&ctx.owner_idea, &lower) {
+        if known(ctx, &t) || word_in(&ctx.owner_idea, &lower) {
             continue;
         }
         if word_in(&ctx.foil, &lower) {
             foil.push(t);
         } else {
-            nowhere.push(t);
+            let unknown_path =
+                path_like(&t) && !ctx.probe.is_empty() && ctx.probe.has_path(&t).is_none();
+            nowhere.push((t, ctx.complete && !unknown_path));
         }
     }
-    let unproven = nowhere.first().or(foil.first()).copied()?;
-    if words(&item.text)
-        .iter()
-        .any(|w| NEGATION_CUES.contains(&w.as_str()))
-    {
+    let unproven = nowhere.iter().map(|(t, _)| t).chain(&foil);
+    if let Some(token) = unproven.into_iter().find(|t| negated_near(&text, t)) {
         report.count("premises");
-        return Some(Verdict::Verify {
-            check: Some(grep_check(unproven)),
-            marker: "absence claim: a premise, not a fact".to_string(),
-        });
+        return Some(grep_verdict(
+            token,
+            "absence claim: a premise, not a fact".to_string(),
+        ));
     }
-    if let Some(token) = nowhere.first() {
-        if complete {
+    if let Some((token, complete)) = nowhere.first() {
+        if *complete {
             return Some(Verdict::Quarantine(format!(
                 "{token} appears nowhere in the discussion or the sources"
             )));
         }
-        return Some(Verdict::Verify {
-            check: Some(grep_check(token)),
-            marker: format!("unverified: {token} not found, source scan incomplete"),
-        });
+        return Some(grep_verdict(
+            token,
+            format!("unverified: {token} not found, source scan incomplete"),
+        ));
     }
     let token = foil.first()?;
-    Some(Verdict::Verify {
-        check: Some(grep_check(token)),
-        marker: format!("foil-coined: {token} — only the foil wrote it"),
-    })
+    Some(grep_verdict(
+        token,
+        format!("foil-coined: {token} — only the foil wrote it"),
+    ))
 }
 
 struct Figure {
@@ -405,34 +515,69 @@ struct Figure {
     unit: Option<String>,
 }
 
-/// Counts in `text` outside backticks: a number of at least two digits, or a number with a unit.
+fn is_unit(word: &str) -> bool {
+    KNOWN_UNITS.contains(&word)
+        || (word.len() >= 4
+            && word.ends_with('s')
+            && !["ss", "us", "is"].iter().any(|e| word.ends_with(e))
+            && !NOT_PLURALS.contains(&word))
+}
+
+fn numeric(piece: &str) -> bool {
+    piece.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && piece
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+}
+
+/// A bare number that names a port, a year or an identifier rather than a count.
+fn label_number(num: &str, prev: Option<&str>) -> bool {
+    let year = num.len() == 4 && (num.starts_with("19") || num.starts_with("20"));
+    let padded = num.len() >= 2 && num.starts_with('0');
+    year || padded || matches!(prev, Some("port" | "ports"))
+}
+
+/// Counts in `text` outside backticks: a number with a unit, or a bare count of at least two
+/// digits that is not a port, year or identifier. Comparator and currency prefixes are stripped
+/// and `/` separates pieces, so `>5 failures/15 min` holds two figures.
 fn figures(text: &str) -> Vec<Figure> {
     let (_, outside) = spans(text);
-    let ws: Vec<&str> = outside.split_whitespace().collect();
+    let mut pieces: Vec<String> = Vec::new();
+    for raw in outside.split_whitespace() {
+        let w =
+            trim_edges(raw).trim_start_matches(['>', '<', '=', '~', '$', '€', '£', '≥', '≤', '+']);
+        pieces.extend(
+            w.split('/')
+                .filter(|p| !p.is_empty())
+                .map(str::to_lowercase),
+        );
+    }
     let mut out = Vec::new();
-    for (i, raw) in ws.iter().enumerate() {
-        let w = trim_edges(raw);
-        let (num, percent) = match w.strip_suffix('%') {
-            Some(n) => (n, true),
-            None => (w, false),
+    for (i, piece) in pieces.iter().enumerate() {
+        let percent = piece.ends_with('%');
+        let body = piece.strip_suffix('%').unwrap_or(piece);
+        let (num, glued) = match body.find(|c: char| c.is_alphabetic()) {
+            Some(at) if at > 0 && KNOWN_UNITS.contains(&&body[at..]) => {
+                (&body[..at], Some(body[at..].to_string()))
+            }
+            _ => (body, None),
         };
-        let numeric = num.chars().next().is_some_and(|c| c.is_ascii_digit())
-            && num
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == '.' || c == ',');
-        if !numeric {
+        if !numeric(num) {
             continue;
         }
         let unit = if percent {
             Some("%".to_string())
         } else {
-            ws.get(i + 1)
-                .map(|n| trim_edges(n).to_lowercase())
-                .filter(|n| n.len() >= 2 && n.chars().all(|c| c.is_ascii_alphabetic()))
-                .filter(|n| !matches!(n.as_str(), "of" | "or" | "and" | "to" | "in" | "on"))
+            glued.or_else(|| {
+                pieces
+                    .get(i + 1)
+                    .map(|n| trim_edges(n).to_string())
+                    .filter(|n| n.chars().all(|c| c.is_ascii_alphabetic()) && is_unit(n))
+            })
         };
         let digits = num.chars().filter(char::is_ascii_digit).count();
-        if digits >= 2 || unit.is_some() {
+        let prev = i.checked_sub(1).map(|p| pieces[p].as_str());
+        if unit.is_some() || (digits >= 2 && !label_number(num, prev)) {
             out.push(Figure {
                 num: num.to_string(),
                 unit,
@@ -491,8 +636,11 @@ fn g6(item: &Item, ctx: &Ctx) -> Option<Verdict> {
 }
 
 fn freshness_cue(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    FRESHNESS_CUES.iter().any(|c| lower.contains(c)) || words(&lower).iter().any(|w| w == "latest")
+    let joined = format!(" {} ", words(text).join(" "));
+    FRESHNESS_CUES
+        .iter()
+        .chain(&["latest"])
+        .any(|c| joined.contains(&format!(" {c} ")))
 }
 
 fn g12(item: &Item) -> Option<Verdict> {
@@ -502,7 +650,13 @@ fn g12(item: &Item) -> Option<Verdict> {
     let (ticks, _) = spans(&item.text);
     let dir = ticks
         .iter()
-        .find(|t| t.contains('/') && !t.contains(char::is_whitespace) && parse_anchor(t).is_none())
+        .find(|t| {
+            t.contains('/')
+                && !t.starts_with('/')
+                && !t.contains("://")
+                && !t.contains(char::is_whitespace)
+                && parse_anchor(t).is_none()
+        })
         .map(|t| {
             let t = t.trim_end_matches('/');
             match t.rsplit_once('/') {
@@ -511,7 +665,9 @@ fn g12(item: &Item) -> Option<Verdict> {
             }
         });
     Some(Verdict::Verify {
-        check: dir.map(|d| format!("`ls {d} | tail -1`")),
+        check: dir
+            .filter(|d| shell_safe(d))
+            .map(|d| format!("`ls -- {} | tail -1`", quote(&d))),
         marker: RECHECK.to_string(),
     })
 }
@@ -591,7 +747,7 @@ mod tests {
         assert!(markers(item).contains("moved: symbol found at line 3"));
         assert_eq!(
             item.field("check"),
-            Some("`sed -n 1,2p src/store.rs | grep -nF parse_turn`")
+            Some("`sed -n 1,2p -- 'src/store.rs' | grep -nF -- 'parse_turn'`")
         );
     }
 
@@ -621,7 +777,10 @@ mod tests {
         assert!(plan.quarantined.is_empty());
         let item = &plan.verify[0];
         assert!(markers(item).contains("foil-coined: [[slug#fact]] — only the foil wrote it"));
-        assert_eq!(item.field("check"), Some("`grep -rnF [[slug#fact]] .`"));
+        assert_eq!(
+            item.field("check"),
+            Some("`grep -rnF -- '[[slug#fact]]' .`")
+        );
     }
 
     #[test]
@@ -643,7 +802,7 @@ mod tests {
         assert!(plan.quarantined.is_empty());
         let item = &plan.verify[0];
         assert!(markers(item).contains("absence claim: a premise, not a fact"));
-        assert_eq!(item.field("check"), Some("`grep -rnF ACCOUNT_MODE .`"));
+        assert_eq!(item.field("check"), Some("`grep -rnF -- 'ACCOUNT_MODE' .`"));
         assert_eq!(report.tally.get("premises"), Some(&1));
     }
 
@@ -721,7 +880,7 @@ mod tests {
         run(&mut plan, &SourceProbe::default());
         assert!(plan.settled.is_empty());
         let item = &plan.verify[0];
-        assert_eq!(item.field("check"), Some("`ls docs/adr | tail -1`"));
+        assert_eq!(item.field("check"), Some("`ls -- 'docs/adr' | tail -1`"));
         assert!(markers(item).contains("freshness"));
     }
 
@@ -734,5 +893,106 @@ mod tests {
         run(&mut plan, &SourceProbe::default());
         assert_eq!(plan.tasks.len(), 1);
         assert!(markers(&plan.tasks[0]).contains("freshness"));
+    }
+
+    #[test]
+    fn g4_a_host_port_in_a_settled_item_is_not_an_anchor() {
+        let mut plan = settled(
+            "The app binds `10.0.0.7:8080`, talks to `db.internal:5432` and logs at `12:30`.",
+        );
+        run(&mut plan, &SourceProbe::default());
+        assert_eq!(plan.settled.len(), 1, "{:?}", plan.verify);
+    }
+
+    #[test]
+    fn g4_a_reversed_range_is_not_an_anchor() {
+        assert!(parse_anchor("src/store.rs:20-10").is_none());
+        assert!(parse_anchor("src/store.rs:10-20").is_some());
+        assert!(parse_anchor("store.rs:7").is_some());
+    }
+
+    #[test]
+    fn g4_a_verify_first_item_gets_the_marker() {
+        let (_d, probe) = probe_over(&[("src/store.rs", CODE)]);
+        let mut plan = BuildPlan {
+            verify: vec![Item::new(
+                "V1",
+                "Turns parse at `src/store.rs:3-3` in `parse_turn`.",
+            )],
+            ..BuildPlan::default()
+        };
+        run(&mut plan, &probe);
+        assert!(markers(&plan.verify[0]).contains("resolved in code"));
+    }
+
+    #[test]
+    fn g4_a_fence_item_is_not_anchor_gated() {
+        let mut plan = BuildPlan {
+            fence: vec![Item::new("F1", "Leave `src/store.rs:3-4` alone.")],
+            ..BuildPlan::default()
+        };
+        run(&mut plan, &SourceProbe::default());
+        assert_eq!(plan.fence.len(), 1);
+    }
+
+    #[test]
+    fn g5_an_unrelated_not_does_not_shield_an_invented_token() {
+        let mut plan =
+            settled("The loader runs `FrobnicateAll` and then the cache is not warm at start.");
+        run(&mut plan, &SourceProbe::default());
+        assert!(plan.verify.is_empty(), "{:?}", plan.verify);
+        assert_eq!(plan.quarantined.len(), 1);
+    }
+
+    #[test]
+    fn g5_a_token_with_shell_characters_gets_no_check() {
+        let mut plan = settled("`x;rm${IFS}-rf` is never queried by the loader.");
+        run(&mut plan, &SourceProbe::default());
+        let item = &plan.verify[0];
+        assert_eq!(item.field("check"), None);
+        assert!(markers(item).contains("name it plainly"));
+    }
+
+    #[test]
+    fn g5_a_dash_token_is_quoted_after_a_double_dash() {
+        let mut plan = settled("`-rf` is never queried by the loader.");
+        run(&mut plan, &SourceProbe::default());
+        assert_eq!(
+            plan.verify[0].field("check"),
+            Some("`grep -rnF -- '-rf' .`")
+        );
+    }
+
+    #[test]
+    fn g5_a_real_path_in_a_source_is_not_coined() {
+        let (_d, probe) = probe_over(&[("src/gate/mod.rs", "// nothing here\n")]);
+        let mut plan = settled("The gates live in `src/gate/mod.rs`.");
+        run(&mut plan, &probe);
+        assert_eq!(plan.settled.len(), 1, "{:?}", plan.quarantined);
+    }
+
+    #[test]
+    fn g6_a_kill_threshold_with_a_comparator_is_seen() {
+        let mut plan = BuildPlan {
+            kills: vec![Item::new("K1", "Stop at >5 failures/15 min.")],
+            ..BuildPlan::default()
+        };
+        run(&mut plan, &SourceProbe::default());
+        assert!(plan.kills.is_empty());
+        assert!(markers(&plan.verify[0]).contains("figure not in the discussion: 5"));
+    }
+
+    #[test]
+    fn g6_ports_years_ids_and_step_numbers_are_not_counts() {
+        let mut plan = settled("In 2026 step 3 is done on port 3000 under ADR 0029.");
+        run(&mut plan, &SourceProbe::default());
+        assert_eq!(plan.settled.len(), 1, "{:?}", plan.verify);
+    }
+
+    #[test]
+    fn g12_alias_of_is_not_a_freshness_cue() {
+        let mut plan = settled("The alias of the store is the vault.");
+        run(&mut plan, &SourceProbe::default());
+        assert_eq!(plan.settled.len(), 1, "{:?}", plan.verify);
     }
 }
