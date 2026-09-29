@@ -112,7 +112,7 @@ erDiagram
         markdown lines "one pointer per fact"
     }
     ARTIFACT_MD {
-        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine), lens, created, model"
+        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine|build_plan), lens, created, model"
         markdown body "one lens's finding, the converged synthesis, or quarantined store-time facts"
     }
     ARTIFACT_HTML {

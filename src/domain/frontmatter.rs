@@ -390,6 +390,25 @@ body\n";
     }
 
     #[test]
+    fn a_build_plan_artifact_round_trips() {
+        let input = "---\n\
+slug: 20260708-193045-build-prompt\n\
+title: Build plan\n\
+kind: build_plan\n\
+lens: build-prompt\n\
+created: 2026-07-08T19:30:45Z\n\
+model: claude-code\n\
+---\n\
+## Goal\n";
+        let (fm, body) = parse_artifact(input).unwrap();
+        assert_eq!(fm.kind.as_str(), "build_plan");
+        assert_eq!(fm.lens.as_deref(), Some("build-prompt"));
+        let (fm2, body2) = parse_artifact(&emit_artifact(&fm, &body).unwrap()).unwrap();
+        assert_eq!(fm, fm2);
+        assert_eq!(body, body2);
+    }
+
+    #[test]
     fn parse_artifact_missing_fence_errors() {
         let err = parse_artifact("no fence").unwrap_err();
         assert!(matches!(err, DomainError::MissingFrontmatter));

@@ -1199,7 +1199,8 @@ mod tests {
                         Some("extract-key-decisions".to_string())
                     }
                     crate::domain::ArtifactKind::Synthesis
-                    | crate::domain::ArtifactKind::Quarantine => None,
+                    | crate::domain::ArtifactKind::Quarantine
+                    | crate::domain::ArtifactKind::BuildPlan => None,
                 },
                 created: Utc.with_ymd_and_hms(2026, 7, 8, 19, 30, 45).unwrap(),
                 model: "qwen3-8b-local".into(),

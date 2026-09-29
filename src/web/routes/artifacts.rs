@@ -155,6 +155,7 @@ fn artifact_meta(fm: &crate::domain::ArtifactFrontmatter) -> String {
             format!("finding · {} · {when}", knowledge::lens_short(lens))
         }
         (ArtifactKind::Finding, None) => format!("finding · {when}"),
+        (ArtifactKind::BuildPlan, _) => format!("build plan · {when}"),
         (ArtifactKind::Quarantine, _) => format!("quarantined facts · unverified · {when}"),
     }
 }

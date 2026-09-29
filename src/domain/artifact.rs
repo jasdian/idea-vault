@@ -5,13 +5,15 @@
 use crate::domain::frontmatter::ArtifactFrontmatter;
 
 /// What an artifact file holds: one lens's findings, the converged synthesis of a run, or the
-/// facts a store's evidence gate held back from memory (docs/adr/0023).
+/// facts a store's evidence gate held back from memory (docs/adr/0023), or a gated build plan
+/// (docs/adr/0029).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Finding,
     Synthesis,
     Quarantine,
+    BuildPlan,
 }
 
 impl ArtifactKind {
@@ -20,6 +22,7 @@ impl ArtifactKind {
             ArtifactKind::Finding => "finding",
             ArtifactKind::Synthesis => "synthesis",
             ArtifactKind::Quarantine => "quarantine",
+            ArtifactKind::BuildPlan => "build_plan",
         }
     }
 }
