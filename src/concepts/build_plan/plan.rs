@@ -18,7 +18,7 @@ pub struct Item {
     pub id: String,
     pub text: String,
     pub fields: BTreeMap<String, String>,
-    /// Gate annotations, rendered as `⟨…⟩` after the text. Never parsed back.
+    /// Gate annotations, rendered as `⟨…⟩` after the text. Read back only by [`parse_artifact`].
     pub markers: Vec<String>,
     /// A task only its owner can do or unblock (`[?]`); never auto-selected by a build loop.
     pub needs_owner: bool,
@@ -240,6 +240,38 @@ fn strip_markers(line: &str) -> String {
     out.trim_end().to_string()
 }
 
+/// The text of every top-level `⟨…⟩` marker in a line, in order.
+fn extract_markers(line: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in line.chars() {
+        match ch {
+            '⟨' => {
+                if depth > 0 {
+                    current.push(ch);
+                }
+                depth += 1;
+            }
+            '⟩' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let text = current.trim();
+                    if !text.is_empty() {
+                        found.push(text.to_string());
+                    }
+                    current.clear();
+                } else {
+                    current.push(ch);
+                }
+            }
+            c if depth > 0 => current.push(c),
+            _ => {}
+        }
+    }
+    found
+}
+
 /// Split a line on `·` or `|` separators that sit outside backticks.
 fn split_inline(line: &str) -> Vec<String> {
     let mut parts = Vec::new();
@@ -380,7 +412,7 @@ fn is_rule_row(row: &str) -> bool {
 
 /// A markdown table in `## Plan`: the header names the columns (id, task, depends, touches,
 /// accept), any other column is ignored.
-fn parse_table(rows: &[&str]) -> Vec<Item> {
+fn parse_table(rows: &[&str], keep_markers: bool) -> Vec<Item> {
     let Some((header, body)) = rows.split_first() else {
         return Vec::new();
     };
@@ -402,6 +434,9 @@ fn parse_table(rows: &[&str]) -> Vec<Item> {
             .unwrap_or_default();
         let mut item = Item::new(&id, &strip_markers(&get(task_col)));
         item.needs_owner = owner;
+        if keep_markers {
+            item.markers = extract_markers(&get(task_col));
+        }
         for (key, names) in [
             ("depends", &["depends", "depends on", "deps"][..]),
             ("touches", &["touches", "files"][..]),
@@ -420,14 +455,14 @@ fn parse_table(rows: &[&str]) -> Vec<Item> {
 /// Parse one list-shaped section into items. Item lines open with an id or a list marker;
 /// `key: value` lines (or `·`/`|`-separated fields on the item line) attach to the last item;
 /// other continuation lines extend its text.
-fn parse_items(lines: &[&str], section: Section) -> Vec<Item> {
+fn parse_items(lines: &[&str], section: Section, keep_markers: bool) -> Vec<Item> {
     let table: Vec<&str> = lines
         .iter()
         .copied()
         .filter(|l| l.trim_start().starts_with('|'))
         .collect();
     if section == Section::Plan && table.len() >= 2 {
-        return parse_table(&table);
+        return parse_table(&table, keep_markers);
     }
     let mut items: Vec<Item> = Vec::new();
     let mut in_fence = false;
@@ -440,8 +475,14 @@ fn parse_items(lines: &[&str], section: Section) -> Vec<Item> {
         if in_fence || line.trim().is_empty() {
             continue;
         }
+        let line_markers = if keep_markers {
+            extract_markers(raw)
+        } else {
+            Vec::new()
+        };
         if let (Some(last), Some((key, value))) = (items.last_mut(), as_field(&line)) {
             last.fields.insert(key, value);
+            last.markers.extend(line_markers);
             continue;
         }
         let (rest, listed, owner) = strip_list_marker(&line);
@@ -449,6 +490,7 @@ fn parse_items(lines: &[&str], section: Section) -> Vec<Item> {
         if !starts_item {
             if let Some(last) = items.last_mut() {
                 last.text = format!("{} {}", last.text, line.trim()).trim().to_string();
+                last.markers.extend(line_markers);
             }
             continue;
         }
@@ -467,6 +509,7 @@ fn parse_items(lines: &[&str], section: Section) -> Vec<Item> {
         let mut item = Item::new(&id, &text);
         item.needs_owner = owner;
         item.provenance = provenance;
+        item.markers = line_markers;
         for part in tail {
             match as_field(part) {
                 Some((key, value)) => {
@@ -496,13 +539,15 @@ pub fn parse(answer: &str) -> Result<BuildPlan, Unusable> {
 }
 
 /// Parse a stored build-plan artifact body. Unlike [`parse`] it reads the code-owned
-/// `## Quarantined` section back (each item with its `reason`); the two italic header lines and
+/// `## Quarantined` section back (each item with its `reason`) and keeps each item's `⟨…⟩` gate
+/// markers in [`Item::markers`]; the two italic header lines and
 /// any `> note` lines before `## Goal` are dropped. Never call it on a model answer.
 pub fn parse_artifact(body: &str) -> Result<BuildPlan, Unusable> {
     parse_inner(body, true)
 }
 
 fn parse_inner(answer: &str, read_quarantine: bool) -> Result<BuildPlan, Unusable> {
+    let keep = read_quarantine;
     let repaired = repair_build_plan(answer);
     let mut plan = BuildPlan::default();
     let mut blocks: Vec<(Section, Vec<&str>)> = Vec::new();
@@ -533,14 +578,14 @@ fn parse_inner(answer: &str, read_quarantine: bool) -> Result<BuildPlan, Unusabl
                 }
                 plan.goal.push_str(text.trim());
             }
-            Section::Settled => plan.settled.extend(parse_items(body, *section)),
-            Section::Verify => plan.verify.extend(parse_items(body, *section)),
-            Section::Open => plan.open.extend(parse_items(body, *section)),
-            Section::Plan => plan.tasks.extend(parse_items(body, *section)),
-            Section::Kill => plan.kills.extend(parse_items(body, *section)),
-            Section::Fence => plan.fence.extend(parse_items(body, *section)),
+            Section::Settled => plan.settled.extend(parse_items(body, *section, keep)),
+            Section::Verify => plan.verify.extend(parse_items(body, *section, keep)),
+            Section::Open => plan.open.extend(parse_items(body, *section, keep)),
+            Section::Plan => plan.tasks.extend(parse_items(body, *section, keep)),
+            Section::Kill => plan.kills.extend(parse_items(body, *section, keep)),
+            Section::Fence => plan.fence.extend(parse_items(body, *section, keep)),
             Section::Quarantined if read_quarantine => {
-                plan.quarantined.extend(parse_items(body, *section));
+                plan.quarantined.extend(parse_items(body, *section, keep));
             }
             Section::Quarantined | Section::Other => {}
         }
@@ -618,11 +663,13 @@ pub fn render(plan: &BuildPlan) -> String {
 }
 
 fn push_item(out: &mut String, item: &Item, box_: &str) {
-    out.push_str(&format!("- {box_}{}: {}", item.id, item.text));
+    out.push_str(&format!("- {box_}{}: {}\n", item.id, item.text));
+}
+
+fn push_notes(out: &mut String, item: &Item) {
     for m in &item.markers {
-        out.push_str(&format!(" ⟨{m}⟩"));
+        out.push_str(&format!("  gate: {m}\n"));
     }
-    out.push('\n');
 }
 
 fn push_fields(out: &mut String, item: &Item, keys: &[&str]) {
@@ -644,15 +691,22 @@ fn prompt_section(out: &mut String, heading: &str, items: &[Item], keys: &[&str]
     for item in items {
         push_item(out, item, "");
         push_fields(out, item, keys);
+        push_notes(out, item);
     }
 }
 
 /// Project a plan to a `PROMPT.md` any coding agent can follow: owner pins, foil conclusions to
 /// confirm, fence, bootstrap checks, owner questions, tasks, kill criteria and the quarantined
-/// claims not to build on. Empty sections are omitted except the two settled ones.
+/// claims not to build on. Every item's gate markers follow it as `gate:` lines and the whole
+/// goal is kept. Empty sections are omitted except the two settled ones.
 pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
-    let goal = plan.goal.lines().next().unwrap_or("").trim();
+    let mut goal_lines = plan.goal.lines();
+    let goal = goal_lines.next().unwrap_or("").trim();
     let mut out = format!("# Build: {goal}\n\n_idea: {idea_title} · plan: {stem}_\n");
+    let rest = goal_lines.collect::<Vec<_>>().join("\n");
+    if !rest.trim().is_empty() {
+        out.push_str(&format!("\n{}\n", rest.trim()));
+    }
     let (pinned, foil): (Vec<Item>, Vec<Item>) = plan
         .settled
         .iter()
@@ -692,6 +746,7 @@ pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
         for t in &plan.tasks {
             push_item(&mut out, t, if t.needs_owner { "[?] " } else { "[ ] " });
             push_fields(&mut out, t, &["depends", "touches", "accept"]);
+            push_notes(&mut out, t);
         }
     }
     prompt_section(
@@ -1092,5 +1147,76 @@ Run the cheapest disproof before any Rust exists.
         );
         assert_eq!(back.goal, plan.goal);
         assert!(parse(&body).unwrap().quarantined.is_empty());
+    }
+
+    fn marked_body() -> String {
+        let mut plan = projected();
+        plan.settled[1].markers.push("foil-coined".into());
+        plan.tasks[0]
+            .markers
+            .push("needs you: pick a spread".into());
+        plan.tasks[1].markers.push("new: backtest/run.py".into());
+        plan.verify[0]
+            .markers
+            .push("absence claim: a premise, not a fact".into());
+        format!(
+            "# Build plan — Trader\n_quick · m · t_\n\n{}\n",
+            render(&plan)
+        )
+    }
+
+    #[test]
+    fn projection_markers_survive_the_stored_artifact() {
+        let back = parse_artifact(&marked_body()).unwrap();
+        assert_eq!(back.settled[1].markers, vec!["foil-coined".to_string()]);
+        assert_eq!(
+            back.tasks[1].markers,
+            vec!["new: backtest/run.py".to_string()]
+        );
+        assert_eq!(back.settled[1].text, "Close is never gated like open.");
+        let prompt = render_prompt(&back, "Trader", "stem");
+        for m in [
+            "foil-coined",
+            "needs you: pick a spread",
+            "new: backtest/run.py",
+            "absence claim: a premise, not a fact",
+        ] {
+            assert!(prompt.contains(&format!("  gate: {m}\n")), "{m}\n{prompt}");
+        }
+        let at = prompt.find("T2:").unwrap();
+        assert!(
+            prompt[at..].find("gate: new: backtest").unwrap()
+                < prompt[at..].find("## Kill").unwrap()
+        );
+    }
+
+    #[test]
+    fn projection_markers_are_never_read_from_a_model_answer() {
+        let answer = "## Goal\nShip. ⟨pre-approved⟩\n## Settled\n- S1: x ⟨confirmed by gate⟩\n  quote: \"q\"\n## Plan\n- T1: y ⟨verified⟩\n";
+        let plan = parse(answer).unwrap();
+        assert!(plan.settled[0].markers.is_empty());
+        assert!(plan.tasks[0].markers.is_empty());
+        assert_eq!(plan.goal, "Ship.");
+        let prompt = render_prompt(&plan, "T", "s");
+        assert!(
+            !prompt.contains("gate:") && !prompt.contains("pre-approved"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn projection_markers_full_goal_reaches_prompt_md() {
+        let mut plan = projected();
+        plan.goal = "Run the cheapest disproof.\nThen decide on BOCPD.".into();
+        let prompt = render_prompt(&plan, "Trader", "stem");
+        assert!(
+            prompt.starts_with("# Build: Run the cheapest disproof.\n\n_idea: Trader · plan: stem_\n\nThen decide on BOCPD.\n"),
+            "{prompt}"
+        );
+        let one = render_prompt(&parse(PLAN).unwrap(), "T", "s");
+        assert!(
+            one.starts_with("# Build: Run the cheapest disproof before any Rust exists.\n\n_idea: T · plan: s_\n\n"),
+            "{one}"
+        );
     }
 }
