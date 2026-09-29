@@ -193,7 +193,7 @@ diverge. Error mapping here implements the taxonomy [D24](./05-ai-integration.md
 ```mermaid
 flowchart TD
     REQ["incoming request"] --> TRACE["tower: tracing / request log"]
-    TRACE --> STATE["inject AppState (config, index, LlmBackend, semaphore, jobs registry, chat queues)"]
+    TRACE --> STATE["inject AppState (config, db, llm, ai_semaphore, skills, jobs, queues, mcp, sources)"]
     STATE --> ROUTE["axum router match (D17)"]
     ROUTE --> HANDLER["handler"]
     HANDLER --> BRANCH{"AI-driven route?"}
@@ -411,7 +411,8 @@ base.html`.
 
 | Piece | Location |
 |-------|----------|
-| Router + AppState + middleware | `app.rs` |
+| Router + middleware | `app.rs` |
+| AppState (shared handler state) | `web::state` (re-exported as `app::AppState`) |
 | Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts,compact,mcp,skills,sources}` |
 | Inbound MCP server (R35) | `web::mcp_server::{mod,auth,handler,tools,tasks,prompts}` — `rmcp::ServerHandler` + Bearer `AuthLayer`, [ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md) |
 | Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, workflow R22, store R4, extract R18, compact R21, and the R9b poll endpoint — **not** R31's inline MCP probe, [ADR-0018](./adr/0018-mcp-servers.md); also driven by R35's `chat`/`store_idea` MCP tasks via `web::mcp_server::tasks::TaskRegistry`) |

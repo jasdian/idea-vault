@@ -14,8 +14,8 @@ so a future workspace split is mechanical.
 flowchart TB
     subgraph crate["crate: idea-vault"]
         MAIN["main.rs — bootstrap (D25)"]
-        APP["app.rs — router, AppState, middleware"]
-        CFG["config.rs — paths, Ollama URL, limits (IDEA_VAULT_* env, D26)"]
+        APP["app.rs — router, middleware (re-exports web::state::AppState)"]
+        CFG["config.rs — paths, Ollama URL, limits (IDEA_VAULT_* env, D26); re-exports ai::LlmBackendKind"]
         IMPORT["import.rs — import_dir: Obsidian/flat-markdown notes → Draft ideas + reindex\n(idea-vault import DIR, ADR-0009)"]
 
         subgraph domain["domain/ (pure, no IO)"]
@@ -78,6 +78,7 @@ flowchart TB
         subgraph web["web/ (HTTP surface)"]
             W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources"]
             W_MCPSRV["mcp_server/ — auth.rs, handler.rs, tools.rs, tasks.rs, prompts.rs: the inbound MCP\nserver at POST /api/mcp (rmcp ServerHandler + Bearer AuthLayer, ADR-0024)"]
+            W_STATE["web/state.rs — AppState (shared handler state)"]
             W_JOBS["jobs.rs — background job registry + poll (ADR-0010)"]
             W_TMPL["templates.rs — Askama structs"]
         end
@@ -91,9 +92,16 @@ flowchart TB
 
 ## D4 — Module dependency graph (allowed direction)
 
-The single most important structural invariant: dependencies point **downward**, and **nothing
-depends on `web`**. A violation (e.g. `domain` importing `web`, or `vault` importing `index`) is a
-design smell caught in review.
+The single most important structural invariant: dependencies point **downward**, and **no library
+module depends on `web`; only the bin-level `app` (and `main`) does**. `config` is a bin-level leaf:
+only `web` and `main` import it. Two rules in `scripts/check-invariants.sh` guard part of this:
+
+- "D4: ai, domain, mcp and sources never import crate::config" greps `src/ai`, `src/domain`,
+  `src/mcp.rs` and `src/sources.rs`;
+- "D4: nothing under src/web imports crate::app (only app → web)" greps `src/web`.
+
+The remaining edges are held by review: a violation (e.g. `domain` importing `web`, or `vault`
+importing `index`) is a design smell caught there.
 
 ```mermaid
 flowchart TD
@@ -106,7 +114,12 @@ flowchart TD
     domain["domain"]
     mcp["mcp"]
     sources["sources"]
+    config["config (bin-level leaf)"]
+    app["app (bin-level)"]
 
+    app --> web
+    web --> config
+    config --> ai
     web --> concepts
     web --> memory
     web --> index
@@ -119,6 +132,7 @@ flowchart TD
     concepts --> ai
     concepts --> vault
     concepts --> domain
+    concepts --> memory
 
     memory --> ai
     memory --> vault
@@ -138,6 +152,7 @@ flowchart TD
     classDef top fill:#1f6feb22,stroke:#1f6feb;
     classDef base fill:#2ea04322,stroke:#2ea043;
     class web top;
+    class app top;
     class domain base;
     class mcp base;
     class sources base;
@@ -151,11 +166,13 @@ flowchart TD
 | `mcp` | `domain` | anything else internal, **especially `ai`** |
 | `sources` | `domain` | anything else internal, **especially `ai`** |
 | `vault` | `domain` | `index`, `ai`, `memory`, `concepts`, `web`, `mcp`, `sources` |
-| `ai` | `domain`, `mcp`, `sources` | `vault`, `index`, `memory`, `concepts`, `web` |
+| `ai` | `domain`, `mcp`, `sources` | `vault`, `index`, `memory`, `concepts`, `web`, `config` |
 | `index` | `vault`, `domain` | `ai`, `memory`, `concepts`, `web`, `mcp`, `sources` |
 | `memory` | `vault`, `ai`, `index`, `domain` | `concepts`, `web`, `mcp`, `sources` |
-| `concepts` | `ai`, `vault`, `domain` (read `index` via `memory` where needed) | `web`, `mcp`, `sources` |
-| `web` | everything below | (nothing may depend on `web`) |
+| `concepts` | `ai`, `vault`, `domain`, `memory` (only `memory::compact::effective_window`, used by `skills.rs`) | `web`, `index`, `mcp`, `sources` |
+| `config` (bin-level leaf) | `ai` (re-exports `ai::LlmBackendKind`) | everything else internal |
+| `web` | everything below, including `config` (`web::state::AppState` holds `Arc<Config>`) | `app` (no library module may depend on `web`) |
+| `app` (bin-level) | `web` only (re-exports `web::state::AppState`) | everything else internal |
 
 > Rationale for a couple of edges that might surprise: `index` depends on `vault` because reindex
 > reads markdown to rebuild ([ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md)). `ai`
@@ -210,7 +227,12 @@ flowchart TD
 - **`web`** — axum router, handlers, Askama rendering, and the background job registry (`web::jobs`,
   [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) that every AI-driven route (including
   `routes::artifacts`, [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)) spawns into and
-  polls. The top of the graph.
+  polls. `web::state` holds `AppState` (config, db, llm, ai_semaphore, skills, jobs, queues, mcp,
+  sources), so handlers never reach up into `app`. The top of the library graph.
+- **`app`** — bin-level: builds the axum router and tower middleware from `web::routes`, and
+  re-exports `web::state::AppState` so `main.rs` and the tests keep `app::AppState`. Imports `web` only.
+- **`config`** — bin-level leaf: `IDEA_VAULT_*` env → `Config`; re-exports `ai::LlmBackendKind`
+  (defined in `ai`, so `ai` never imports `config`). Used by `web` and `main`.
 - **`import`** — a bin-level driver (used only by `main`, like `web`): converts a directory of flat
   Obsidian `.md` notes into ideas, then reindexes ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)).
   Depends on `domain` + `vault` + `index`; nothing depends on it.
@@ -221,9 +243,11 @@ If promoted to a workspace ([ADR-0005](./adr/0005-single-crate-vs-workspace.md))
 
 | Future crate | Absorbs modules |
 |--------------|-----------------|
-| `idea-vault-core` | `domain`, `vault`, `index` |
+| `idea-vault-core` | `domain`, `vault`, `index`, `mcp`, `sources` |
 | `idea-vault-ai` | `ai`, `memory`, `concepts` |
-| `idea-vault-web` | `web` + binary (`main`, `app`, `config`) |
+| `idea-vault-web` | `web` (incl. `web::state::AppState`) + binary (`main`, `app`, `config`, `import`) |
 
 The D4 direction already matches these crate boundaries, so extraction requires no dependency
-inversion.
+inversion. `ai` no longer needs the `config` crate (`LlmBackendKind` lives in `ai`); `config` lands
+with the binary/web crate, which depends on `idea-vault-ai` for the re-export, and `AppState` lands
+in `idea-vault-web` with the rest of `web`.

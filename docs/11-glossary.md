@@ -131,8 +131,8 @@
 
 - **Single crate** — idea-vault ships as one binary Cargo crate with strict internal modules; not a
   workspace (yet). See [ADR-0005](./adr/0005-single-crate-vs-workspace.md) and [02-module-reference](./02-module-reference.md).
-- **AppState** — the shared, cloneable application state (config, index handle, the `LlmBackend`
-  router, concurrency limiter, background job registry) held by axum handlers.
+- **AppState** — the shared, cloneable application state (`web::state`: config, db, llm, ai_semaphore, skills,
+  jobs, queues, mcp, sources) held by axum handlers.
 - **Askama** — the compile-time HTML templating library used for server-rendered pages.
 - **HTMX** — the client-side library that turns HTML attributes into AJAX/polling interactions,
   avoiding a JS SPA.

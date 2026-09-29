@@ -97,7 +97,7 @@ Container responsibilities (detail in [02-module-reference](./02-module-referenc
 
 | Container | Responsibility |
 |-----------|----------------|
-| `web` | HTTP surface: routing, handlers, Askama rendering, and the background job registry (`web::jobs`, [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)). Depends on everything; nothing depends on it. |
+| `web` | HTTP surface: routing, handlers, Askama rendering, and the background job registry (`web::jobs`, [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)). Depends on everything; only the bin-level `app`/`main` depend on it. |
 | `concepts` | The harness primitives: skills, agents, workflows, swarm orchestration. |
 | `memory` | Extract memory facts on Store; load them on Reopen; resolve `[[slug]]` backlinks. |
 | `ai` | The only boundary to the LLM backends: the live `LlmBackend` router (Ollama + claude-code, [ADR-0011](./adr/0011-live-switchable-llm-backend.md)), health probe, context budgeting. |
@@ -158,8 +158,8 @@ sequenceDiagram
 
 ## Cross-cutting concerns
 
-- **AppState** — cloneable shared state (config, index handle/pool, the `LlmBackend` router, swarm
-  concurrency semaphore, background job registry) injected into handlers.
+- **AppState** — cloneable shared state (`web::state`: config, db, the `llm` `LlmBackend` router, `ai_semaphore`,
+  skills, jobs, queues, mcp, sources) injected into handlers.
 - **Middleware** — tower layers for tracing and error→response mapping (D16); the error taxonomy is
   **D24** in [05-ai-integration](./05-ai-integration.md).
 - **Concurrency** — a single semaphore bounds concurrent AI calls across the whole process,
