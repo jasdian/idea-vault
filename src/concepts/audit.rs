@@ -151,7 +151,9 @@ fn near_duplicate(a: &[String], b: &[String]) -> bool {
 /// Split each agent's answer into atomic findings (its list items), interleave them round-robin
 /// across agents so every lens keeps its top items, merge near-duplicates (keeping every lens
 /// that raised it), and stop keeping at `cap`. Also returns how many distinct findings the cap
-/// left out, counted in the same round-robin order.
+/// left out, counted in the same round-robin order. Past the cap a near-duplicate of a kept
+/// finding still adds its lens to that finding, and a near-duplicate of a left-out finding is
+/// not counted again.
 pub fn findings_from(results: &[&AgentResult], cap: usize) -> (Vec<Finding>, usize) {
     let per_agent: Vec<Vec<String>> = results
         .iter()
@@ -321,6 +323,16 @@ pub async fn audit(
     }
 }
 
+/// The code-owned line naming findings the cap kept out of synthesis when no audit ran; empty
+/// when nothing was left out.
+pub fn unaudited_cap_note(dropped: usize) -> String {
+    match dropped {
+        0 => String::new(),
+        1 => format!("\n\n_1 further finding left out (cap {MAX_AUDIT_FINDINGS})_"),
+        n => format!("\n\n_{n} further findings left out (cap {MAX_AUDIT_FINDINGS})_"),
+    }
+}
+
 /// The code-owned tail appended to a synthesis: the audit tally (with the uniform-pass warning)
 /// and every refuted finding with the auditor's reason — downgraded, never dropped.
 pub fn appendix(findings: &[Finding], report: &AuditReport, dropped: usize) -> String {
@@ -405,6 +417,27 @@ mod tests {
         assert_eq!(findings[2].role, AgentRole::Researcher);
         let (kept, dropped) = findings_from(&[&a, &b], 2);
         assert_eq!(kept.len(), 2);
+        assert_eq!(dropped, 2);
+    }
+
+    #[test]
+    fn findings_from_merges_a_post_cap_duplicate_lens_into_a_kept_finding() {
+        let a = result(
+            "alpha",
+            AgentRole::Critic,
+            "- shared risk one two three four five\n- extra six seven",
+        );
+        let b = result(
+            "beta",
+            AgentRole::Critic,
+            "- other eight nine\n- shared risk one two three four five",
+        );
+        let (kept, dropped) = findings_from(&[&a, &b], 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].lenses,
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
         assert_eq!(dropped, 2);
     }
 

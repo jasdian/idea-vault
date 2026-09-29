@@ -568,6 +568,7 @@ pub async fn run_workflow(
     } else {
         let appendix = match (&report, &findings) {
             (Some(r), Some(f)) => audit::appendix(f, r, dropped),
+            (None, Some(_)) => audit::unaudited_cap_note(dropped),
             _ => String::new(),
         };
         // append_turn owns the heading grammar and escapes embedded "## " lines (no forged

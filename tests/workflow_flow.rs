@@ -1075,6 +1075,52 @@ async fn audit_cap_turn_counts_the_findings_left_out_with_one_auditor_call() {
 }
 
 #[tokio::test]
+async fn audit_cap_off_turn_reports_the_findings_left_out_without_saying_not_audited() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens(&distinct_items("p", 6)),
+            tokens(&distinct_items("q", 6)),
+            tokens(&distinct_items("r", 6)),
+            tokens(&distinct_items("s", 6)),
+            tokens("capped position"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "interrogate", false).await;
+    let bodies = mock.chat_bodies();
+    assert!(!bodies.iter().any(|b| b.contains("You are the Auditor")));
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("4 further findings left out (cap 20)"),
+        "{convo}"
+    );
+    assert!(!convo.contains("not audited"), "{convo}");
+}
+
+#[tokio::test]
+async fn audit_cap_off_turn_has_no_line_when_nothing_was_left_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("- one"),
+            tokens("- two"),
+            tokens("- three"),
+            tokens("- four"),
+            tokens("position"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "interrogate", false).await;
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(!convo.contains("left out"), "{convo}");
+}
+
+#[tokio::test]
 async fn audit_cap_turn_has_no_line_when_nothing_was_left_out() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
