@@ -590,57 +590,61 @@ async fn chained_findings_clip_each_reason() {
     );
 }
 
-async fn empty_harvest_run(audit: bool) -> (Vec<String>, String) {
+const NOTHING_HARVESTED: &str = "harvest produced nothing; use the quick build prompt";
+
+async fn empty_harvest_run(audit: bool) -> (Vec<String>, ConceptError, String, usize) {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
-    let mock = spawn_sequence(
-        &["llama3.2"],
-        vec![
-            tokens(""),
-            tokens(""),
-            tokens(""),
-            tokens(""),
-            tokens(""),
-            tokens(PLAN),
-        ],
+    let mut scripts: Vec<ChatScript> = vec![tokens(""); 5];
+    scripts.push(tokens(PLAN));
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let err = run_workflow(
+        &client,
+        &Arc::new(Semaphore::new(1)),
+        &SkillRegistry::builtin(),
+        tmp.path(),
+        "i",
+        "ready-to-build",
+        ContextBudget::new(8192),
+        audit,
+        &|_| String::new(),
+        &|_: &str| {},
     )
-    .await;
-    run(&mock, tmp.path(), "ready-to-build", audit).await;
+    .await
+    .unwrap_err();
     let convo = store::read_conversation(tmp.path(), "i").unwrap();
-    let stable = convo
-        .lines()
-        .filter(|l| !l.starts_with("**Build plan** → ["))
-        .collect::<Vec<_>>()
-        .join("\n");
-    (mock.chat_bodies(), stable)
+    let artifacts = store::list_artifact_files(tmp.path(), "i").unwrap().len();
+    (mock.chat_bodies(), err, convo, artifacts)
 }
 
-const SKIP_NOTE: &str = "nothing harvested — audit skipped";
-
 #[tokio::test]
-async fn an_empty_harvest_skips_the_audit_call() {
-    let (bodies, _) = empty_harvest_run(true).await;
+async fn an_empty_harvest_skips_the_audit_call_and_the_planner() {
+    let (bodies, _, _, _) = empty_harvest_run(true).await;
     assert!(
         !bodies.iter().any(|b| b.contains("You are the Auditor")),
         "no auditor request expected"
     );
-    assert_eq!(bodies.len(), 6, "5 harvesters + the build-prompt step");
-    assert!(
-        bodies.last().unwrap().contains(SKIP_NOTE),
-        "the build-prompt step sees the carried skip note"
-    );
+    assert_eq!(bodies.len(), 5, "the 5 harvesters only, no planner call");
 }
 
 #[tokio::test]
-async fn an_empty_harvest_behaves_the_same_with_the_audit_on_or_off() {
-    let (on_bodies, on_convo) = empty_harvest_run(true).await;
-    let (off_bodies, off_convo) = empty_harvest_run(false).await;
-    assert_eq!(on_bodies.len(), off_bodies.len());
+async fn an_empty_harvest_fails_the_same_way_with_the_audit_on_or_off() {
+    let (_, on_err, on_convo, on_files) = empty_harvest_run(true).await;
+    let (_, off_err, off_convo, off_files) = empty_harvest_run(false).await;
+    assert_eq!(on_err.to_string(), off_err.to_string());
     assert_eq!(on_convo, off_convo);
-    assert!(
-        !off_bodies.iter().any(|b| b.contains(SKIP_NOTE)),
-        "the audit-off run carries no skip note"
-    );
+    assert_eq!((on_files, off_files), (0, 0));
+}
+
+#[tokio::test]
+async fn ready_to_build_mode_errors_when_every_harvester_failed() {
+    for audit in [true, false] {
+        let (_, err, convo, artifacts) = empty_harvest_run(audit).await;
+        assert!(err.to_string().contains(NOTHING_HARVESTED), "{err}");
+        assert!(!convo.contains("Build plan"), "nothing persisted: {convo}");
+        assert_eq!(artifacts, 0);
+    }
 }
 
 #[tokio::test]
@@ -866,4 +870,84 @@ async fn ready_to_build_preamble_keeps_the_whole_preamble_at_a_tiny_budget() {
         "the block keeps only its floor: {}",
         block.len()
     );
+}
+
+fn plan_artifact_header(vault: &Path) -> String {
+    let file = store::list_artifact_files(vault, "i")
+        .unwrap()
+        .into_iter()
+        .find(|f| f.slug.ends_with("-build-plan"))
+        .expect("a build-plan artifact");
+    let body = store::read_artifact(vault, "i", &file.slug).unwrap().body;
+    body.lines().nth(1).unwrap().to_string()
+}
+
+async fn ready_to_build_mode_run(audit: bool, auditor_reply: &str) -> (String, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mut scripts: Vec<ChatScript> = [
+        "- Ship solo first",
+        "- Agencies pay monthly",
+        "",
+        "- risk: churn",
+        "- Call three agencies",
+    ]
+    .iter()
+    .map(|h| tokens(h))
+    .collect();
+    if audit {
+        scripts.push(tokens(auditor_reply));
+    }
+    scripts.push(tokens(PLAN));
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let outcome = run(&mock, tmp.path(), "ready-to-build", audit).await;
+    (outcome.synthesis, plan_artifact_header(tmp.path()))
+}
+
+#[tokio::test]
+async fn ready_to_build_mode_names_a_skipped_audit_and_its_reason() {
+    let (pointer, header) = ready_to_build_mode_run(false, "").await;
+    let label = "ready-to-build · audit skipped (audit off in Settings)";
+    assert!(pointer.contains(label), "{pointer}");
+    assert!(header.starts_with(&format!("_{label} · ")), "{header}");
+    assert!(!pointer.contains("quick") && !header.contains("quick"));
+}
+
+#[tokio::test]
+async fn ready_to_build_mode_names_a_failed_audit() {
+    let (pointer, header) = ready_to_build_mode_run(true, "I cannot judge these.").await;
+    assert!(
+        pointer.contains("ready-to-build · audit failed"),
+        "{pointer}"
+    );
+    assert!(
+        header.starts_with("_ready-to-build · audit failed · "),
+        "{header}"
+    );
+}
+
+#[tokio::test]
+async fn ready_to_build_mode_flags_a_uniform_pass_as_weak() {
+    let (pointer, header) = ready_to_build_mode_run(
+        true,
+        "F1: CONFIRMED — ok\nF2: CONFIRMED — ok\nF3: CONFIRMED — ok\nF4: CONFIRMED — ok",
+    )
+    .await;
+    assert!(
+        pointer.contains("audited · uniform pass (weak)"),
+        "{pointer}"
+    );
+    assert!(header.contains("audited · uniform pass (weak)"), "{header}");
+}
+
+#[tokio::test]
+async fn ready_to_build_mode_leaves_a_mixed_audit_unflagged() {
+    let (pointer, header) = ready_to_build_mode_run(
+        true,
+        "F1: CONFIRMED — ok\nF2: CONFIRMED — ok\nF3: UNCERTAIN — maybe\nF4: REFUTED — no",
+    )
+    .await;
+    assert!(pointer.contains("· audited\n"), "{pointer}");
+    assert!(!pointer.contains("weak") && !header.contains("weak"));
+    assert!(!pointer.contains("skipped") && !pointer.contains("failed"));
 }

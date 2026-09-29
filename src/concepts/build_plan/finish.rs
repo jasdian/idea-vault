@@ -44,6 +44,16 @@ pub struct PlanInputs<'a> {
     pub now: DateTime<Utc>,
 }
 
+/// Which pipeline produced the plan, so the mode label can say what ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanMode<'a> {
+    /// The quick build prompt: one planner call, unaudited unless the caller passes a view.
+    #[default]
+    Quick,
+    /// The multi-step `ready-to-build` workflow; `skipped` is why no audit ran, when none did.
+    ReadyToBuild { skipped: Option<&'a str> },
+}
+
 /// What [`finish`] persisted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finished {
@@ -136,11 +146,22 @@ fn tally_line(plan: &BuildPlan, report: &GateReport) -> String {
     .join(" · ")
 }
 
-fn mode_label(audit: Option<&AuditView>) -> &'static str {
-    match audit {
-        None => "quick · unaudited",
-        Some(a) if a.failed => "audited · audit unavailable",
-        Some(_) => "audited",
+fn mode_label(mode: PlanMode, audit: Option<&AuditView>) -> String {
+    match (mode, audit) {
+        (PlanMode::Quick, None) => "quick · unaudited".into(),
+        (PlanMode::Quick, Some(a)) if a.failed => "audited · audit unavailable".into(),
+        (PlanMode::Quick, Some(_)) => "audited".into(),
+        (PlanMode::ReadyToBuild { skipped }, None) => format!(
+            "ready-to-build · audit skipped ({})",
+            skipped.unwrap_or("no audit ran")
+        ),
+        (PlanMode::ReadyToBuild { .. }, Some(a)) if a.failed => {
+            "ready-to-build · audit failed".into()
+        }
+        (PlanMode::ReadyToBuild { .. }, Some(a)) if a.uniform_pass => {
+            "audited · uniform pass (weak)".into()
+        }
+        (PlanMode::ReadyToBuild { .. }, Some(_)) => "audited".into(),
     }
 }
 
@@ -149,6 +170,7 @@ fn mode_label(audit: Option<&AuditView>) -> &'static str {
 fn artifact_body(
     title: &str,
     inputs: &PlanInputs,
+    mode: PlanMode,
     excluded: usize,
     consulted: &str,
     plan: &BuildPlan,
@@ -156,7 +178,7 @@ fn artifact_body(
 ) -> String {
     let mut out = format!(
         "# Build plan — {title}\n_{} · {} · {} · {excluded} capstone turn(s) excluded from evidence · consulted: {consulted}_\n_gates: {}_\n\n",
-        mode_label(inputs.audit),
+        mode_label(mode, inputs.audit),
         inputs.model,
         inputs.now.format("%Y-%m-%d %H:%M"),
         tally_line(plan, report),
@@ -174,6 +196,7 @@ fn artifact_body(
 
 fn pointer_turn(
     inputs: &PlanInputs,
+    mode: PlanMode,
     file_slug: &str,
     plan: &BuildPlan,
     report: &GateReport,
@@ -181,7 +204,7 @@ fn pointer_turn(
     let mut out = format!(
         "{POINTER_PREFIX}{file_slug}](/idea/{}/artifact/{file_slug}.md) · {}\n\n{}\n",
         inputs.idea_slug,
-        mode_label(inputs.audit),
+        mode_label(mode, inputs.audit),
         tally_line(plan, report),
     );
     if !plan.open.is_empty() {
@@ -198,6 +221,12 @@ fn pointer_turn(
 /// persists nothing. Being blocking, it runs to completion once started — aborting the job that
 /// spawned it does not stop it, so a cancel after the model call still lands the plan.
 pub fn finish(inputs: PlanInputs) -> Result<Finished, ConceptError> {
+    finish_as(inputs, PlanMode::Quick)
+}
+
+/// [`finish`] with the pipeline that produced the plan named, so the pointer turn and the
+/// artifact header label a skipped, failed or uniform audit loudly.
+pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, ConceptError> {
     let mut plan = plan::parse(inputs.answer).map_err(|_| ConceptError::PlanUnusable)?;
     let idea = store::read_idea(inputs.vault_dir, inputs.idea_slug)?;
     let conversation = store::read_conversation(inputs.vault_dir, inputs.idea_slug)?;
@@ -229,6 +258,7 @@ pub fn finish(inputs: PlanInputs) -> Result<Finished, ConceptError> {
     let body = artifact_body(
         &idea.frontmatter.title,
         &inputs,
+        mode,
         excluded,
         consulted,
         &plan,
@@ -249,7 +279,7 @@ pub fn finish(inputs: PlanInputs) -> Result<Finished, ConceptError> {
             body,
         },
     )?;
-    let pointer = pointer_turn(&inputs, &file_slug, &plan, &report);
+    let pointer = pointer_turn(&inputs, mode, &file_slug, &plan, &report);
     store::append_turn(
         inputs.vault_dir,
         inputs.idea_slug,
@@ -285,6 +315,34 @@ mod tests {
             }
         }
         assert!(CAPSTONE_TURNS.contains(&"build-prompt"));
+    }
+
+    #[test]
+    fn a_ready_to_build_plan_is_never_labelled_quick() {
+        let skipped = PlanMode::ReadyToBuild {
+            skipped: Some("audit off in Settings"),
+        };
+        assert_eq!(
+            mode_label(skipped, None),
+            "ready-to-build · audit skipped (audit off in Settings)"
+        );
+        let failed = AuditView {
+            failed: true,
+            ..AuditView::default()
+        };
+        assert_eq!(
+            mode_label(skipped, Some(&failed)),
+            "ready-to-build · audit failed"
+        );
+        let uniform = AuditView {
+            uniform_pass: true,
+            ..AuditView::default()
+        };
+        assert_eq!(
+            mode_label(skipped, Some(&uniform)),
+            "audited · uniform pass (weak)"
+        );
+        assert_eq!(mode_label(PlanMode::Quick, None), "quick · unaudited");
     }
 
     #[test]
