@@ -32,6 +32,11 @@ pub fn normalize_for_match(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// The skill/workflow names whose transcript turns are build plans or their pointers
+/// (docs/adr/0029). Those turns are model-authored plan text, so they are never evidence: not
+/// for a later plan's quotes, and not for store-time memory quotes.
+pub const CAPSTONE_TURNS: &[&str] = &["build-prompt", "ready-to-build"];
+
 /// Minimum words a supporting quote must carry — anything shorter ("yes", "the market") matches
 /// almost any discussion and proves nothing.
 pub const MIN_QUOTE_WORDS: usize = 3;

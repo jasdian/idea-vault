@@ -30,4 +30,8 @@ pub enum ConceptError {
     /// (degrade-don't-abort stops at the point where there is no signal left, D14).
     #[error("swarm produced no usable agent results to synthesize")]
     NothingToSynthesize,
+    /// The planner's answer named neither a goal nor a task, so no build plan was persisted
+    /// (docs/adr/0029).
+    #[error("the build plan named neither a goal nor a task")]
+    PlanUnusable,
 }

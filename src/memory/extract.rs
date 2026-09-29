@@ -195,6 +195,16 @@ struct Candidate {
     op: FactOp,
 }
 
+/// What a store-time quote may ground in: the pre-store idea body and the transcript, minus
+/// build-plan turns and their pointers (model-authored plan text, docs/adr/0029), normalized.
+fn evidence_haystack(original_body: &str, conversation: &str) -> String {
+    let said: String = store::split_turns(conversation)
+        .into_iter()
+        .filter(|turn| !store::is_capstone_turn(turn))
+        .collect();
+    normalize_for_match(&format!("{original_body}\n{said}"))
+}
+
 /// Parse the model's `FACT: <title>` blocks (with their `OP:` / `QUOTE:` lines, in any order)
 /// into candidates, capped at [`MAX_FACTS`]. Defensive: junk before the first `FACT:` line and
 /// empty titles/bodies are skipped — local models are not reliable formatters. A block with no
@@ -372,7 +382,7 @@ pub async fn extract_and_store(
     // Evidence gate: a quote must occur in what the owner and foil actually said (or the idea as
     // it stood before this store). Never the consolidated body — the model just wrote that, so
     // matching against it would be circular.
-    let haystack = normalize_for_match(&format!("{original_body}\n{conversation}"));
+    let haystack = evidence_haystack(&original_body, &conversation);
     let mut held: Vec<Candidate> = Vec::new();
     let mut accepted: Vec<Candidate> = Vec::new();
     for candidate in candidates {
@@ -537,6 +547,17 @@ pub async fn extract_and_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_plan_pointer_turn_never_grounds_a_memory_quote() {
+        let conversation = "## user\nWe ship the parser first, before anything else.\n\n\
+## assistant (skill: build-prompt)\n**Build plan** → x\n- Q1: proposed: the owner chose freeze at entry\n\n\
+## assistant (workflow: ready-to-build)\n- Q1: proposed: dwell hysteresis wins every time\n";
+        let hay = evidence_haystack("An idea.", conversation);
+        assert!(grounded("ship the parser first", &hay));
+        assert!(!grounded("the owner chose freeze at entry", &hay));
+        assert!(!grounded("dwell hysteresis wins every time", &hay));
+    }
 
     #[test]
     fn parse_tags_reads_the_last_tags_line_slugified_and_capped() {

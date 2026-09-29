@@ -488,6 +488,16 @@ fn memory_index_line(fact: &MemoryFact) -> (MemoryIndexEntry, String) {
     )
 }
 
+/// True for a build-plan turn or its pointer: headed `skill: <n>` or `workflow: <n>` with `n` in
+/// [`CAPSTONE_TURNS`](crate::domain::evidence::CAPSTONE_TURNS) (docs/adr/0029).
+pub fn is_capstone_turn(turn: &str) -> bool {
+    matches!(
+        parse_turn_heading(turn_role(turn)),
+        TurnSource::Skill(ref n) | TurnSource::Workflow(ref n)
+            if crate::domain::evidence::CAPSTONE_TURNS.contains(&n.as_str())
+    )
+}
+
 /// Split an append-only `conversation.md` transcript into turns: a turn starts at each
 /// `## user`/`## assistant` heading line — the turn grammar [`append_turn`] writes. Other
 /// `## ` lines are ordinary markdown headings *inside* a turn and do not split it. Text before
