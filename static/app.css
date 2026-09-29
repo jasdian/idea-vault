@@ -612,6 +612,8 @@ a.tagchip:hover { border-color: var(--accent); }
 }
 .chip--build::before { content: ""; }
 .chip--build:hover { filter: brightness(1.03); }
+.chip--build:disabled { opacity: .55; cursor: not-allowed; filter: none; }
+.chip--build-audited { background: transparent; border-style: dashed; }
 
 /* ---- copy button injected onto generated code blocks ------------------- */
 .turn__body pre { position: relative; }

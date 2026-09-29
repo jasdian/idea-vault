@@ -320,7 +320,7 @@ pub(crate) fn render_actions(
     conversation: &str,
     can_store: bool,
     busy: bool,
-    backend: crate::ai::LlmBackendKind,
+    settings: &crate::ai::LlmSettings,
     oob: bool,
 ) -> Result<String, WebError> {
     use crate::domain::SkillStage;
@@ -328,6 +328,7 @@ pub(crate) fn render_actions(
     // The workflow chips come straight off the static built-in registry — no caller threading.
     let workflows = crate::concepts::workflows::builtin_workflows()
         .iter()
+        .filter(|w| w.name != crate::concepts::workflows::READY_TO_BUILD)
         .map(|w| crate::web::templates::WorkflowChip {
             name: w.name.to_string(),
             description: w.description.to_string(),
@@ -388,7 +389,8 @@ pub(crate) fn render_actions(
         untested: coverage.untested,
         busy,
         workflows,
-        backend_note: backend_note(backend),
+        backend_note: backend_note(settings.backend),
+        audit_on: settings.audit_findings,
         oob,
     }
     .render()
@@ -450,7 +452,7 @@ pub(crate) fn respond_with_transcript(
         &conversation,
         can_store,
         busy,
-        llm.settings().backend,
+        &llm.settings(),
         true,
     )?);
     // Third OOB fragment: the artifacts panel, so a finished extraction (or any transcript
@@ -735,7 +737,7 @@ pub(crate) fn build_discussion(
     slug: &str,
     conversation: &str,
     health: crate::ai::AiHealth,
-    backend: crate::ai::LlmBackendKind,
+    settings: &crate::ai::LlmSettings,
     model: &str,
     can_store: bool,
     skills: &crate::concepts::skills::SkillRegistry,
@@ -745,7 +747,7 @@ pub(crate) fn build_discussion(
     tools_bytes: usize,
 ) -> Result<crate::web::templates::Discussion, WebError> {
     // D20 per-state remedy copy (docs/05-ai-integration.md).
-    let (ai_available, unavailable_hint) = availability_hint(backend, health, model);
+    let (ai_available, unavailable_hint) = availability_hint(settings.backend, health, model);
 
     // The #transcript inner is the one shared renderer — so a fresh page load carries the same
     // in-flight indicator (or error) that the poll endpoint would, and mid-job navigation resumes.
@@ -760,7 +762,8 @@ pub(crate) fn build_discussion(
         budget_bytes,
         tools_bytes,
     )?;
-    let actions_html = render_actions(slug, skills, conversation, can_store, busy, backend, false)?;
+    let actions_html =
+        render_actions(slug, skills, conversation, can_store, busy, settings, false)?;
     let queue_html = render_queue_panel(slug, queued_items, false)?;
 
     Ok(crate::web::templates::Discussion {
@@ -783,7 +786,7 @@ fn render_panel(
     idea: &Idea,
     conversation: &str,
     health: crate::ai::AiHealth,
-    backend: crate::ai::LlmBackendKind,
+    settings: &crate::ai::LlmSettings,
     model: &str,
     skills: &crate::concepts::skills::SkillRegistry,
     pending: crate::web::jobs::Pending,
@@ -809,7 +812,7 @@ fn render_panel(
         &idea.frontmatter.slug,
         conversation,
         health,
-        backend,
+        settings,
         model,
         can_store,
         skills,
@@ -853,7 +856,7 @@ pub async fn idea_page(
         &idea,
         &conversation,
         health,
-        llm.settings().backend,
+        &llm.settings(),
         &llm.model(),
         &skills,
         pending,

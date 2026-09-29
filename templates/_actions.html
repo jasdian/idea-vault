@@ -73,9 +73,15 @@
         <input type="checkbox" name="html" value="true"> + HTML report
       </label>
     </form>
-    <form hx-post="/idea/{{ slug }}/skill/build-prompt" hx-target="#transcript" hx-swap="innerHTML">
-      <button type="submit" class="chip chip--build"
-              title="Fold the whole discussion into a ready-to-run build prompt for a coding agent">⌁ generate build prompt</button>
+    <form class="capstones__pair" hx-post="/idea/{{ slug }}/skill/build-prompt" hx-target="#transcript" hx-swap="innerHTML"
+          hx-disabled-elt="find button">
+      <button type="submit" class="chip chip--build"{% if busy %} disabled{% endif %}
+              title="1 model call: plans from the discussion; code checks files, one test command per task, premises and waves. Unaudited.">⌁ quick build prompt</button>
+    </form>
+    <form class="capstones__pair" hx-post="/idea/{{ slug }}/workflow/ready-to-build" hx-target="#transcript" hx-swap="innerHTML"
+          hx-disabled-elt="find button">
+      <button type="submit" class="chip chip--build chip--build-audited"{% if busy %} disabled{% endif %}
+              title="About 7 model calls: 5 harvesters + audit + planner; only owner-quoted decisions become Settled, refuted items are fenced. Slower on small models.{% if !audit_on %} (audit is off: the plan will be marked audit skipped){% endif %}">⌁⌁ audited build plan</button>
     </form>
   </div>
 

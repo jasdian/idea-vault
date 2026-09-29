@@ -265,6 +265,8 @@ pub struct Actions {
     /// `availability_hint`'s remedy copy) rather than branching in the template, so the copy is
     /// never a lie about which backend is actually running the call.
     pub backend_note: String,
+    /// The Settings audit toggle: the audited build chip warns when it is off.
+    pub audit_on: bool,
     pub oob: bool,
 }
 

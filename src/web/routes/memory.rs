@@ -187,7 +187,7 @@ pub async fn reopen_idea(
         &slug,
         &conversation,
         health,
-        state.llm.settings().backend,
+        &state.llm.settings(),
         &state.llm.model(),
         true,
         &skills,

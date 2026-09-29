@@ -102,6 +102,9 @@ const HARVEST_STEPS: &[WorkflowStep] = &[
     step(AgentRole::Harvester, "extract-next-actions"),
 ];
 
+/// Name of the audited capstone workflow, which the capstone row renders instead of the generic list.
+pub const READY_TO_BUILD: &str = "ready-to-build";
+
 /// The built-in workflow definitions shipping with the binary — the skill book's named recipes.
 pub fn builtin_workflows() -> &'static [Workflow] {
     const WORKFLOWS: &[Workflow] = &[
@@ -127,9 +130,9 @@ pub fn builtin_workflows() -> &'static [Workflow] {
             ],
         },
         Workflow {
-            name: "ready-to-build",
+            name: READY_TO_BUILD,
             description: "Harvest what the discussion settled, audit it, then fold the survivors \
-                          into a ready-to-paste build prompt for a coding agent",
+                          into a gated build plan for a coding agent",
             stages: &[
                 Stage::FanOut(HARVEST_STEPS),
                 Stage::Audit,

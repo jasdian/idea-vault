@@ -448,3 +448,103 @@ async fn idea_page_related_panel_unavailable_on_poisoned_lock() {
     );
     assert!(!panel.contains("No related ideas yet"), "got {panel}");
 }
+
+async fn actions_page(state: idea_vault::app::AppState) -> String {
+    let (status, body) = get(state, "/idea/sharp-idea").await;
+    assert_eq!(status, StatusCode::OK);
+    body
+}
+
+#[tokio::test]
+async fn capstone_row_pairs_the_quick_and_audited_build_chips_with_their_tooltips() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "body\n");
+
+    let body = actions_page(state).await;
+    assert!(body.contains("⌁ quick build prompt"), "{body}");
+    assert!(body.contains(
+        "1 model call: plans from the discussion; code checks files, one test command per \
+         task, premises and waves. Unaudited."
+    ));
+    assert!(body.contains("⌁⌁ audited build plan"));
+    assert!(body.contains(
+        "About 7 model calls: 5 harvesters + audit + planner; only owner-quoted decisions \
+         become Settled, refuted items are fenced. Slower on small models."
+    ));
+    assert!(body.contains("hx-post=\"/idea/sharp-idea/skill/build-prompt\""));
+    assert!(body.contains("hx-post=\"/idea/sharp-idea/workflow/ready-to-build\""));
+    assert!(!body.contains("generate build prompt"));
+}
+
+#[tokio::test]
+async fn capstone_row_does_not_repeat_ready_to_build_in_the_generic_workflow_list() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "body\n");
+
+    let body = actions_page(state).await;
+    assert_eq!(
+        body.matches("/workflow/ready-to-build\"").count(),
+        1,
+        "{body}"
+    );
+    assert!(body.contains("hx-post=\"/idea/sharp-idea/workflow/interrogate\""));
+    assert!(!body.contains("ready-to-paste"));
+}
+
+#[tokio::test]
+async fn capstone_row_disables_both_chips_while_a_job_runs() {
+    let mock = spawn(&["llama3.2"], ChatScript::StallAfter(1)).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "body\n");
+
+    let idle = actions_page(state.clone()).await;
+    assert!(!idle.contains("chip--build\" disabled"), "{idle}");
+
+    let (status, _) = post_form(state.clone(), "/idea/sharp-idea/chat", "message=hello").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state.clone(), "/idea/sharp-idea/pending", "foil-pending").await;
+
+    let busy = actions_page(state).await;
+    assert!(busy.contains("foil-pending"));
+    assert!(
+        busy.contains("class=\"chip chip--build\" disabled"),
+        "{busy}"
+    );
+    assert!(busy.contains("class=\"chip chip--build chip--build-audited\" disabled"));
+}
+
+#[tokio::test]
+async fn capstone_row_audited_tooltip_warns_only_when_the_audit_is_off() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "body\n");
+    let suffix = "(audit is off: the plan will be marked audit skipped)";
+
+    assert!(state.llm.settings().audit_findings);
+    assert!(!actions_page(state.clone()).await.contains(suffix));
+
+    let (status, _) = post_form(state.clone(), "/settings", "backend=ollama").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!state.llm.settings().audit_findings);
+    assert!(actions_page(state).await.contains(suffix));
+}
+
+#[tokio::test]
+async fn capstone_row_unusable_plan_surfaces_the_retry_message_in_the_job_result() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["no goal, no tasks, just musing".into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "body\n");
+    store::append_turn(&vault_dir, "sharp-idea", "user", "plan it").unwrap();
+
+    let (status, _) = post_form(state.clone(), "/idea/sharp-idea/skill/build-prompt", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let message = idea_vault::concepts::ConceptError::PlanUnusable.to_string();
+    let body = support::web::poll_until(state, "/idea/sharp-idea/pending", &message).await;
+    assert!(body.contains(&message), "{body}");
+}
