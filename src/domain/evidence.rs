@@ -43,6 +43,12 @@ pub const MAX_ELISION_GAP: usize = 200;
 /// (`a … b`) passes only if its segments occur in order, each close after the last. Pure — no
 /// model call.
 pub fn grounded(quote: &str, haystack_normalized: &str) -> bool {
+    locate(quote, haystack_normalized).is_some()
+}
+
+/// Where a grounded quote starts in `haystack_normalized` (a byte offset into the normalized
+/// text), under the same rules as [`grounded`]; `None` when it does not ground.
+pub fn locate(quote: &str, haystack_normalized: &str) -> Option<usize> {
     let segments: Vec<String> = quote
         .split(['…'])
         .flat_map(|s| s.split("..."))
@@ -56,9 +62,10 @@ pub fn grounded(quote: &str, haystack_normalized: &str) -> bool {
         .filter(|s| !s.is_empty())
         .collect();
     let words: usize = segments.iter().map(|s| s.split(' ').count()).sum();
-    let Some((first, rest)) = segments.split_first() else {
-        return false;
-    };
+    let (first, rest) = segments.split_first()?;
+    if words < MIN_QUOTE_WORDS {
+        return None;
+    }
     // An elision stands for a few skipped words, not a jump across the discussion: every later
     // segment must follow the previous one within MAX_ELISION_GAP bytes, in order — otherwise
     // two unrelated true fragments could vouch for a spliced false claim.
@@ -70,10 +77,60 @@ pub fn grounded(quote: &str, haystack_normalized: &str) -> bool {
                 .map(|gap| cursor + gap + segment.len())
         })
     };
-    words >= MIN_QUOTE_WORDS
-        && haystack_normalized
-            .match_indices(first.as_str())
-            .any(|(at, _)| chained_from(at + first.len()).is_some())
+    haystack_normalized
+        .match_indices(first.as_str())
+        .find(|(at, _)| chained_from(at + first.len()).is_some())
+        .map(|(at, _)| at)
+}
+
+/// Words too common to signal that two texts are about the same thing.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was",
+    "one", "our", "out", "has", "his", "how", "its", "may", "new", "now", "who", "did", "get",
+    "let", "say", "she", "too", "use", "that", "this", "with", "from", "have", "they", "will",
+    "what", "when", "which", "their", "there", "been", "into", "than", "then", "them", "these",
+    "those", "would", "could", "should", "about", "each", "just", "also", "only", "some", "more",
+    "most", "such", "very", "does", "were", "your", "over", "after", "before", "because", "while",
+];
+
+/// The distinct content words of `text`: lowercased alphanumeric runs of at least three
+/// characters that are not stopwords.
+pub fn content_words(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
+/// How much two texts share: the count of common content words and that count as a fraction of
+/// the smaller text's content words (0.0 when either has none).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Overlap {
+    pub shared: usize,
+    pub ratio: f64,
+}
+
+impl Overlap {
+    /// At least `ratio` of the smaller text, and at least `min_shared` words.
+    pub fn at_least(self, ratio: f64, min_shared: usize) -> bool {
+        self.shared >= min_shared && self.ratio >= ratio
+    }
+}
+
+/// Content-word overlap between `a` and `b` (see [`Overlap`]).
+pub fn content_overlap(a: &str, b: &str) -> Overlap {
+    let (a, b) = (content_words(a), content_words(b));
+    let shared = a.intersection(&b).count();
+    let smaller = a.len().min(b.len());
+    Overlap {
+        shared,
+        ratio: if smaller == 0 {
+            0.0
+        } else {
+            shared as f64 / smaller as f64
+        },
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +176,35 @@ mod tests {
             !grounded("we ship … hire a CTO", &hay),
             "one segment invented"
         );
+    }
+
+    #[test]
+    fn locate_reports_where_a_grounded_quote_starts() {
+        let hay = normalize_for_match("We ship solo. Revenue comes first, then hires.");
+        assert_eq!(locate("revenue comes first", &hay), Some(14));
+        assert_eq!(locate("revenue … then hires", &hay), Some(14));
+        assert_eq!(locate("hires come first", &hay), None);
+        assert_eq!(
+            locate("revenue comes", &hay),
+            None,
+            "under the minimum word count"
+        );
+    }
+
+    #[test]
+    fn content_overlap_counts_shared_content_words() {
+        let o = content_overlap(
+            "Freeze the zone snapshot at entry",
+            "Should we freeze the zone snapshot, or use dwell hysteresis?",
+        );
+        assert_eq!(o.shared, 3, "freeze, zone, snapshot");
+        assert!(
+            (o.ratio - 0.75).abs() < 1e-9,
+            "3 of the smaller text's 4 content words"
+        );
+        assert!(o.at_least(0.6, 3));
+        assert!(!content_overlap("the and for", "the and for").at_least(0.1, 1));
+        assert_eq!(content_overlap("", "anything").ratio, 0.0);
     }
 
     #[test]

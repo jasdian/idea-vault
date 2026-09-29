@@ -22,6 +22,40 @@ pub struct Item {
     pub markers: Vec<String>,
     /// A task only its owner can do or unblock (`[?]`); never auto-selected by a build loop.
     pub needs_owner: bool,
+    /// Who the grounding quote came from, set by the gates and rendered as `— you` / `— foil` /
+    /// `— idea` after the text.
+    pub provenance: Option<Provenance>,
+}
+
+/// Where a Settled claim's evidence was found: the owner's own turn, the idea statement, or only
+/// a foil (assistant) turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    Owner,
+    Idea,
+    Foil,
+}
+
+impl Provenance {
+    pub fn label(self) -> &'static str {
+        match self {
+            Provenance::Owner => "you",
+            Provenance::Idea => "idea",
+            Provenance::Foil => "foil",
+        }
+    }
+}
+
+/// Split a trailing `— you` / `— foil` / `— idea` label off an item's text.
+fn split_provenance(text: &str) -> (String, Option<Provenance>) {
+    for p in [Provenance::Owner, Provenance::Idea, Provenance::Foil] {
+        for dash in ["—", "-", "–"] {
+            if let Some(rest) = text.strip_suffix(&format!(" {dash} {}", p.label())) {
+                return (rest.trim_end().to_string(), Some(p));
+            }
+        }
+    }
+    (text.to_string(), None)
 }
 
 impl Item {
@@ -69,6 +103,50 @@ pub struct BuildPlan {
     pub quarantined: Vec<Item>,
     /// Required sections the answer lacked; they parse as empty and are reported by the gates.
     pub missing: Vec<&'static str>,
+}
+
+/// The next free id for `letter` among `items` (one past the highest number in use).
+fn next_id(items: &[Item], letter: char) -> String {
+    let max = items
+        .iter()
+        .filter_map(|i| i.id.strip_prefix(letter)?.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("{letter}{}", max + 1)
+}
+
+impl BuildPlan {
+    /// Move `item` to Open questions as a proposal, with a marker saying why it was opened.
+    pub fn open_from(&mut self, mut item: Item, marker: impl Into<String>) {
+        item.id = next_id(&self.open, 'Q');
+        if !item.text.starts_with("proposed:") {
+            item.text = format!("proposed: {}", item.text);
+        }
+        item.markers.push(marker.into());
+        self.open.push(item);
+    }
+
+    /// Move `item` to Quarantined with the reason it must not be built on.
+    pub fn quarantine(&mut self, mut item: Item, reason: impl Into<String>) {
+        item.id = next_id(&self.quarantined, 'X');
+        item.fields.insert("reason".to_string(), reason.into());
+        self.quarantined.push(item);
+    }
+
+    /// Move `item` to Verify first, with a generated read-only `check` (if any) and a marker.
+    pub fn verify_first(
+        &mut self,
+        mut item: Item,
+        check: Option<String>,
+        marker: impl Into<String>,
+    ) {
+        item.id = next_id(&self.verify, 'P');
+        if let Some(check) = check {
+            item.fields.insert("check".to_string(), check);
+        }
+        item.markers.push(marker.into());
+        self.verify.push(item);
+    }
 }
 
 /// The answer names neither a goal nor a single task, so there is nothing to gate or persist.
@@ -385,8 +463,10 @@ fn parse_items(lines: &[&str], section: Section) -> Vec<Item> {
         if is_none(&text) && tail.is_empty() && id.is_empty() {
             continue;
         }
+        let (text, provenance) = split_provenance(&text);
         let mut item = Item::new(&id, &text);
         item.needs_owner = owner;
+        item.provenance = provenance;
         for part in tail {
             match as_field(part) {
                 Some((key, value)) => {
@@ -469,6 +549,9 @@ fn render_item(out: &mut String, item: &Item, task: bool) {
         _ => "- ",
     };
     out.push_str(&format!("{boxed}{}: {}", item.id, item.text));
+    if let Some(p) = item.provenance {
+        out.push_str(&format!(" — {}", p.label()));
+    }
     for m in &item.markers {
         out.push_str(&format!(" ⟨{m}⟩"));
     }
@@ -669,6 +752,45 @@ Run the cheapest disproof before any Rust exists.
             render(&unquarantined),
             "render is a fixed point of parse"
         );
+    }
+
+    #[test]
+    fn provenance_renders_as_a_label_and_parses_back() {
+        let mut plan = parse(PLAN).unwrap();
+        plan.settled[0].provenance = Some(Provenance::Owner);
+        plan.settled[1].provenance = Some(Provenance::Foil);
+        let rendered = render(&plan);
+        assert!(
+            rendered.contains("- S2: Close is never gated like open. — foil\n"),
+            "{rendered}"
+        );
+        assert_eq!(parse(&rendered).unwrap(), plan);
+    }
+
+    #[test]
+    fn moved_items_take_the_next_free_id_in_their_section() {
+        let mut plan = parse(PLAN).unwrap();
+        let s2 = plan.settled.remove(1);
+        plan.open_from(s2, "opened: listed in the open-questions artifact");
+        let s1 = plan.settled.remove(0);
+        plan.quarantine(s1.clone(), "quote not in the discussion");
+        plan.verify_first(s1, Some("`grep -rnF BOCPD .`".into()), "foil-coined");
+        assert_eq!(plan.open[1].id, "Q2");
+        assert_eq!(
+            plan.open[1].text,
+            "proposed: Close is never gated like open."
+        );
+        assert_eq!(
+            plan.open[1].markers,
+            ["opened: listed in the open-questions artifact"]
+        );
+        assert_eq!(plan.quarantined[0].id, "X1");
+        assert_eq!(
+            plan.quarantined[0].field("reason"),
+            Some("quote not in the discussion")
+        );
+        assert_eq!(plan.verify[1].id, "P2");
+        assert_eq!(plan.verify[1].field("check"), Some("`grep -rnF BOCPD .`"));
     }
 
     #[test]
