@@ -95,6 +95,67 @@ docker run --rm --gpus all ubuntu nvidia-smi     # verify before using the gpu c
 Linux/amd64 (and Jetson) only. See [`docs/12-deployment.md`](docs/12-deployment.md) for the full
 topology, build pipeline, volume strategy, and pitfalls.
 
+## Use it from Claude Code (MCP)
+
+idea-vault can also run as an MCP server, so Claude Code (or any Streamable-HTTP MCP client) can
+list, read, search and continue your ideas without opening the browser. It is **off by default**:
+the route only exists when a token is set.
+
+1. Generate a token and put it in `.env`, then restart the app (the route is mounted once at
+   boot, so a change needs a restart):
+
+   ```bash
+   openssl rand -hex 32          # paste the output as the value below
+   # .env
+   IDEA_VAULT_MCP_TOKEN=<the token>
+   ```
+
+   ```bash
+   docker compose up -d          # or restart `cargo run` if developing without Docker
+   ```
+
+2. Register the server with Claude Code (endpoint `POST /api/mcp`, bearer auth):
+
+   ```bash
+   claude mcp add --transport http idea-vault http://localhost:3000/api/mcp \
+     --header "Authorization: Bearer <token>"
+   ```
+
+   The default scope is `local` (this project, just you). Add `--scope user` to have idea-vault in
+   every project, or `--scope project` to write a shared `.mcp.json`. For a checked-in
+   `.mcp.json`, reference the token from the environment instead of pasting it:
+
+   ```json
+   {
+     "mcpServers": {
+       "idea-vault": {
+         "type": "http",
+         "url": "http://localhost:3000/api/mcp",
+         "headers": { "Authorization": "Bearer ${IDEA_VAULT_MCP_TOKEN}" }
+       }
+     }
+   }
+   ```
+
+3. Check it: `claude mcp list` should show `idea-vault` as connected, and `/mcp` inside a Claude
+   Code session shows its tools and prompts.
+
+In the container stack the URL is the same: the compose file publishes the app on
+`${IDEA_VAULT_HOST_BIND_IP:-127.0.0.1}:${IDEA_VAULT_HOST_PORT:-3000}`, so if you changed the host
+port, change the URL to match. Keep it on loopback; the token is the only gate.
+
+What the client gets:
+
+- `list_ideas`, `get_idea`, `get_artifact`, `search`, `list_skills` — read the vault.
+- `create_idea`, `reopen_idea` — start a Draft, or move a Stored idea back into discussion.
+- `chat`, `run_skill`, `run_swarm`, `store_idea` — run a model turn on your idea's own backend.
+  These are long-running: they work as MCP tasks (`task: {}`, then poll `tasks/get` and
+  `tasks/result`), and a plain call waits about 3 s, then returns a "still running" note; repeat
+  the same call to reattach.
+- Prompts `continue-discussion` and `new-idea` for the client's `/` picker.
+
+Details, and why the route is absent without a token: [`docs/13-mcp-server-inbound.md`](docs/13-mcp-server-inbound.md).
+
 ## What's in this repo
 
 | Path | What |
