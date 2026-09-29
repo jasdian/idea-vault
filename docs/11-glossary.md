@@ -95,7 +95,7 @@
   override` / `vault`), plus any owner file that failed to load; `POST /skills/reload` refreshes it
   live. See [09-web-ui](./09-web-ui.md).
 - **Output contract** — the shape a skill's output must take (`domain::skill::OutputContract`:
-  `Free`, `BulletsOrEmpty`, `RankedList`, `FencedMarkdown`), validated and, for a single
+  `Free`, `BulletsOrEmpty`, `RankedList`, `FencedMarkdown`, `BuildPlan`), validated and, for a single
   interactive call, repaired by `ai::contract`. See
   [ADR-0023](./adr/0023-verification-layer.md).
 - **Factored audit** — the verification pass a swarm's or workflow's converge step runs over every

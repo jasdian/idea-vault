@@ -72,4 +72,8 @@ pub enum OutputContract {
     RankedList,
     /// Exactly one fenced ```` ```markdown ```` block — the copy-pasteable deliverable.
     FencedMarkdown,
+    /// A sectioned build plan (docs/adr/0029): `## Goal`, `## Settled`, `## Verify first`,
+    /// `## Open questions`, `## Plan`, `## Kill criteria`. Checked for shape here; its claims are
+    /// gated by `concepts::build_plan`.
+    BuildPlan,
 }

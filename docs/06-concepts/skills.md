@@ -36,7 +36,7 @@ post-mortem. …
 | `description` | yes | free text |
 | `stage` | yes | `steelman` · `attack` · `consequence` · `converge` · `capstone` · `extract` |
 | `role` | no, default `critic` | `critic` · `researcher` · `advocate` · `harvester` · `synthesizer` |
-| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` |
+| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` · `build_plan` (ADR-0029) |
 | `use_when` | no | free text |
 | `avoid_when` | no | free text |
 | `hidden` | no, default `false` | `true` keeps the skill registered but off the move chips |
