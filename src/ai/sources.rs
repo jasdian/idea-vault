@@ -633,22 +633,28 @@ impl SourceProbe {
             return AnchorCheck::Unverified;
         }
         let path = path.trim().trim_start_matches("./");
+        let under = self.under_root(path);
+        let path = under.as_ref().map_or(path, |(_, rel)| rel.as_str());
         if Path::new(path)
             .components()
             .any(|c| matches!(c, Component::Normal(n) if is_hidden(n)))
         {
             return AnchorCheck::Unverified;
         }
+        // An absolute path pins one file in one root: no other root and no suffix match.
+        let pinned = under.as_ref().map(|(i, _)| *i);
         let exact: Vec<(String, String, PathBuf)> = self
             .roots
             .iter()
-            .filter_map(|(name, root)| {
+            .enumerate()
+            .filter(|(i, _)| pinned.is_none_or(|p| p == *i))
+            .filter_map(|(_, (name, root))| {
                 let abs = resolve_rel(root, path).ok()?;
                 let rel = abs.strip_prefix(root).ok()?.to_string_lossy().into_owned();
                 abs.is_file().then(|| (name.clone(), rel, abs))
             })
             .collect();
-        let (hits, truncated) = if exact.is_empty() {
+        let (hits, truncated) = if exact.is_empty() && pinned.is_none() {
             let suffix = format!("/{path}");
             let walk = self.walk();
             let hits: Vec<_> = walk
@@ -694,11 +700,49 @@ impl SourceProbe {
         }
     }
 
+    /// The index of the attached root an absolute `path` sits at or under, and the path relative
+    /// to it (`""` for the root itself). A model on the claude-code backend sees a source by its
+    /// absolute root (`--add-dir`), so such a path is read root-relative. `None` for a relative
+    /// path, a path outside every root, or one that climbs with `..`.
+    fn under_root(&self, path: &str) -> Option<(usize, String)> {
+        let path = path.trim_end_matches('/');
+        if !path.starts_with('/') {
+            return None;
+        }
+        self.roots.iter().enumerate().find_map(|(i, (_, root))| {
+            let root = root.to_string_lossy();
+            let root = root.trim_end_matches('/');
+            let rel = if path == root {
+                ""
+            } else {
+                path.strip_prefix(root)?.strip_prefix('/')?
+            };
+            let rel = rel.trim_start_matches('/');
+            (!rel.split('/').any(|c| c == "..")).then(|| (i, rel.to_string()))
+        })
+    }
+
     /// Whether `path` (root-relative or a unique-or-not path suffix, a file or a directory)
-    /// exists in an attached source. `None` when no source is attached, the path has a hidden
-    /// component, or the walk hit its cap before the path turned up.
+    /// exists in an attached source. An absolute path is checked only at that exact place in the
+    /// root it sits under, and one outside every root is `Some(false)`. `None` when no source is
+    /// attached, the path has a hidden component, or the walk hit its cap before the path turned
+    /// up.
     pub fn has_path(&self, path: &str) -> Option<bool> {
         let path = path.trim().trim_start_matches("./").trim_end_matches('/');
+        if path.starts_with('/') && !self.roots.is_empty() {
+            return match self.under_root(path) {
+                Some((_, rel)) if rel.is_empty() => Some(true),
+                Some((_, rel))
+                    if Path::new(&rel)
+                        .components()
+                        .any(|c| matches!(c, Component::Normal(n) if is_hidden(n))) =>
+                {
+                    None
+                }
+                Some((i, rel)) => Some(resolve_rel(&self.roots[i].1, &rel).is_ok()),
+                None => Some(false),
+            };
+        }
         if self.roots.is_empty()
             || path.is_empty()
             || Path::new(path)
@@ -1332,6 +1376,46 @@ mod tests {
             capped.has_path("gone/mod.rs"),
             None,
             "a capped walk is unknown"
+        );
+    }
+
+    #[test]
+    fn probe_has_path_reads_an_absolute_path_at_or_under_a_root() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let abs = root.display().to_string();
+        assert_eq!(probe.has_path(&abs), Some(true));
+        assert_eq!(probe.has_path(&format!("{abs}/")), Some(true));
+        assert_eq!(probe.has_path(&format!("{abs}/a/mod.rs")), Some(true));
+        assert_eq!(probe.has_path(&format!("{abs}/gone/mod.rs")), Some(false));
+        assert_eq!(probe.has_path(&format!("{abs}/../outside.rs")), Some(false));
+        assert_eq!(
+            probe.has_path(&format!("{abs}-sibling/a/mod.rs")),
+            Some(false)
+        );
+        assert_eq!(
+            probe.check_anchor(
+                &format!("{abs}/risk/src/calculator.rs"),
+                3,
+                3,
+                "calculate_regime_factor"
+            ),
+            resolved("risk/src/calculator.rs")
+        );
+        assert_eq!(
+            probe.has_path(&format!("{abs}/mod.rs")),
+            Some(false),
+            "an absolute path pins one place: no suffix match"
+        );
+        assert_eq!(probe.has_path(&format!("{abs}//a/mod.rs")), Some(true));
+        assert_eq!(
+            probe.check_anchor(
+                &format!("{abs}/src/calculator.rs"),
+                3,
+                3,
+                "calculate_regime_factor"
+            ),
+            AnchorCheck::NoFile
         );
     }
 
