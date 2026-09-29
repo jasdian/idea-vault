@@ -29,6 +29,7 @@ flowchart TB
             D_TAG["tag.rs — near_duplicate: the tag near-duplicate (drift) predicate (ADR-0027)"]
             D_COMP["compacted.rs — Compacted: the compacted.md sidecar type (docs/adr/0012)"]
             D_NAME["name.rs — Name: validated registry name (mcp + sources keys), slug alphabet (ADR-0025)"]
+            D_EVID["evidence.rs — normalize_for_match / grounded: the verbatim-quote evidence gate (docs/adr/0023, 0029)"]
         end
 
         subgraph vault["vault/ (disk = truth)"]

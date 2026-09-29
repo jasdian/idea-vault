@@ -4,6 +4,7 @@
 
 pub mod artifact;
 pub mod compacted;
+pub mod evidence;
 pub mod frontmatter;
 pub mod idea;
 pub mod links;

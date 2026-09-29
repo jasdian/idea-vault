@@ -23,6 +23,7 @@ use chrono::Utc;
 use crate::ai::budget::{assemble_context, ContextBudget, ContextInput};
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
+use crate::domain::evidence::{grounded, normalize_for_match};
 use crate::domain::{links, slug as domain_slug};
 use crate::domain::{
     Artifact, ArtifactFrontmatter, ArtifactKind, IdeaState, MemoryFact, MemoryFactFrontmatter,
@@ -252,79 +253,6 @@ fn parse_facts(raw: &str) -> Vec<Candidate> {
         .filter(|f| !f.body.is_empty() || f.op == FactOp::Noop)
         .take(MAX_FACTS)
         .collect()
-}
-
-/// Fold text for quote matching: lowercase, typographic quotes and dashes made plain, markdown
-/// emphasis/quote/heading marks dropped, whitespace collapsed — so a quote the model copied from
-/// rendered-looking text still matches the raw markdown it came from.
-fn normalize_for_match(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut last_space = true;
-    for ch in text.chars() {
-        let ch = match ch {
-            '“' | '”' | '„' => '"',
-            '‘' | '’' => '\'',
-            '–' | '—' => '-',
-            c => c,
-        };
-        if matches!(ch, '*' | '_' | '`' | '>' | '#') {
-            continue;
-        }
-        if ch.is_whitespace() {
-            if !last_space {
-                out.push(' ');
-                last_space = true;
-            }
-            continue;
-        }
-        out.extend(ch.to_lowercase());
-        last_space = false;
-    }
-    out.trim().to_string()
-}
-
-/// Minimum words a supporting quote must carry — anything shorter ("yes", "the market") matches
-/// almost any discussion and proves nothing.
-const MIN_QUOTE_WORDS: usize = 3;
-
-/// Most normalized bytes an elision (`…`) in a supporting quote may skip.
-const MAX_ELISION_GAP: usize = 200;
-
-/// The evidence gate: does `quote` occur (normalized) in `haystack`? An elided quote
-/// (`a … b`) passes only if its segments occur in order, each close after the last. Pure — no
-/// model call.
-fn grounded(quote: &str, haystack_normalized: &str) -> bool {
-    let segments: Vec<String> = quote
-        .split(['…'])
-        .flat_map(|s| s.split("..."))
-        .map(|s| {
-            normalize_for_match(s)
-                .trim_matches(|c: char| {
-                    c.is_whitespace() || matches!(c, '"' | '\'' | '.' | ',' | ';' | ':' | '!' | '?')
-                })
-                .to_string()
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
-    let words: usize = segments.iter().map(|s| s.split(' ').count()).sum();
-    let Some((first, rest)) = segments.split_first() else {
-        return false;
-    };
-    // An elision stands for a few skipped words, not a jump across the discussion: every later
-    // segment must follow the previous one within MAX_ELISION_GAP bytes, in order — otherwise
-    // two unrelated true fragments could vouch for a spliced false claim.
-    let chained_from = |start: usize| {
-        rest.iter().try_fold(start, |cursor, segment| {
-            haystack_normalized[cursor..]
-                .find(segment.as_str())
-                .filter(|gap| *gap <= MAX_ELISION_GAP)
-                .map(|gap| cursor + gap + segment.len())
-        })
-    };
-    words >= MIN_QUOTE_WORDS
-        && haystack_normalized
-            .match_indices(first.as_str())
-            .any(|(at, _)| chained_from(at + first.len()).is_some())
 }
 
 /// The quarantine artifact body: every fact the evidence gate held back, with why.
@@ -751,51 +679,6 @@ mod tests {
         );
         assert_eq!(facts[2].op, FactOp::Add, "no OP line means ADD");
         assert_eq!(facts[2].quote, None);
-    }
-
-    #[test]
-    fn grounded_matches_normalized_verbatim_spans_only() {
-        let hay = normalize_for_match(
-            "## user\nWe **ship v1** solo — no hires until\n   revenue.\n## assistant\nOK.",
-        );
-        assert!(
-            grounded("we ship v1 solo - no hires", &hay),
-            "markup + dash + case folded"
-        );
-        assert!(
-            grounded("\u{201c}no hires until revenue\u{201d}", &hay),
-            "line break folded"
-        );
-        assert!(
-            grounded("we ship … until revenue", &hay),
-            "elided segments each match"
-        );
-        assert!(!grounded("we hire a team first", &hay), "invented quote");
-        assert!(!grounded("ship v1", &hay), "under the minimum word count");
-        assert!(
-            !grounded("we ship … hire a CTO", &hay),
-            "one segment invented"
-        );
-    }
-
-    #[test]
-    fn an_elided_quote_cannot_splice_distant_fragments_together() {
-        let filler = "unrelated discussion ".repeat(40);
-        let hay = normalize_for_match(&format!(
-            "we ship solo. {filler} the market is agencies. {filler} revenue first"
-        ));
-        assert!(
-            grounded("the market … is agencies", &hay),
-            "adjacent segments pass"
-        );
-        assert!(
-            !grounded("we ship … revenue first", &hay),
-            "segments hundreds of bytes apart are a splice, not a quote"
-        );
-        assert!(
-            !grounded("revenue first … we ship", &hay),
-            "segments must occur in order"
-        );
     }
 
     #[test]
