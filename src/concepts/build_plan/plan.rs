@@ -731,7 +731,67 @@ fn parse_items(lines: &[&str], section: Section, keep_markers: bool) -> Vec<Item
 /// heading aliases — [`repair_build_plan`]); required sections it still lacks are recorded in
 /// [`BuildPlan::missing`] and parse as empty. Fails only when there is neither a goal nor a task.
 pub fn parse(answer: &str) -> Result<BuildPlan, Unusable> {
-    parse_inner(answer, false)
+    let mut plan = parse_inner(answer, false)?;
+    reserve_bootstrap_id(&mut plan);
+    Ok(plan)
+}
+
+/// Whether `id` is a `T#` numbered zero (`T0`, `T00`), the code-owned bootstrap row's id.
+fn is_bootstrap_id(id: &str) -> bool {
+    id.strip_prefix('T')
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c == '0'))
+}
+
+/// Renumber a model-written task whose id is [`BOOTSTRAP_ID`] to the next free `T#`, rewriting
+/// the task and kill references to it, so only the code-owned bootstrap row is `T0`.
+fn reserve_bootstrap_id(plan: &mut BuildPlan) {
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    for i in 0..plan.tasks.len() {
+        if !is_bootstrap_id(&plan.tasks[i].id) {
+            continue;
+        }
+        let new = next_id(&plan.tasks, 'T');
+        let old = std::mem::replace(&mut plan.tasks[i].id, new.clone());
+        if !renamed.iter().any(|(o, _)| *o == old) {
+            renamed.push((old, new));
+        }
+    }
+    if renamed.is_empty() {
+        return;
+    }
+    let rename = |id: String| {
+        renamed
+            .iter()
+            .find(|(old, _)| *old == id)
+            .map_or(id, |(_, new)| new.clone())
+    };
+    for task in &mut plan.tasks {
+        if !task.depends_tasks().iter().any(|d| is_bootstrap_id(d)) {
+            continue;
+        }
+        let mut refs: Vec<String> = Vec::new();
+        for id in task.depends_tasks().into_iter().map(rename) {
+            if !refs.contains(&id) {
+                refs.push(id);
+            }
+        }
+        refs.extend(task.depends_premises());
+        refs.extend(task.depends_questions());
+        refs.extend(task.depends_free());
+        task.fields.insert("depends".to_string(), refs.join(", "));
+    }
+    for kill in &mut plan.kills {
+        for key in ["gates", "checked by"] {
+            let Some(value) = kill.field(key) else {
+                continue;
+            };
+            let refs = refs_of(value, 'T');
+            if refs.iter().any(|r| is_bootstrap_id(r)) {
+                let ids: Vec<String> = refs.into_iter().map(rename).collect();
+                kill.fields.insert(key.to_string(), ids.join(", "));
+            }
+        }
+    }
 }
 
 /// Parse a stored build-plan artifact body. Unlike [`parse`] it reads the code-owned
@@ -2291,6 +2351,25 @@ Run the cheapest disproof before any Rust exists.
         assert_eq!(cells(rows[1])[3], "—", "{out}");
         let none = render_attack_plan(&parse("## Goal\nShip.\n## Plan\n- T1: x\n").unwrap());
         assert!(!none.contains("| T0 |"), "{none}");
+    }
+
+    #[test]
+    fn attack_plan_model_t0_is_renumbered_and_keeps_its_dependents() {
+        let plan = parse(
+            "## Goal\nShip.\n## Verify first\n- P1: `a.rs` exists\n  check: `test -f a.rs` → exit 0\n## Plan\n- T0: Scaffold the crate\n  touches: a.rs\n- T1: Build on it\n  depends: T0, P1\n  touches: b.rs\n## Kill criteria\n- K1: It fails\n  gates: T0\n",
+        )
+        .unwrap();
+        let out = render_attack_plan(&plan);
+        assert_eq!(out.matches("| T0 |").count(), 1, "{out}");
+        let rows = rows(&out);
+        assert!(
+            rows[0].contains("| T0 | Run the bootstrap checks P1"),
+            "{out}"
+        );
+        assert_eq!(cells(rows[1])[1], "T2", "{out}");
+        assert!(cells(rows[1])[2].starts_with("Scaffold the crate"), "{out}");
+        assert_eq!(cells(rows[2])[3], "T0, T2", "{out}");
+        assert_eq!(plan.kills[0].field("gates"), Some("T2"));
     }
 
     #[test]
