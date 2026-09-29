@@ -28,16 +28,18 @@ const READ_ONLY_VERBS: &[&str] = &[
     "jq",
 ];
 
-const DESTRUCTIVE: &[&str] = &[
-    " rm ",
-    " git push ",
-    " git reset ",
-    " sudo ",
-    " dd ",
-    " | sh ",
-    " | bash ",
-    " down -v ",
-    " drop table ",
+const DESTRUCTIVE_STARTS: &[&str] = &["rm", "sudo", "dd"];
+
+const DESTRUCTIVE_PAIRS: &[(&str, &str)] = &[
+    ("git", "push"),
+    ("git", "reset"),
+    ("down", "-v"),
+    ("drop", "table"),
+];
+
+const STOP_WORDS: &[&str] = &[
+    "stop", "stops", "stopped", "stopping", "kill", "kills", "killed", "killing", "abort",
+    "aborts", "aborted", "aborting", "halt", "halts", "halted", "halting",
 ];
 
 const OWNER_WORK: &[&str] = &[
@@ -92,8 +94,30 @@ fn next_open_id(plan: &BuildPlan) -> String {
     format!("Q{}", max + 1)
 }
 
-fn norm_path(p: &str) -> &str {
-    p.trim().trim_start_matches("./").trim_end_matches('/')
+fn ascii_quotes(text: &str) -> String {
+    text.replace(['\u{2019}', '\u{2018}'], "'")
+}
+
+fn norm_path(p: &str) -> String {
+    let mut p = p.trim();
+    if let Some(head) = p.strip_suffix("(new)") {
+        p = head.trim_end();
+    }
+    if let Some((head, tail)) = p.rsplit_once(':') {
+        let anchor = tail.split('-').count() <= 2
+            && tail
+                .split('-')
+                .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if anchor {
+            p = head;
+        }
+    }
+    let p = p
+        .strip_suffix("/**")
+        .or_else(|| p.strip_suffix("/*"))
+        .or_else(|| p.strip_suffix('*'))
+        .unwrap_or(p);
+    p.trim_start_matches("./").trim_end_matches('/').to_string()
 }
 
 fn paths_overlap(a: &str, b: &str) -> bool {
@@ -105,7 +129,7 @@ fn paths_overlap(a: &str, b: &str) -> bool {
         long.strip_prefix(short)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     };
-    under(a, b) || under(b, a)
+    under(&a, &b) || under(&b, &a)
 }
 
 fn backticked(text: &str) -> Vec<String> {
@@ -130,10 +154,18 @@ fn fenced_paths(plan: &BuildPlan) -> Vec<String> {
         out.extend(spans);
     }
     for item in &plan.settled {
-        let t = item.text.to_lowercase();
-        let fencing = ["do not touch", "don't modify", "out of scope"]
-            .iter()
-            .any(|p| t.contains(p))
+        let t = ascii_quotes(&item.text.to_lowercase());
+        let fencing = [
+            "do not touch",
+            "do not modify",
+            "do not edit",
+            "don't touch",
+            "don't modify",
+            "don't edit",
+            "out of scope",
+        ]
+        .iter()
+        .any(|p| t.contains(p))
             || (t.contains("leave") && t.contains("unchanged"));
         if fencing {
             out.extend(
@@ -177,11 +209,25 @@ fn scope_fence(plan: &mut BuildPlan, report: &mut GateReport) {
     }
 }
 
+fn task_deps(task: &Item) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in task
+        .field("depends")
+        .map(|v| task_refs(&v.to_uppercase()))
+        .unwrap_or_default()
+    {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
 fn depends_of(plan: &BuildPlan, id: &str) -> Vec<String> {
     plan.tasks
         .iter()
         .find(|t| t.id == id)
-        .map(|t| t.list("depends"))
+        .map(task_deps)
         .unwrap_or_default()
 }
 
@@ -208,7 +254,7 @@ fn set_depends(task: &mut Item, deps: &[String]) {
 }
 
 fn add_dependency(task: &mut Item, dep: &str) {
-    let mut deps = task.list("depends");
+    let mut deps = task_deps(task);
     deps.push(dep.to_string());
     set_depends(task, &deps);
 }
@@ -216,7 +262,7 @@ fn add_dependency(task: &mut Item, dep: &str) {
 fn dependency_repair(plan: &mut BuildPlan, report: &mut GateReport) {
     let known: BTreeSet<String> = plan.tasks.iter().map(|t| t.id.clone()).collect();
     for task in &mut plan.tasks {
-        let deps = task.list("depends");
+        let deps = task_deps(task);
         if deps.iter().all(|d| known.contains(d)) {
             continue;
         }
@@ -241,7 +287,7 @@ fn dependency_repair(plan: &mut BuildPlan, report: &mut GateReport) {
     }
 
     for later in 1..plan.tasks.len() {
-        for earlier in 0..later {
+        for earlier in (0..later).rev() {
             let (a, b) = (plan.tasks[earlier].clone(), plan.tasks[later].clone());
             let b_touches = b.list("touches");
             let shared = a
@@ -260,33 +306,63 @@ fn dependency_repair(plan: &mut BuildPlan, report: &mut GateReport) {
     }
 }
 
-fn squeeze(text: &str) -> String {
-    let spaced = text
+fn segments(text: &str) -> Vec<(bool, Vec<String>)> {
+    let lowered: String = text
         .to_lowercase()
         .chars()
         .map(|c| match c {
-            ';' | '&' | '(' | ')' | '`' | '\n' | '\t' => ' ',
-            c => c,
+            ';' | '&' | '\n' => " ; ".to_string(),
+            '|' => " | ".to_string(),
+            '`' | '"' | '\'' | '(' | ')' => " ".to_string(),
+            c => c.to_string(),
         })
-        .collect::<String>()
-        .replace('|', " | ");
-    format!(
-        " {} ",
-        spaced.split_whitespace().collect::<Vec<_>>().join(" ")
-    )
+        .collect();
+    let mut out: Vec<(bool, Vec<String>)> = vec![(false, Vec::new())];
+    for tok in lowered.split_whitespace() {
+        match tok {
+            ";" | "-c" => out.push((false, Vec::new())),
+            "|" => out.push((true, Vec::new())),
+            t => out.last_mut().expect("seeded").1.push(t.to_string()),
+        }
+    }
+    out.retain(|(_, toks)| !toks.is_empty());
+    out
 }
 
+// Segment-start matching cannot see wrappers such as `xargs rm` or `env rm`.
 fn is_destructive(text: &str) -> bool {
-    let s = squeeze(text);
-    DESTRUCTIVE.iter().any(|d| s.contains(d))
+    segments(text).iter().any(|(piped, toks)| {
+        let first = toks[0].as_str();
+        DESTRUCTIVE_STARTS.contains(&first)
+            || (*piped && matches!(first, "sh" | "bash"))
+            || toks
+                .windows(2)
+                .any(|w| DESTRUCTIVE_PAIRS.contains(&(w[0].as_str(), w[1].as_str())))
+    })
 }
 
 fn read_only(check: &str) -> bool {
-    let c = check.trim().trim_matches('`').trim().to_lowercase();
-    READ_ONLY_VERBS.iter().any(|v| {
-        c.strip_prefix(v)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-    })
+    let c = check
+        .trim()
+        .trim_matches('`')
+        .trim()
+        .to_lowercase()
+        .replace("2>&1", "");
+    if c.contains('>') || c.contains("-delete") || c.contains("-exec") {
+        return false;
+    }
+    c.replace("&&", "\n")
+        .replace("||", "\n")
+        .replace([';', '|'], "\n")
+        .lines()
+        .map(|seg| seg.trim().trim_matches('`').trim())
+        .filter(|seg| !seg.is_empty())
+        .all(|seg| {
+            READ_ONLY_VERBS.iter().any(|v| {
+                seg.strip_prefix(v)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+            })
+        })
 }
 
 fn runnable_accept(accept: &str) -> bool {
@@ -296,12 +372,11 @@ fn runnable_accept(accept: &str) -> bool {
     let Some((cmd, rest)) = rest.split_once('`') else {
         return false;
     };
-    let rest = rest.trim_start();
     let condition = rest
-        .strip_prefix('→')
-        .or_else(|| rest.strip_prefix("->"))
-        .map(str::trim);
-    !cmd.trim().is_empty() && condition.is_some_and(|c| !c.is_empty())
+        .find('→')
+        .map(|at| &rest[at + '→'.len_utf8()..])
+        .or_else(|| rest.find("->").map(|at| &rest[at + 2..]));
+    !cmd.trim().is_empty() && condition.is_some_and(|c| !c.trim().is_empty())
 }
 
 fn executable_tasks(plan: &mut BuildPlan, report: &mut GateReport) {
@@ -311,7 +386,7 @@ fn executable_tasks(plan: &mut BuildPlan, report: &mut GateReport) {
             need_owner(task, report);
         }
         let commands = format!(
-            "{} {}",
+            "{} ; {}",
             task.field("accept").unwrap_or_default(),
             task.field("check").unwrap_or_default()
         );
@@ -319,12 +394,14 @@ fn executable_tasks(plan: &mut BuildPlan, report: &mut GateReport) {
             mark(task, "destructive command");
             need_owner(task, report);
         }
-        let everything = format!(
-            "{} {}",
-            task.text,
-            task.fields.values().cloned().collect::<Vec<_>>().join(" ")
-        )
-        .to_lowercase();
+        let everything = ascii_quotes(
+            &format!(
+                "{} {}",
+                task.text,
+                task.fields.values().cloned().collect::<Vec<_>>().join(" ")
+            )
+            .to_lowercase(),
+        );
         if OWNER_WORK.iter().any(|p| everything.contains(p)) {
             mark(task, "needs you");
             need_owner(task, report);
@@ -381,9 +458,11 @@ fn kill_wiring(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateRepor
         if gated.is_empty() {
             missing.push("gates");
         }
-        if !["stop", "kill", "abort", "halt"]
-            .iter()
-            .any(|w| text.contains(w))
+        if !kill
+            .text
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| STOP_WORDS.contains(&w))
         {
             missing.push("stop action");
         }
@@ -396,6 +475,14 @@ fn kill_wiring(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateRepor
         if CONTINUE_ANYWAY.iter().any(|p| text.contains(p)) {
             mark(&mut plan.kills[k], "kill criterion says continue anyway");
             report.note(format!("{}: kill criterion says continue anyway", kill.id));
+        }
+        for id in checkers.iter().chain(&gated) {
+            if !plan.tasks.iter().any(|t| &t.id == id) {
+                mark(
+                    &mut plan.kills[k],
+                    format!("incomplete kill wiring: unknown {id}"),
+                );
+            }
         }
         for gate in &gated {
             for checker in &checkers {
@@ -565,7 +652,7 @@ mod tests {
         assert_eq!(plan.tasks[1].list("depends"), ["T1"]);
         assert!(has_marker(&plan.tasks[1], "added: shares src/x.rs with T1"));
         assert!(has_marker(&plan.tasks[1], "unknown dependency T9"));
-        assert!(report.tally.get("repaired").copied().unwrap_or(0) >= 2);
+        assert_eq!(report.tally.get("repaired"), Some(&2));
     }
 
     #[test]
@@ -753,5 +840,263 @@ mod tests {
             .tasks
             .push(item("T1", "Step", &[("accept", RUNNABLE)]));
         assert!(run(&mut small).notes.is_empty());
+    }
+
+    #[test]
+    fn g8_prose_dependencies_are_read_by_task_id() {
+        let mut plan = BuildPlan::default();
+        plan.tasks.push(item("T1", "A", &[("accept", RUNNABLE)]));
+        plan.tasks.push(item("T2", "B", &[("accept", RUNNABLE)]));
+        plan.tasks.push(item(
+            "T3",
+            "C",
+            &[("depends", "T1 and T2"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T4",
+            "D",
+            &[("depends", "t1 (scaffold), T9"), ("accept", RUNNABLE)],
+        ));
+        run(&mut plan);
+        assert!(plan.tasks[2].markers.is_empty(), "{:?}", plan.tasks[2]);
+        assert_eq!(plan.tasks[2].field("depends"), Some("T1 and T2"));
+        assert_eq!(plan.tasks[3].list("depends"), ["T1"]);
+        assert!(has_marker(&plan.tasks[3], "unknown dependency T9"));
+        assert!(!has_marker(&plan.tasks[3], "unknown dependency T1"));
+    }
+
+    #[test]
+    fn g8_nearest_task_suppresses_the_redundant_edge() {
+        let mut plan = BuildPlan::default();
+        plan.tasks.push(item(
+            "T1",
+            "A",
+            &[("touches", "src/x.rs"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T2",
+            "B",
+            &[
+                ("touches", "src/x.rs"),
+                ("depends", "T1"),
+                ("accept", RUNNABLE),
+            ],
+        ));
+        plan.tasks.push(item(
+            "T3",
+            "C",
+            &[("touches", "src/x.rs"), ("accept", RUNNABLE)],
+        ));
+        run(&mut plan);
+        assert_eq!(plan.tasks[2].list("depends"), ["T2"]);
+    }
+
+    #[test]
+    fn g7_anchored_glob_and_new_paths_still_overlap() {
+        let mut plan = BuildPlan::default();
+        plan.fence
+            .push(item("F1", "`src/index/reindex.rs:382-390` is frozen", &[]));
+        plan.fence.push(item("F2", "`src/memory/*`", &[]));
+        plan.settled
+            .push(item("S1", "Don\u{2019}t modify `src/ai/budget.rs`.", &[]));
+        plan.tasks.push(item(
+            "T1",
+            "A",
+            &[("touches", "src/index/reindex.rs"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T2",
+            "B",
+            &[("touches", "src/memory/load.rs"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T3",
+            "C",
+            &[("touches", "src/ai/budget.rs (new)"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T4",
+            "D",
+            &[("touches", "src/index/reindex.rs:12"), ("accept", RUNNABLE)],
+        ));
+        run(&mut plan);
+        assert!(plan.tasks[0].needs_owner, "anchored fence");
+        assert!(plan.tasks[1].needs_owner, "glob fence");
+        assert!(plan.tasks[2].needs_owner, "curly apostrophe and (new)");
+        assert!(plan.tasks[3].needs_owner, "anchored touches");
+    }
+
+    #[test]
+    fn g8_shared_anchored_paths_get_a_dependency() {
+        let mut plan = BuildPlan::default();
+        plan.tasks.push(item(
+            "T1",
+            "A",
+            &[("touches", "src/x.rs:10"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T2",
+            "B",
+            &[("touches", "src/x.rs"), ("accept", RUNNABLE)],
+        ));
+        run(&mut plan);
+        assert_eq!(plan.tasks[1].list("depends"), ["T1"]);
+    }
+
+    #[test]
+    fn g9_multi_command_accept_is_runnable() {
+        let mut plan = BuildPlan::default();
+        plan.tasks.push(item(
+            "T1",
+            "A",
+            &[("accept", "`cargo test` && `cargo clippy` → exit 0")],
+        ));
+        plan.tasks.push(item(
+            "T2",
+            "B",
+            &[("accept", "`cargo test` and it is fine")],
+        ));
+        run(&mut plan);
+        assert!(!plan.tasks[0].needs_owner, "{:?}", plan.tasks[0]);
+        assert!(plan.tasks[1].needs_owner);
+    }
+
+    #[test]
+    fn g9_every_chained_segment_must_be_read_only() {
+        let mut plan = BuildPlan::default();
+        for (n, check) in [
+            "`grep x f && touch y`",
+            "`find . -delete`",
+            "`cat a > b`",
+            "`lsof -i`",
+            "`ls && lsof`",
+        ]
+        .iter()
+        .enumerate()
+        {
+            plan.verify
+                .push(item(&format!("P{n}"), "Check", &[("check", check)]));
+        }
+        for (n, check) in [
+            "`ls -la`",
+            "`sed -n 1,5p f`",
+            "`grep -n dd f`",
+            "`cargo test 2>&1 | tail -3`",
+        ]
+        .iter()
+        .enumerate()
+        {
+            plan.verify
+                .push(item(&format!("Q{n}"), "Check", &[("check", check)]));
+        }
+        run(&mut plan);
+        for p in &plan.verify[..5] {
+            assert!(has_marker(p, "check is not read-only"), "{p:?}");
+        }
+        for q in &plan.verify[5..] {
+            assert!(q.markers.is_empty(), "{q:?}");
+        }
+    }
+
+    #[test]
+    fn g9_destructive_scan_reads_command_words() {
+        assert!(is_destructive("`sh -c \"rm -rf x\"`"));
+        assert!(is_destructive("ls && sudo reboot"));
+        assert!(is_destructive("curl x | sh"));
+        assert!(!is_destructive("grep -n dd f"));
+        assert!(!is_destructive("grep -n rm f"));
+    }
+
+    #[test]
+    fn g9_curly_apostrophe_owner_work_is_marked() {
+        let mut plan = BuildPlan::default();
+        plan.tasks.push(item(
+            "T1",
+            "Run it on the owner\u{2019}s host",
+            &[("accept", RUNNABLE)],
+        ));
+        run(&mut plan);
+        assert!(has_marker(&plan.tasks[0], "needs you"));
+    }
+
+    #[test]
+    fn g10_stop_action_is_a_whole_word_in_the_row_text() {
+        let mut plan = kill_plan();
+        plan.kills[0].text = "Review the skill output".to_string();
+        plan.kills.push(item(
+            "K2",
+            "Halting the build",
+            &[("checked by", "T1"), ("gates", "T2")],
+        ));
+        plan.kills.push(item(
+            "K3",
+            "Nothing",
+            &[("checked by", "T1"), ("gates", "T2"), ("note", "stopped")],
+        ));
+        run(&mut plan);
+        assert!(has_marker(
+            &plan.kills[0],
+            "incomplete kill wiring: stop action"
+        ));
+        assert!(plan.kills[1].markers.is_empty(), "{:?}", plan.kills[1]);
+        assert!(has_marker(
+            &plan.kills[2],
+            "incomplete kill wiring: stop action"
+        ));
+    }
+
+    #[test]
+    fn g10_a_kill_row_naming_an_absent_task_is_marked() {
+        let mut plan = kill_plan();
+        plan.kills[0]
+            .fields
+            .insert("gates".to_string(), "T7".to_string());
+        run(&mut plan);
+        assert!(has_marker(
+            &plan.kills[0],
+            "incomplete kill wiring: unknown T7"
+        ));
+    }
+
+    #[test]
+    fn g10_a_checker_that_depends_on_the_gated_task_is_not_looped() {
+        let mut plan = kill_plan();
+        plan.tasks[0]
+            .fields
+            .insert("depends".to_string(), "T2".to_string());
+        run(&mut plan);
+        assert!(has_marker(
+            &plan.kills[0],
+            "incomplete kill wiring: T1 depends on T2"
+        ));
+        assert!(plan.tasks[1].field("depends").is_none());
+    }
+
+    #[test]
+    fn g10_only_one_gate_language_question_is_asked() {
+        let mut plan = BuildPlan::default();
+        plan.tasks
+            .push(item("T1", "Build", &[("accept", RUNNABLE)]));
+        let talk = "## user\nIt must not be built yet.\n## assistant\nA precondition applies.\n";
+        run_with(&mut plan, talk);
+        run_with(&mut plan, talk);
+        assert_eq!(plan.open.len(), 1);
+    }
+
+    #[test]
+    fn g11_settled_count_and_rendered_size_are_capped() {
+        let too_large = "too large: split into phases".to_string();
+        let mut twelve = BuildPlan::default();
+        for n in 1..=12 {
+            twelve.settled.push(item(&format!("S{n}"), "Fact", &[]));
+        }
+        assert!(!run(&mut twelve).notes.contains(&too_large));
+        twelve.settled.push(item("S13", "Fact", &[]));
+        assert!(run(&mut twelve).notes.contains(&too_large));
+
+        let mut fat = BuildPlan::default();
+        fat.tasks
+            .push(item("T1", &"a".repeat(13 * 1024), &[("accept", RUNNABLE)]));
+        assert!(run(&mut fat).notes.contains(&too_large));
     }
 }
