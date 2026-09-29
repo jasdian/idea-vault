@@ -100,3 +100,13 @@ depends on `web`, dependencies point one way, and the docs the doc-sync sweep fo
 - The doc checker no longer flags external-crate paths such as `http::request::Parts`, and still
   flags a genuinely unknown path.
 - Every commit ships through `bash scripts/gate.sh` green.
+- Lexical edges get less noisy (owner, 2026-09-29: "Lexical edge noise - fix too"). Before any change,
+  each option ADR-0027 left open is measured on the frozen eval corpus against the labels:
+  - top-2 instead of top-3;
+  - 3 shared words instead of 2;
+  - a higher display floor for pairs related only lexically.
+
+  The option shipped is the one with the best precision among those that keep at least the current
+  recall (3 of 5 related pairs), with fewer false neighbours shown per idea as the tie-break. The
+  measurement and the choice are recorded. With 9 ideas this is tuning on the evaluation data, so the
+  choice is provisional.
