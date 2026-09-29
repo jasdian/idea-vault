@@ -155,6 +155,14 @@ fn judge(item: &mut Item, kind: Kind, ctx: &Ctx, report: &mut GateReport) -> Ver
         }
     }
     if let Some(verdict) = g5(item, ctx, report) {
+        if kind == Kind::Fence {
+            // A fence only forbids edits, so an unproven path is still a safe guard: keep it
+            // fenced and say it is unverified rather than dropping the guard (ADR-0030).
+            if let Verdict::Quarantine(why) | Verdict::Verify { marker: why, .. } = verdict {
+                item.markers.push(format!("unverified fence path: {why}"));
+            }
+            return Verdict::Keep;
+        }
         return verdict;
     }
     if kind == Kind::Claim {
@@ -933,6 +941,29 @@ mod tests {
         };
         run(&mut plan, &SourceProbe::default());
         assert_eq!(plan.fence.len(), 1);
+    }
+
+    #[test]
+    fn g5_a_fence_item_is_never_quarantined_or_moved() {
+        let mut plan = BuildPlan {
+            fence: vec![Item::new(
+                "F1",
+                "`/srv/reference/FrobnicateAll/` (read-only)",
+            )],
+            ..BuildPlan::default()
+        };
+        run(&mut plan, &SourceProbe::default());
+        assert!(plan.quarantined.is_empty(), "{:?}", plan.quarantined);
+        assert!(plan.verify.is_empty(), "{:?}", plan.verify);
+        assert_eq!(plan.fence.len(), 1);
+        assert!(
+            plan.fence[0]
+                .markers
+                .iter()
+                .any(|m| m.starts_with("unverified fence path")),
+            "{:?}",
+            plan.fence[0]
+        );
     }
 
     #[test]
