@@ -159,25 +159,33 @@ pub struct WorkflowOutcome {
 /// [`kind_label`] puts on each finding line; carried ahead of the findings block, never model text.
 const BUILD_PLAN_PREAMBLE: &str = "## How to use the findings\n\
 Each finding line starts with its kind (decision, open question, risk, next action or fact), then its verdict in brackets when the audit ran.\n\
-- A CONFIRMED decision goes to Settled only with a verbatim owner quote found in the discussion below; without one it is not Settled.\n\
-- An UNCERTAIN finding, and every open question, goes to Open questions (Q#).\n\
-- A risk goes to Verify first (P# with a read-only check) or to Kill criteria (K#).\n\
+- A REFUTED finding, whatever its kind, is never Settled and never a task; leave it out of the plan entirely. This rule wins over every rule below.\n\
+- A CONFIRMED decision goes to Settled only with a verbatim owner quote found in the discussion below; otherwise it goes to Open questions (Q#).\n\
+- An open question that is not REFUTED goes to Open questions (Q#).\n\
+- A risk that is not REFUTED goes to Verify first (P# with a read-only check) or to Kill criteria (K#).\n\
 - A CONFIRMED next action becomes a task candidate, keeping any paths or commands it named.\n\
+- An UNCERTAIN decision, next action or fact goes to Open questions (Q#).\n\
 - A fact is background only, never a task.\n\
-- A REFUTED finding is never Settled and never a task; leave it out of the plan entirely.\n\
 - A finding with no verdict label is unchecked: treat it as UNCERTAIN.";
 
 /// Divisor of the stage budget the planner's preamble and findings block may take together, so
-/// quotable discussion survives.
+/// quotable discussion survives. The cap holds only while `budget / divisor` covers the preamble,
+/// the two-byte join and [`MIN_PLANNER_BLOCK`]; below that the preamble is carried whole and the
+/// block keeps its floor.
 const PLANNER_FINDINGS_DIVISOR: usize = 3;
 
 /// Divisor of the stage budget a non-planner chained step's findings block may take.
 const DEFAULT_FINDINGS_DIVISOR: usize = 2;
 
-/// Smallest byte cap the planner's findings block keeps once the preamble has taken its share.
+/// The separator between carried blocks.
+const CARRY_JOIN: &str = "\n\n";
+
+/// Smallest byte cap the planner's findings block keeps once the preamble has taken its share,
+/// even when that overshoots the shared cap.
 const MIN_PLANNER_BLOCK: usize = 200;
 
-/// The plain kind a harvest lens labels its findings with, `None` for any other lens.
+/// The plain kind a harvest lens labels its findings with, `None` for any other lens. A finding
+/// merged across lenses takes the kind of its first matching lens.
 fn kind_label(finding: &Finding) -> Option<&'static str> {
     finding.lenses.iter().find_map(|l| match l.as_str() {
         "extract-key-decisions" => Some("decision"),
@@ -190,8 +198,9 @@ fn kind_label(finding: &Finding) -> Option<&'static str> {
 }
 
 /// The blocks a chained step after a fan-out carries forward. The planner gets the preamble, and
-/// preamble plus findings block together stay within a third of the budget; every other step gets
-/// the findings block alone, within half.
+/// preamble, join and findings block together stay within a third of the budget unless that third
+/// cannot hold the preamble plus [`MIN_PLANNER_BLOCK`]; every other step gets the findings block
+/// alone, within half.
 fn findings_carry(
     findings: &[Finding],
     report: Option<&AuditReport>,
@@ -203,7 +212,7 @@ fn findings_carry(
         return vec![findings_block(findings, report, budget, cap)];
     }
     let cap = (budget.max_bytes / PLANNER_FINDINGS_DIVISOR)
-        .saturating_sub(BUILD_PLAN_PREAMBLE.len())
+        .saturating_sub(BUILD_PLAN_PREAMBLE.len() + CARRY_JOIN.len())
         .max(MIN_PLANNER_BLOCK);
     vec![
         BUILD_PLAN_PREAMBLE.to_string(),
@@ -281,19 +290,22 @@ fn stage_context(
     carried: &[String],
     related: RelatedProvider<'_>,
 ) -> Result<String, ConceptError> {
-    stage_context_flagged(vault_dir, idea_slug, budget, carried, related).map(|(text, _)| text)
+    stage_context_flagged(vault_dir, idea_slug, budget, carried, related, false)
+        .map(|(text, _)| text)
 }
 
-/// [`stage_context`] plus, when hydration dropped discussion turns, how many of the discussion's
-/// turns it kept and how many there were.
+/// [`stage_context`] plus, when `count_turns` and hydration dropped discussion turns, how many of
+/// the discussion's turns it kept and how many there were. The total is read from the vault only
+/// on request, since only the planner reports it.
 fn stage_context_flagged(
     vault_dir: &Path,
     idea_slug: &str,
     budget: ContextBudget,
     carried: &[String],
     related: RelatedProvider<'_>,
+    count_turns: bool,
 ) -> Result<(String, Option<(usize, usize)>), ConceptError> {
-    let carried = carried.join("\n\n");
+    let carried = carried.join(CARRY_JOIN);
     let rest = ContextBudget::new(budget.max_bytes.saturating_sub(carried.len()));
     let base = hydrate_context(vault_dir, idea_slug, rest)?;
     let block = related(related_allowance(rest, base.text.len()));
@@ -302,6 +314,9 @@ fn stage_context_flagged(
     } else {
         format!("{block}{carried}\n\n{}", base.text)
     };
+    if !count_turns {
+        return Ok((text, None));
+    }
     let total = discussion_turns(vault_dir, idea_slug)?;
     let clipped = (base.included_turns < total).then_some((base.included_turns, total));
     Ok((text, clipped))
@@ -404,8 +419,9 @@ pub async fn run_workflow(
                         carried.extend(findings_carry(f, report.as_ref(), budget, planner));
                     }
                 }
-                let (mut context, clipped) =
-                    stage_context_flagged(vault_dir, idea_slug, budget, &carried, related)?;
+                let (mut context, clipped) = stage_context_flagged(
+                    vault_dir, idea_slug, budget, &carried, related, planner,
+                )?;
                 if let (true, Some((kept, total))) = (planner, clipped) {
                     context = format!(
                         "(discussion clipped: the latest {kept} of {total} turns are shown)\n\n{context}"
@@ -607,15 +623,68 @@ mod tests {
         let budget = ContextBudget::new(4096);
         let other = findings_carry(&findings, None, budget, false);
         assert_eq!(other.len(), 1);
-        assert!(other
-            .iter()
-            .all(|b| !b.contains("## How to use the findings")));
+        assert!(!other[0].contains("## How to use the findings"));
         assert!(other[0].starts_with("## Prior stage: findings\n"));
         assert!(other[0].len() > budget.max_bytes / 3, "half-budget cap");
         assert!(other[0].len() <= budget.max_bytes / 2 + '…'.len_utf8());
         let planner = findings_carry(&findings, None, budget, true);
         assert_eq!(planner.len(), 2);
         assert_eq!(planner[0], BUILD_PLAN_PREAMBLE);
+    }
+
+    #[test]
+    fn kind_label_names_every_harvest_lens() {
+        let labels: Vec<Option<&str>> = crate::concepts::knowledge::LENSES
+            .iter()
+            .map(|l| kind_label(&finding(l, "x")))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("decision"),
+                Some("fact"),
+                Some("open question"),
+                Some("risk"),
+                Some("next action"),
+            ]
+        );
+        assert_eq!(kind_label(&finding("premortem", "x")), None);
+        let merged = Finding {
+            lenses: vec![
+                "extract-key-decisions".into(),
+                "extract-risks-assumptions".into(),
+            ],
+            role: AgentRole::Harvester,
+            text: "x".into(),
+        };
+        assert_eq!(kind_label(&merged), Some("decision"));
+    }
+
+    #[test]
+    fn an_unaudited_finding_line_is_the_kind_then_the_text() {
+        let f = [finding("extract-key-decisions", "Ship solo")];
+        let block = findings_block(&f, None, ContextBudget::new(4096), 4096);
+        assert!(
+            block
+                .lines()
+                .any(|l| l.starts_with("- decision · Ship solo (")),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn ready_to_build_preamble_is_carried_whole_when_the_budget_cannot_hold_it() {
+        let findings = [finding("extract-key-decisions", &"d ".repeat(600))];
+        let planner = findings_carry(&findings, None, ContextBudget::new(1500), true);
+        assert_eq!(planner[0], BUILD_PLAN_PREAMBLE);
+        assert!(planner[1].len() <= MIN_PLANNER_BLOCK);
+        let roomy = ContextBudget::new(9000);
+        let planner = findings_carry(&findings, None, roomy, true);
+        let total = planner.join(CARRY_JOIN).len();
+        assert!(
+            total <= roomy.max_bytes / PLANNER_FINDINGS_DIVISOR,
+            "{total}"
+        );
     }
 
     #[test]

@@ -488,21 +488,31 @@ async fn chained_step_body(auditor_reply: &str) -> String {
 }
 
 async fn chained_step_body_at(auditor_reply: &str, max_bytes: usize) -> String {
+    chained_step_body_with(
+        [
+            "- Ship solo first",
+            "- Agencies pay monthly",
+            "",
+            "- risk: churn",
+            "- Call three agencies",
+        ],
+        auditor_reply,
+        max_bytes,
+    )
+    .await
+}
+
+async fn chained_step_body_with(
+    harvest: [&str; 5],
+    auditor_reply: &str,
+    max_bytes: usize,
+) -> String {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
-    let mock = spawn_sequence(
-        &["llama3.2"],
-        vec![
-            tokens("- Ship solo first"),
-            tokens("- Agencies pay monthly"),
-            tokens(""),
-            tokens("- risk: churn"),
-            tokens("- Call three agencies"),
-            tokens(auditor_reply),
-            tokens(PLAN),
-        ],
-    )
-    .await;
+    let mut scripts: Vec<ChatScript> = harvest.iter().map(|h| tokens(h)).collect();
+    scripts.push(tokens(auditor_reply));
+    scripts.push(tokens(PLAN));
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
     run_at(&mock, tmp.path(), "ready-to-build", true, max_bytes).await;
     mock.chat_bodies().pop().unwrap().replace("\\n", "\n")
 }
@@ -680,9 +690,15 @@ async fn ready_to_build_preamble_maps_verdicts_to_sections() {
     let preamble = &chain[pre..findings];
     for (lead, needle) in [
         ("- A CONFIRMED decision", "verbatim owner quote"),
-        ("- An UNCERTAIN finding", "Open questions (Q#)"),
-        ("- A risk", "Verify first (P# with a read-only check)"),
-        ("- A risk", "Kill criteria (K#)"),
+        (
+            "- An open question that is not REFUTED",
+            "Open questions (Q#)",
+        ),
+        (
+            "- A risk that is not REFUTED",
+            "Verify first (P# with a read-only check)",
+        ),
+        ("- A risk that is not REFUTED", "Kill criteria (K#)"),
         ("- A CONFIRMED next action", "keeping any paths or commands"),
         ("- A REFUTED finding", "never Settled and never a task"),
     ] {
@@ -772,9 +788,82 @@ async fn ready_to_build_preamble_counts_itself_in_the_cap() {
     let start = chain.find(PREAMBLE_HEADING).unwrap();
     let end = chain.find(block).unwrap() + block.len();
     assert!(
-        end - start <= budget / 3 + '…'.len_utf8(),
+        end - start <= budget / 3,
         "preamble + block is {} bytes",
         end - start
     );
     assert!(block.ends_with('…'), "{block}");
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_states_refuted_first_and_conditions_the_kind_rules() {
+    let chain = chained_step_body(
+        "F1: CONFIRMED — ok\nF2: UNCERTAIN — maybe\nF3: REFUTED — no\nF4: CONFIRMED — ok",
+    )
+    .await;
+    let pre = chain.find(PREAMBLE_HEADING).unwrap();
+    let findings = chain.find("## Prior stage: findings").unwrap();
+    let bullets: Vec<&str> = chain[pre..findings]
+        .lines()
+        .filter(|l| l.starts_with("- "))
+        .collect();
+    assert!(
+        bullets[0].starts_with("- A REFUTED finding, whatever its kind"),
+        "{}",
+        bullets[0]
+    );
+    let line = |lead: &str| bullets.iter().find(|l| l.starts_with(lead)).copied();
+    for lead in [
+        "- An open question that is not REFUTED",
+        "- A risk that is not REFUTED",
+    ] {
+        assert!(line(lead).is_some(), "missing rule: {lead}");
+    }
+    let unquoted = line("- A CONFIRMED decision").unwrap();
+    assert!(
+        unquoted.contains("otherwise") && unquoted.contains("Open questions"),
+        "{unquoted}"
+    );
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_labels_an_open_question_finding() {
+    let chain = chained_step_body_with(
+        [
+            "- Ship solo first",
+            "- Agencies pay monthly",
+            "- Who pays first?",
+            "- risk: churn",
+            "- Call three agencies",
+        ],
+        "F1: CONFIRMED — ok\nF2: CONFIRMED — ok\nF3: UNCERTAIN — maybe\nF4: CONFIRMED — ok\nF5: CONFIRMED — ok",
+        8192,
+    )
+    .await;
+    let line = findings_block_of(&chain)
+        .lines()
+        .find(|l| l.contains("Who pays first?"))
+        .unwrap();
+    assert!(line.starts_with("- open question · [UNCERTAIN]"), "{line}");
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_keeps_the_whole_preamble_at_a_tiny_budget() {
+    let chain = chained_step_body_at(
+        "F1: CONFIRMED — ok\nF2: CONFIRMED — ok\nF3: UNCERTAIN — maybe\nF4: REFUTED — no",
+        1500,
+    )
+    .await;
+    let pre = chain.find(PREAMBLE_HEADING).unwrap();
+    let findings = chain.find("## Prior stage: findings").unwrap();
+    assert!(
+        chain[pre..findings].contains("treat it as UNCERTAIN."),
+        "the preamble is never clipped"
+    );
+    let block = findings_block_of(&chain);
+    assert!(
+        block.len() <= 200,
+        "the block keeps only its floor: {}",
+        block.len()
+    );
 }
