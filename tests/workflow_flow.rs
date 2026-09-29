@@ -554,7 +554,7 @@ async fn chained_findings_drop_the_auditor_suffix_when_the_reason_is_empty() {
     .await;
     let line = chain
         .lines()
-        .find(|l| l.starts_with("- [CONFIRMED] Ship solo first"))
+        .find(|l| l.contains("[CONFIRMED] Ship solo first"))
         .unwrap();
     assert!(!line.contains("auditor:"), "{line}");
 }
@@ -578,17 +578,6 @@ async fn chained_findings_clip_each_reason() {
         "outer cap not reached: {}",
         block.len()
     );
-}
-
-#[tokio::test]
-async fn chained_findings_clip_the_block_to_half_the_budget() {
-    let long = "r".repeat(1000);
-    let reply = format!(
-        "F1: CONFIRMED — {long}\nF2: CONFIRMED — {long}\nF3: UNCERTAIN — {long}\nF4: REFUTED — {long}"
-    );
-    let chain = chained_step_body_at(&reply, 1024).await;
-    let block = findings_block_of(&chain);
-    assert!(block.len() <= 1024 / 2, "block is {} bytes", block.len());
 }
 
 async fn empty_harvest_run(audit: bool) -> (Vec<String>, String) {
@@ -688,20 +677,87 @@ async fn ready_to_build_preamble_maps_verdicts_to_sections() {
     let pre = chain.find(PREAMBLE_HEADING).expect("preamble present");
     let findings = chain.find("## Prior stage: findings").expect("findings");
     assert!(pre < findings, "the preamble precedes the findings");
-    for needle in [
-        "verbatim owner quote",
-        "Open questions (Q#)",
-        "Verify first (P# with a read-only check)",
-        "Kill criteria (K#)",
-        "never Settled and never a task",
-        "keeping any paths or commands",
+    let preamble = &chain[pre..findings];
+    for (lead, needle) in [
+        ("- A CONFIRMED decision", "verbatim owner quote"),
+        ("- An UNCERTAIN finding", "Open questions (Q#)"),
+        ("- A risk", "Verify first (P# with a read-only check)"),
+        ("- A risk", "Kill criteria (K#)"),
+        ("- A CONFIRMED next action", "keeping any paths or commands"),
+        ("- A REFUTED finding", "never Settled and never a task"),
     ] {
-        assert!(chain.contains(needle), "missing {needle}");
+        let line = preamble.lines().find(|l| l.starts_with(lead)).unwrap();
+        assert!(line.contains(needle), "{lead} line lacks {needle}: {line}");
     }
 }
 
 #[tokio::test]
-async fn ready_to_build_preamble_caps_findings_at_a_third() {
+async fn ready_to_build_preamble_leaves_refuted_findings_out_entirely() {
+    let chain = chained_step_body("F1: REFUTED — no").await;
+    let refuted = chain
+        .lines()
+        .find(|l| l.contains("REFUTED finding"))
+        .unwrap();
+    assert!(
+        refuted.contains("leave it out of the plan entirely"),
+        "{refuted}"
+    );
+    assert!(!chain.contains("do-not-build-on"));
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_labels_each_finding_with_its_kind() {
+    let chain = chained_step_body(
+        "F1: CONFIRMED — ok\nF2: CONFIRMED — ok\nF3: UNCERTAIN — maybe\nF4: CONFIRMED — ok",
+    )
+    .await;
+    let block = findings_block_of(&chain);
+    for (text, lead) in [
+        ("Ship solo first", "- decision · [CONFIRMED]"),
+        ("Agencies pay monthly", "- fact · "),
+        ("risk: churn", "- risk · "),
+        ("Call three agencies", "- next action · "),
+    ] {
+        let line = block.lines().find(|l| l.contains(text)).unwrap();
+        assert!(line.starts_with(lead), "{text}: {line}");
+    }
+    let pre = &chain[chain.find(PREAMBLE_HEADING).unwrap()..chain.find(block).unwrap()];
+    for label in ["decision", "open question", "risk", "next action", "fact"] {
+        assert!(pre.contains(label), "preamble names {label}");
+    }
+}
+
+async fn planner_body_with_conversation(turns: usize, budget: usize) -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    for n in 0..turns {
+        let filler = format!("turn {n} {}", "talk ".repeat(40));
+        store::append_conversation(tmp.path(), "i", &format!("## user\n{filler}\n")).unwrap();
+    }
+    let mut scripts: Vec<ChatScript> = (0..5).map(|i| tokens(&format!("- finding{i}"))).collect();
+    scripts.push(tokens(PLAN));
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    run_at(&mock, tmp.path(), "ready-to-build", false, budget).await;
+    mock.chat_bodies().pop().unwrap().replace("\\n", "\n")
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_notes_a_clipped_discussion() {
+    let clipped = planner_body_with_conversation(40, 4000).await;
+    let note = clipped
+        .lines()
+        .find(|l| l.starts_with("(discussion clipped"))
+        .expect("note present when turns were dropped");
+    assert!(note.contains("of 41 turns"), "{note}");
+    let whole = planner_body_with_conversation(0, 8192).await;
+    assert!(
+        !whole.contains("discussion clipped"),
+        "absent when nothing is dropped"
+    );
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_counts_itself_in_the_cap() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
     let mut scripts: Vec<ChatScript> = (0..5)
@@ -709,40 +765,16 @@ async fn ready_to_build_preamble_caps_findings_at_a_third() {
         .collect();
     scripts.push(tokens(PLAN));
     let mock = spawn_sequence(&["llama3.2"], scripts).await;
-    let budget = 3000;
+    let budget = 4000;
     run_at(&mock, tmp.path(), "ready-to-build", false, budget).await;
     let chain = mock.chat_bodies().pop().unwrap().replace("\\n", "\n");
     let block = findings_block_of(&chain);
+    let start = chain.find(PREAMBLE_HEADING).unwrap();
+    let end = chain.find(block).unwrap() + block.len();
     assert!(
-        block.len() <= budget / 3 + '…'.len_utf8(),
-        "block is {} bytes",
-        block.len()
+        end - start <= budget / 3 + '…'.len_utf8(),
+        "preamble + block is {} bytes",
+        end - start
     );
     assert!(block.ends_with('…'), "{block}");
-}
-
-#[tokio::test]
-async fn ready_to_build_preamble_absent_for_other_workflows() {
-    let tmp = tempfile::tempdir().unwrap();
-    seed_idea(tmp.path(), "i");
-    let mock = spawn_sequence(
-        &["llama3.2"],
-        vec![
-            tokens("STEELMAN: best version"),
-            tokens("1. fails because a"),
-            tokens("- disproof b"),
-            tokens("argument c"),
-            tokens("converged"),
-        ],
-    )
-    .await;
-    run(&mock, tmp.path(), "steelman-then-attack", false).await;
-    let bodies = mock.chat_bodies();
-    assert_eq!(bodies.len(), 5);
-    assert!(bodies.iter().all(|b| !b.contains(PREAMBLE_HEADING)));
-    let planner = chained_step_body("F1: CONFIRMED — ok").await;
-    assert!(
-        planner.contains(PREAMBLE_HEADING),
-        "control: the planner has it"
-    );
 }

@@ -155,29 +155,71 @@ pub struct WorkflowOutcome {
     pub audit: Option<AuditReport>,
 }
 
-/// How a build-plan planner routes audited findings into plan sections; carried ahead of the
-/// findings block, never model text.
+/// How a build-plan planner routes audited findings into plan sections, keyed to the kind labels
+/// [`kind_label`] puts on each finding line; carried ahead of the findings block, never model text.
 const BUILD_PLAN_PREAMBLE: &str = "## How to use the findings\n\
-Route each finding by its verdict:\n\
-- CONFIRMED key decisions go to Settled only with a verbatim owner quote found in the discussion below; without one they are not Settled.\n\
-- UNCERTAIN findings, and open-question findings, go to Open questions (Q#).\n\
-- Risks and assumptions go to Verify first (P# with a read-only check) or to Kill criteria (K#).\n\
-- REFUTED findings are never Settled and never a task; they are listed as do-not-build-on.\n\
-- CONFIRMED next actions become task candidates, keeping any paths or commands they named.\n\
+Each finding line starts with its kind (decision, open question, risk, next action or fact), then its verdict in brackets when the audit ran.\n\
+- A CONFIRMED decision goes to Settled only with a verbatim owner quote found in the discussion below; without one it is not Settled.\n\
+- An UNCERTAIN finding, and every open question, goes to Open questions (Q#).\n\
+- A risk goes to Verify first (P# with a read-only check) or to Kill criteria (K#).\n\
+- A CONFIRMED next action becomes a task candidate, keeping any paths or commands it named.\n\
+- A fact is background only, never a task.\n\
+- A REFUTED finding is never Settled and never a task; leave it out of the plan entirely.\n\
 - A finding with no verdict label is unchecked: treat it as UNCERTAIN.";
 
-/// Divisor of the stage budget the planner's findings block may take, so quotable discussion
-/// survives.
+/// Divisor of the stage budget the planner's preamble and findings block may take together, so
+/// quotable discussion survives.
 const PLANNER_FINDINGS_DIVISOR: usize = 3;
 
-/// The findings as a carried-forward block for a chained step, capped at `1/divisor` of the stage
-/// budget. Audited lines carry the verdict and the auditor's clipped reason; when the audit failed the
-/// verdicts are defaults, so the findings are listed unlabelled and the block says so.
+/// Divisor of the stage budget a non-planner chained step's findings block may take.
+const DEFAULT_FINDINGS_DIVISOR: usize = 2;
+
+/// Smallest byte cap the planner's findings block keeps once the preamble has taken its share.
+const MIN_PLANNER_BLOCK: usize = 200;
+
+/// The plain kind a harvest lens labels its findings with, `None` for any other lens.
+fn kind_label(finding: &Finding) -> Option<&'static str> {
+    finding.lenses.iter().find_map(|l| match l.as_str() {
+        "extract-key-decisions" => Some("decision"),
+        "extract-open-questions" => Some("open question"),
+        "extract-risks-assumptions" => Some("risk"),
+        "extract-next-actions" => Some("next action"),
+        "extract-durable-facts" => Some("fact"),
+        _ => None,
+    })
+}
+
+/// The blocks a chained step after a fan-out carries forward. The planner gets the preamble, and
+/// preamble plus findings block together stay within a third of the budget; every other step gets
+/// the findings block alone, within half.
+fn findings_carry(
+    findings: &[Finding],
+    report: Option<&AuditReport>,
+    budget: ContextBudget,
+    planner: bool,
+) -> Vec<String> {
+    if !planner {
+        let cap = budget.max_bytes / DEFAULT_FINDINGS_DIVISOR;
+        return vec![findings_block(findings, report, budget, cap)];
+    }
+    let cap = (budget.max_bytes / PLANNER_FINDINGS_DIVISOR)
+        .saturating_sub(BUILD_PLAN_PREAMBLE.len())
+        .max(MIN_PLANNER_BLOCK);
+    vec![
+        BUILD_PLAN_PREAMBLE.to_string(),
+        findings_block(findings, report, budget, cap),
+    ]
+}
+
+/// The findings as a carried-forward block for a chained step, capped at `cap` bytes. Each line
+/// leads with its [`kind_label`]; audited lines carry the verdict and the auditor's clipped
+/// reason; when the audit failed the verdicts are defaults, so the findings are listed unlabelled
+/// and the block says so.
 fn findings_block(
     findings: &[Finding],
     report: Option<&AuditReport>,
     budget: ContextBudget,
-    divisor: usize,
+    cap: usize,
 ) -> String {
     let allowance = audit::finding_allowance(budget, findings.len());
     let audited = report.filter(|r| !r.failed);
@@ -186,17 +228,18 @@ fn findings_block(
         .enumerate()
         .map(|(i, f)| {
             let text = audit::clip(&f.text, allowance);
+            let kind = kind_label(f).map_or(String::new(), |k| format!("{k} · "));
             match audited.and_then(|r| r.verdicts.get(i)) {
                 Some(v) if v.reason.trim().is_empty() => {
-                    format!("- [{}] {text} ({})", v.label.as_str(), f.provenance())
+                    format!("- {kind}[{}] {text} ({})", v.label.as_str(), f.provenance())
                 }
                 Some(v) => format!(
-                    "- [{}] {text} ({}) — auditor: {}",
+                    "- {kind}[{}] {text} ({}) — auditor: {}",
                     v.label.as_str(),
                     f.provenance(),
                     audit::clip(v.reason.trim(), allowance / 2)
                 ),
-                None => format!("- {text} ({})", f.provenance()),
+                None => format!("- {kind}{text} ({})", f.provenance()),
             }
         })
         .collect::<Vec<_>>()
@@ -214,7 +257,7 @@ fn findings_block(
         Some(p) => format!("{heading}{p}\n\n{lines}"),
         None => format!("{heading}{lines}"),
     };
-    audit::clip(&block, budget.max_bytes / divisor)
+    audit::clip(&block, cap)
 }
 
 /// The findings a run's fan-outs produced, judged, deduped and capped — or
@@ -241,15 +284,15 @@ fn stage_context(
     stage_context_flagged(vault_dir, idea_slug, budget, carried, related).map(|(text, _)| text)
 }
 
-/// [`stage_context`] plus, when hydration clipped the idea, memory or discussion, the byte budget
-/// the hydrated part was held to.
+/// [`stage_context`] plus, when hydration dropped discussion turns, how many of the discussion's
+/// turns it kept and how many there were.
 fn stage_context_flagged(
     vault_dir: &Path,
     idea_slug: &str,
     budget: ContextBudget,
     carried: &[String],
     related: RelatedProvider<'_>,
-) -> Result<(String, Option<usize>), ConceptError> {
+) -> Result<(String, Option<(usize, usize)>), ConceptError> {
     let carried = carried.join("\n\n");
     let rest = ContextBudget::new(budget.max_bytes.saturating_sub(carried.len()));
     let base = hydrate_context(vault_dir, idea_slug, rest)?;
@@ -259,7 +302,17 @@ fn stage_context_flagged(
     } else {
         format!("{block}{carried}\n\n{}", base.text)
     };
-    Ok((text, base.truncated.then_some(rest.max_bytes)))
+    let total = discussion_turns(vault_dir, idea_slug)?;
+    let clipped = (base.included_turns < total).then_some((base.included_turns, total));
+    Ok((text, clipped))
+}
+
+/// How many discussion turns hydration draws from: the turns after any applied compaction.
+fn discussion_turns(vault_dir: &Path, idea_slug: &str) -> Result<usize, ConceptError> {
+    let turns = store::split_turns(&store::read_conversation(vault_dir, idea_slug)?);
+    let compacted = store::read_compacted(vault_dir, idea_slug)?;
+    let win = crate::memory::compact::effective_window(&turns, compacted.as_ref());
+    Ok(turns.len() - win.applied.unwrap_or(0))
 }
 
 /// Run a named workflow against `idea_slug` (D19/D32): execute its stages in order, holding no
@@ -348,19 +401,15 @@ pub async fn run_workflow(
                         findings = gather(&step_results).ok();
                     }
                     if let Some(f) = &findings {
-                        let divisor = if planner {
-                            carried.push(BUILD_PLAN_PREAMBLE.to_string());
-                            PLANNER_FINDINGS_DIVISOR
-                        } else {
-                            2
-                        };
-                        carried.push(findings_block(f, report.as_ref(), budget, divisor));
+                        carried.extend(findings_carry(f, report.as_ref(), budget, planner));
                     }
                 }
                 let (mut context, clipped) =
                     stage_context_flagged(vault_dir, idea_slug, budget, &carried, related)?;
-                if let (true, Some(bytes)) = (planner, clipped) {
-                    context = format!("(discussion truncated to {} KB)\n\n{context}", bytes / 1024);
+                if let (true, Some((kept, total))) = (planner, clipped) {
+                    context = format!(
+                        "(discussion clipped: the latest {kept} of {total} turns are shown)\n\n{context}"
+                    );
                 }
                 let task = AgentTask {
                     role: step.role,
@@ -540,6 +589,33 @@ mod tests {
     fn harvest_steps_mirror_the_knowledge_lenses() {
         let skills: Vec<&str> = HARVEST_STEPS.iter().filter_map(|s| s.skill).collect();
         assert_eq!(skills, crate::concepts::knowledge::LENSES);
+    }
+
+    fn finding(lens: &str, text: &str) -> Finding {
+        Finding {
+            lenses: vec![lens.to_string()],
+            role: AgentRole::Harvester,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn ready_to_build_preamble_is_only_for_the_planner() {
+        let findings: Vec<Finding> = (0..4)
+            .map(|_| finding("extract-key-decisions", &"d ".repeat(600)))
+            .collect();
+        let budget = ContextBudget::new(4096);
+        let other = findings_carry(&findings, None, budget, false);
+        assert_eq!(other.len(), 1);
+        assert!(other
+            .iter()
+            .all(|b| !b.contains("## How to use the findings")));
+        assert!(other[0].starts_with("## Prior stage: findings\n"));
+        assert!(other[0].len() > budget.max_bytes / 3, "half-budget cap");
+        assert!(other[0].len() <= budget.max_bytes / 2 + '…'.len_utf8());
+        let planner = findings_carry(&findings, None, budget, true);
+        assert_eq!(planner.len(), 2);
+        assert_eq!(planner[0], BUILD_PLAN_PREAMBLE);
     }
 
     #[test]
