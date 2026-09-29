@@ -271,8 +271,9 @@ fn findings_block(
 }
 
 /// The findings a run's fan-outs produced, judged, deduped and capped — or
-/// [`ConceptError::NothingToSynthesize`] when no agent produced anything usable.
-fn gather(results: &[Option<AgentResult>]) -> Result<Vec<Finding>, ConceptError> {
+/// [`ConceptError::NothingToSynthesize`] when no agent produced anything usable — with how many
+/// findings the cap left out.
+fn gather(results: &[Option<AgentResult>]) -> Result<(Vec<Finding>, usize), ConceptError> {
     let shortlist = judge(results);
     if shortlist.is_empty() {
         return Err(ConceptError::NothingToSynthesize);
@@ -387,6 +388,7 @@ pub async fn run_workflow(
     let mut carried: Vec<String> = Vec::new();
     let mut step_results: Vec<Option<AgentResult>> = Vec::new();
     let mut findings: Option<Vec<Finding>> = None;
+    let mut dropped = 0;
     let mut report: Option<AuditReport> = None;
     let mut output = String::new();
 
@@ -422,7 +424,10 @@ pub async fn run_workflow(
                 // A chained step after a fan-out reads its findings (with verdicts, if audited).
                 if !step_results.is_empty() {
                     if findings.is_none() {
-                        findings = gather(&step_results).ok();
+                        (findings, dropped) = match gather(&step_results) {
+                            Ok((f, d)) => (Some(f), d),
+                            Err(_) => (None, 0),
+                        };
                     }
                     if planner && findings.is_none() {
                         return Err(ConceptError::NothingHarvested);
@@ -467,7 +472,7 @@ pub async fn run_workflow(
                 }
                 if findings.is_none() {
                     match gather(&step_results) {
-                        Ok(f) => findings = Some(f),
+                        Ok((f, d)) => (findings, dropped) = (Some(f), d),
                         Err(ConceptError::NothingToSynthesize) => {
                             note("nothing harvested — audit skipped");
                             carried.push(
@@ -495,7 +500,8 @@ pub async fn run_workflow(
             }
             Stage::Synthesize => {
                 if findings.is_none() {
-                    findings = Some(gather(&step_results)?);
+                    let (f, d) = gather(&step_results)?;
+                    (findings, dropped) = (Some(f), d);
                 }
                 let f = findings.as_deref().unwrap_or_default();
                 note(&format!("converging {} findings", f.len()));
@@ -553,7 +559,7 @@ pub async fn run_workflow(
         );
     } else {
         let appendix = match (&report, &findings) {
-            (Some(r), Some(f)) => audit::appendix(f, r),
+            (Some(r), Some(f)) => audit::appendix(f, r, dropped),
             _ => String::new(),
         };
         // append_turn owns the heading grammar and escapes embedded "## " lines (no forged

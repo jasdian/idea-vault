@@ -1035,3 +1035,62 @@ async fn ready_to_build_mode_leaves_a_mixed_audit_unflagged() {
     assert!(!pointer.contains("weak") && !header.contains("weak"));
     assert!(!pointer.contains("skipped") && !pointer.contains("failed"));
 }
+
+fn distinct_items(prefix: &str, n: usize) -> String {
+    (0..n)
+        .map(|i| format!("- {prefix}{i}a {prefix}{i}b {prefix}{i}c"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn audit_cap_turn_counts_the_findings_left_out_with_one_auditor_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens(&distinct_items("p", 6)),
+            tokens(&distinct_items("q", 6)),
+            tokens(&distinct_items("r", 6)),
+            tokens(&distinct_items("s", 6)),
+            tokens("F1: CONFIRMED — ok"),
+            tokens("capped position"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "interrogate", true).await;
+    let bodies = mock.chat_bodies();
+    let auditors = bodies
+        .iter()
+        .filter(|b| b.contains("You are the Auditor"))
+        .count();
+    assert_eq!(auditors, 1, "one auditor call, no batching");
+    assert_eq!(bodies.len(), 6);
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("4 further findings not audited (cap 20)"),
+        "{convo}"
+    );
+}
+
+#[tokio::test]
+async fn audit_cap_turn_has_no_line_when_nothing_was_left_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("- one"),
+            tokens("- two"),
+            tokens("- three"),
+            tokens("- four"),
+            tokens("F1: CONFIRMED — ok"),
+            tokens("position"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "interrogate", true).await;
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(!convo.contains("not audited"));
+}

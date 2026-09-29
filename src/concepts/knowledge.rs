@@ -133,7 +133,7 @@ pub async fn extract_knowledge(
         "extraction · converging {} findings",
         shortlist.len()
     ));
-    let findings = audit::findings_from(&shortlist, MAX_SYNTHESIS_FINDINGS);
+    let (findings, _) = audit::findings_from(&shortlist, MAX_SYNTHESIS_FINDINGS);
     let statement = store::read_idea(vault_dir, idea_slug)?.body;
     let synthesis = synthesize(
         ollama,

@@ -223,7 +223,7 @@ pub async fn swarm(
     if shortlist.is_empty() {
         return Err(ConceptError::NothingToSynthesize);
     }
-    let findings = audit::findings_from(&shortlist, audit::MAX_AUDIT_FINDINGS);
+    let (findings, dropped) = audit::findings_from(&shortlist, audit::MAX_AUDIT_FINDINGS);
 
     let report = if audit_findings {
         progress(&format!("swarm · auditing {} findings", findings.len()));
@@ -268,7 +268,7 @@ pub async fn swarm(
     } else {
         let appendix = report
             .as_ref()
-            .map(|r| audit::appendix(&findings, r))
+            .map(|r| audit::appendix(&findings, r, dropped))
             .unwrap_or_default();
         // append_turn owns the heading grammar and escapes embedded "## " lines (no forged
         // turn boundaries from model output). The heading names the angles (unique, in order).

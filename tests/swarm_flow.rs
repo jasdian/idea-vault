@@ -334,3 +334,33 @@ async fn related_block_reaches_every_angle_once_computed() {
         assert!(block < own, "block precedes the own context");
     }
 }
+
+#[tokio::test]
+async fn audit_cap_swarm_turn_counts_the_findings_left_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let items = |prefix: &str| {
+        (0..12)
+            .map(|i| format!("- {prefix}{i}a {prefix}{i}b {prefix}{i}c"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::Tokens(vec![items("p")]),
+            ChatScript::Tokens(vec![items("q")]),
+            ChatScript::Tokens(vec!["F1: CONFIRMED — ok".into()]),
+            ChatScript::Tokens(vec!["converged view".into()]),
+        ],
+    )
+    .await;
+    run_swarm_audited(&mock, tmp.path(), 1, &["premortem", "constraints"], true)
+        .await
+        .unwrap();
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("4 further findings not audited (cap 20)"),
+        "{convo}"
+    );
+}

@@ -150,8 +150,9 @@ fn near_duplicate(a: &[String], b: &[String]) -> bool {
 
 /// Split each agent's answer into atomic findings (its list items), interleave them round-robin
 /// across agents so every lens keeps its top items, merge near-duplicates (keeping every lens
-/// that raised it), and stop at `cap`.
-pub fn findings_from(results: &[&AgentResult], cap: usize) -> Vec<Finding> {
+/// that raised it), and stop keeping at `cap`. Also returns how many distinct findings the cap
+/// left out, counted in the same round-robin order.
+pub fn findings_from(results: &[&AgentResult], cap: usize) -> (Vec<Finding>, usize) {
     let per_agent: Vec<Vec<String>> = results
         .iter()
         .map(|r| contract::items(&r.content))
@@ -159,18 +160,24 @@ pub fn findings_from(results: &[&AgentResult], cap: usize) -> Vec<Finding> {
     let rounds = per_agent.iter().map(Vec::len).max().unwrap_or(0);
     let mut findings: Vec<Finding> = Vec::new();
     let mut keys: Vec<Vec<String>> = Vec::new();
-    'rounds: for round in 0..rounds {
+    let mut dropped = 0;
+    for round in 0..rounds {
         for (result, items) in results.iter().zip(&per_agent) {
             let Some(text) = items.get(round) else {
                 continue;
             };
             let key = words(text);
             if let Some(i) = keys.iter().position(|k| near_duplicate(k, &key)) {
-                if let Some(lens) = &result.lens {
-                    if !findings[i].lenses.contains(lens) {
-                        findings[i].lenses.push(lens.clone());
+                if let (Some(lens), Some(kept)) = (&result.lens, findings.get_mut(i)) {
+                    if !kept.lenses.contains(lens) {
+                        kept.lenses.push(lens.clone());
                     }
                 }
+                continue;
+            }
+            if findings.len() >= cap {
+                dropped += 1;
+                keys.push(key);
                 continue;
             }
             findings.push(Finding {
@@ -179,12 +186,9 @@ pub fn findings_from(results: &[&AgentResult], cap: usize) -> Vec<Finding> {
                 text: text.clone(),
             });
             keys.push(key);
-            if findings.len() == cap {
-                break 'rounds;
-            }
         }
     }
-    findings
+    (findings, dropped)
 }
 
 /// Shorten `text` to at most `max` bytes on a char boundary, marking the cut.
@@ -319,12 +323,17 @@ pub async fn audit(
 
 /// The code-owned tail appended to a synthesis: the audit tally (with the uniform-pass warning)
 /// and every refuted finding with the auditor's reason — downgraded, never dropped.
-pub fn appendix(findings: &[Finding], report: &AuditReport) -> String {
+pub fn appendix(findings: &[Finding], report: &AuditReport, dropped: usize) -> String {
+    let cap_note = if dropped > 0 {
+        format!("\n\n_{dropped} further findings not audited (cap {MAX_AUDIT_FINDINGS})_")
+    } else {
+        String::new()
+    };
     if report.failed {
-        return "\n\n_Audit: unavailable — the findings above are unverified._".to_string();
+        return format!("\n\n_Audit: unavailable — the findings above are unverified._{cap_note}");
     }
     let mut out = format!(
-        "\n\n_Audit: {} confirmed · {} uncertain · {} refuted_",
+        "\n\n_Audit: {} confirmed · {} uncertain · {} refuted_{cap_note}",
         report.count(Label::Confirmed),
         report.count(Label::Uncertain),
         report.count(Label::Refuted)
@@ -380,7 +389,8 @@ mod tests {
             AgentRole::Researcher,
             "- nobody pays for it!\n- Needs a licence\n- Needs a team",
         );
-        let findings = findings_from(&[&a, &b], 10);
+        let (findings, dropped) = findings_from(&[&a, &b], 10);
+        assert_eq!(dropped, 0);
         let texts: Vec<&str> = findings.iter().map(|f| f.text.as_str()).collect();
         assert_eq!(
             texts,
@@ -393,7 +403,28 @@ mod tests {
         );
         assert_eq!(findings[0].lenses, ["premortem", "constraints"]);
         assert_eq!(findings[2].role, AgentRole::Researcher);
-        assert_eq!(findings_from(&[&a, &b], 2).len(), 2);
+        let (kept, dropped) = findings_from(&[&a, &b], 2);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(dropped, 2);
+    }
+
+    #[test]
+    fn findings_from_counts_only_distinct_findings_the_cap_left_out() {
+        let a = result(
+            "premortem",
+            AgentRole::Critic,
+            "1. Alpha one\n2. Beta two\n3. Gamma",
+        );
+        let b = result(
+            "constraints",
+            AgentRole::Researcher,
+            "- alpha one\n- Delta four",
+        );
+        let (kept, dropped) = findings_from(&[&a, &b], 2);
+        let texts: Vec<&str> = kept.iter().map(|f| f.text.as_str()).collect();
+        assert_eq!(texts, ["Alpha one", "Beta two"]);
+        assert_eq!(kept[0].lenses, ["premortem", "constraints"]);
+        assert_eq!(dropped, 2);
     }
 
     #[test]
@@ -452,13 +483,13 @@ mod tests {
             "F1: REFUTED — three pilots paid\nF2: UNCERTAIN — unknown",
             2,
         );
-        let out = appendix(&findings, &report);
+        let out = appendix(&findings, &report, 0);
         assert!(out.contains("1 uncertain · 1 refuted"));
         assert!(out.contains("### Disproven objections"));
         assert!(out.contains("~~Nobody pays~~ (premortem · critic) — three pilots paid"));
         assert!(!out.contains("Churn~~"));
         let failed = AuditReport::all_uncertain(2, "x");
-        assert!(appendix(&findings, &failed).contains("unverified"));
+        assert!(appendix(&findings, &failed, 0).contains("unverified"));
     }
 
     #[test]
