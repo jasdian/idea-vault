@@ -44,6 +44,7 @@ const BUILTIN: &[(&str, &str)] = &[
     ),
     ("market-size", include_str!("skills/market-size.md")),
     ("triz", include_str!("skills/triz.md")),
+    ("converge", include_str!("skills/converge.md")),
     ("build-prompt", include_str!("skills/build-prompt.md")),
     (
         "extract-key-decisions",

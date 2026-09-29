@@ -315,8 +315,8 @@ base.html`.
   The queue is in-memory like the job slots: a restart loses unsent messages. It covers chat
   only. Skill/swarm/workflow buttons on a busy idea still just re-show the in-flight state.
 - **Swarm angle picker:** the swarm chip in `_actions.html` carries an `angles ▾` disclosure with
-  one checkbox per visible, non-capstone skill (`SkillRegistry::visible()` minus the `Capstone`
-  stage) — that's ten today (steelman, premortem, cheapest-disproof, devils-advocate, pr-faq,
+  one checkbox per visible skill outside the capstone and converge stages (`SkillRegistry::visible()`
+  minus `Capstone` and `Converge` — a swarm converges on its own) — that's ten today (steelman, premortem, cheapest-disproof, devils-advocate, pr-faq,
   dialectical-inquiry, constraints, second-order-effects, market-size, triz), each label titled
   with the same `skill_tooltip` as its move chip; the hidden `extract-*` lenses stay off the
   picker because they are `hidden`, not because of any swarm-specific filter. The canonical four

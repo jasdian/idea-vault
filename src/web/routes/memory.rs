@@ -329,7 +329,8 @@ pub async fn run_swarm(
     }
     // Reject unknown angles synchronously (they map to skills) — `swarm` checks this too, but that
     // now runs in the background task, so validate here to keep a bad request a 400 not an error turn.
-    // A capstone (build-prompt) folds the whole discussion into one deliverable; it is not an angle.
+    // A capstone (build-prompt) folds the whole discussion into one deliverable; it is not an angle,
+    // and neither is a converge move.
     // One snapshot for the whole job, so a skill-book reload can't change the angles mid-run.
     let skills = state.skills.snapshot();
     for angle in &angles {
@@ -338,6 +339,12 @@ pub async fn run_swarm(
             Some(s) if s.stage == crate::domain::SkillStage::Capstone => {
                 return Err(WebError::BadRequest(format!(
                     "{angle} is a capstone, not a swarm angle"
+                )))
+            }
+            // A swarm converges on its own; a converge move among its angles has nothing to fold.
+            Some(s) if s.stage == crate::domain::SkillStage::Converge => {
+                return Err(WebError::BadRequest(format!(
+                    "{angle} is a converge move, not a swarm angle"
                 )))
             }
             Some(_) => {}

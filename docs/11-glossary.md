@@ -125,7 +125,8 @@
   active) run at once during a swarm, protecting a single local machine. See
   [ADR-0006](./adr/0006-bounded-concurrency-swarm.md).
 - **Converge / synthesize** — the final step of a swarm/workflow where multiple agent outputs are
-  judged and merged into one result.
+  judged and merged into one result. The `converge` skill is the single-turn version: it judges the
+  findings already in the transcript and commits to one verdict.
 
 ## System / code
 

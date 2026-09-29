@@ -73,7 +73,7 @@ from the move chips.
 | steelman | Make the strongest honest case first, so the attack has a worthy target |
 | attack | Try to break it (failure causes, cheapest disproof, hostile argument) |
 | consequence | Ground what survives (constraints, precedents, knock-on effects, size) |
-| converge | Fold the findings into one position (swarm, workflows and extraction all converge) |
+| converge | Fold the findings into one position (the `converge` move; swarm, workflows and extraction all converge too) |
 | capstone | Turn a settled idea into something actionable (the build prompt) |
 
 **Coverage.** `concepts::coverage::coverage` derives the idea page's **spine strip** from
@@ -90,8 +90,8 @@ from the move chips.
 The strip shows:
 
 - ✓/○ for each stage;
-- a **next ›** move: the first visible skill of the earliest uncovered stage, or the swarm when
-  only converge is missing;
+- a **next ›** move: the first visible skill of the earliest uncovered stage (the swarm stands in
+  for converge only when no converge skill is visible);
 - soft **wrong-turn** warnings — a build prompt generated before any attack move; the same move
   three times in a row;
 - a "no attack move has run yet" note by the Store button.
@@ -188,11 +188,13 @@ guidance in their tooltips.
 | `second-order-effects` | consequence · critic | Assume the idea works; trace the second-order and knock-on effects. |
 | `market-size` | consequence · researcher | Bottom-up size of the opportunity, every assumption visible, with the swing factor. |
 | `triz` | consequence · researcher | Name the idea's core contradiction (improving X worsens Y), describe the ideal final result, and resolve it **without** a trade-off via at least 3 separation/inversion principles. |
+| `converge` | converge · synthesizer | The **converge move**: judge what the earlier moves found rather than summarise it — a first-line verdict (pursue / kill / pursue only if …), the finding that decides it, every finding merged by mechanism and labelled CONFIRMED / UNCERTAIN / REFUTED (refuted ones kept with their reason), what holds up, the trade-off taken with at least one rejected alternative, 2–3 kill criteria, and the open questions with the default assumed until they are settled. |
 | `build-prompt` | capstone · synthesizer | The **capstone move**: fold the entire discussion into one ready-to-paste build prompt for a coding agent (e.g. Claude Code). It extracts the settled decisions, constraints and disproofs rather than transcribing them, and gives an ordered plan, explicit fan-out-vs-sequential guidance, and acceptance criteria. Contract: one fenced block, and only that block is persisted. |
 
 `premortem`, `cheapest-disproof`, `constraints`, and `second-order-effects` are also the default
 angle set a swarm run uses when the owner doesn't specify angles ([D14](./swarm.md)). The swarm
-picker offers every visible, non-capstone move, each label carrying the same tooltip as its chip.
+picker offers every visible move except capstones and converge (a swarm converges on its own;
+`POST /idea/{slug}/swarm` rejects either as an angle with a 400), each label carrying the same tooltip as its chip.
 
 `devils-advocate`, `pr-faq`, `dialectical-inquiry`, and `triz` are the **structured-dissent** moves.
 An assigned devil's advocate that merely role-plays objections tends to *bolster* the owner's

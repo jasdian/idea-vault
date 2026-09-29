@@ -117,3 +117,14 @@ async fn swarm_rejects_a_capstone_as_an_angle() {
     assert!(body.contains("capstone"));
     assert!(mock.chat_bodies().is_empty());
 }
+
+#[tokio::test]
+async fn swarm_rejects_a_converge_move_as_an_angle() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["x".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir);
+    let (status, body) = post_form(state, "/idea/skilled/swarm", "angles=converge").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("converge move"));
+    assert!(mock.chat_bodies().is_empty());
+}

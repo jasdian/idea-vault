@@ -87,22 +87,23 @@ pub fn coverage(conversation: &str, registry: &SkillRegistry) -> Coverage {
         .map(|&stage| (stage, covered(stage)))
         .collect();
 
-    // Next: the earliest uncovered stage that has a move to offer. Converge has no single-skill
-    // move, so the swarm stands in for it; the capstone is only suggested once the rest is done.
+    // Next: the earliest uncovered stage that has a move to offer; the capstone is only suggested
+    // once the rest is done. The swarm stands in for converge when no converge skill is visible.
     let next = stages
         .iter()
         .find(|(_, done)| !done)
         .and_then(|(stage, _)| {
-            if *stage == SkillStage::Converge {
-                return Some(NextMove::Swarm);
-            }
-            registry
+            let skill = registry
                 .visible()
                 .find(|s| s.stage == *stage)
                 .map(|s| NextMove::Skill {
                     name: s.name.clone(),
                     why: s.use_when.clone(),
-                })
+                });
+            match stage {
+                SkillStage::Converge => skill.or(Some(NextMove::Swarm)),
+                _ => skill,
+            }
         });
 
     let mut warnings = Vec::new();
@@ -221,17 +222,38 @@ mod tests {
         assert_eq!(covered(&wf), ["capstone"], "extract lenses are off-spine");
     }
 
+    const THROUGH_CONSEQUENCE: [&str; 3] = [
+        "assistant (skill: steelman)",
+        "assistant (skill: premortem)",
+        "assistant (skill: constraints)",
+    ];
+
     #[test]
-    fn converge_is_suggested_through_the_swarm() {
+    fn converge_is_suggested_as_the_converge_skill() {
         let registry = SkillRegistry::builtin();
-        let c = coverage(
-            &convo(&[
-                "assistant (skill: steelman)",
-                "assistant (skill: premortem)",
-                "assistant (skill: constraints)",
-            ]),
-            &registry,
+        let c = coverage(&convo(&THROUGH_CONSEQUENCE), &registry);
+        assert!(matches!(&c.next, Some(NextMove::Skill { name, .. }) if name == "converge"));
+
+        let mut headings = THROUGH_CONSEQUENCE.to_vec();
+        headings.push("assistant (skill: converge)");
+        let done = coverage(&convo(&headings), &registry);
+        assert_eq!(
+            covered(&done),
+            ["steelman", "attack", "consequence", "converge"]
         );
+    }
+
+    #[test]
+    fn the_swarm_stands_in_when_no_converge_skill_is_visible() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("converge.md"),
+            "---\nname: converge\ndescription: \"d\"\nstage: converge\nhidden: true\n---\n\nX\n{context}\n",
+        )
+        .unwrap();
+        let (registry, issues) = SkillRegistry::load(tmp.path());
+        assert!(issues.is_empty(), "{issues:?}");
+        let c = coverage(&convo(&THROUGH_CONSEQUENCE), &registry);
         assert_eq!(c.next, Some(NextMove::Swarm));
     }
 

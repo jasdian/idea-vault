@@ -347,7 +347,7 @@ pub(crate) fn render_actions(
     // server-side (memory::run_swarm), keeping the picker purely additive.
     let swarm_angles: Vec<crate::web::templates::SwarmAngle> = skills
         .visible()
-        .filter(|s| s.stage != SkillStage::Capstone)
+        .filter(|s| !matches!(s.stage, SkillStage::Capstone | SkillStage::Converge))
         .map(|s| crate::web::templates::SwarmAngle {
             name: s.name.clone(),
             title: skill_tooltip(s),
