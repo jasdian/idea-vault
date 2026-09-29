@@ -10,7 +10,7 @@ use std::path::Path;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection};
 
-use super::{schema, IndexError, SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
+use super::{queries, schema, IndexError, SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN};
 use crate::domain::links;
 use crate::domain::slug as domain_slug;
 use crate::vault::{store, walk};
@@ -407,6 +407,7 @@ fn reindex_inner(
     // 12. Derive the typed idea-to-idea `edges` from the now-resolved links.
     derive_link_edges(&tx)?;
     derive_tag_edges(&tx)?;
+    derive_lexical_edges(&tx)?;
 
     tx.pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
     tx.commit()?;
@@ -535,6 +536,103 @@ fn derive_tag_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
             "INSERT INTO edges (src_idea_id, dst_idea_id, type, weight, detail)
              VALUES (?1, ?2, 'tag', ?3, ?4)",
             params![lo, hi, sum.min(MAX_WEIGHT), names.join(", ")],
+        )?;
+    }
+    Ok(())
+}
+
+const LEXICAL_EDGE_TOP_K: usize = 3;
+const LEXICAL_EDGE_MIN_SHARED: usize = 2;
+const LEXICAL_EDGE_WEIGHT: f64 = 0.19;
+const LEXICAL_EDGE_MAX_TERMS: usize = 5;
+
+// Derives the `type = 'lexical'` rows of `edges` from the fair lexical baseline, with no model
+// call (ADR-0012). Each idea, in slug order, proposes its top `LEXICAL_EDGE_TOP_K` hits of
+// `queries::lexical_baseline`; a hit is kept only if at least `LEXICAL_EDGE_MIN_SHARED` distinct
+// query terms of the proposer occur in the hit's title, tags, idea body or memory rows, not
+// counting a term every idea contains (IDF 0). For a pair already joined by a `link` edge the
+// words of both slugs do not count either, so a `[[slug]]` link or a mention of the other idea
+// is not counted twice and neither slug reaches `detail`; unlinked pairs keep their title words.
+// A kept hit weighs `LEXICAL_EDGE_WEIGHT * score / top score`, so in (0, LEXICAL_EDGE_WEIGHT],
+// below the tag weight, and a two-hop lexical-only path scores half of that, under the
+// related-ideas floor. One row per unordered pair: the larger of the two directional weights,
+// and `detail` the union of both directions' shared terms, sorted, at most
+// `LEXICAL_EDGE_MAX_TERMS`. Everything is keyed by BTreeMap, so no weight or detail depends on
+// row, id or hash order. The vocabulary load scans every `search_fts` row, conversations
+// included, inside the reindex transaction, so its cost grows with transcript volume.
+fn derive_lexical_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
+    let mut ids: BTreeMap<String, i64> = BTreeMap::new();
+    let mut stmt = tx.prepare("SELECT slug, id FROM ideas")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        ids.insert(row.get(0)?, row.get(1)?);
+    }
+    drop(rows);
+    drop(stmt);
+    if ids.len() < 2 {
+        return Ok(());
+    }
+    let mut linked: BTreeSet<(i64, i64)> = BTreeSet::new();
+    let mut stmt = tx.prepare("SELECT src_idea_id, dst_idea_id FROM edges WHERE type = 'link'")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        linked.insert((row.get(0)?, row.get(1)?));
+    }
+    drop(rows);
+    drop(stmt);
+    let corpus = queries::LexicalCorpus::load(tx)?;
+
+    let mut pairs: BTreeMap<(i64, i64), (f64, BTreeSet<String>)> = BTreeMap::new();
+    for (slug, &id) in &ids {
+        let terms = corpus.query_terms(id);
+        let hits = queries::lexical_hits(tx, slug, &terms, LEXICAL_EDGE_TOP_K)?;
+        let Some(top) = hits.first().map(|hit| hit.score) else {
+            continue;
+        };
+        if top <= 0.0 {
+            continue;
+        }
+        for hit in &hits {
+            let Some(&other) = ids.get(&hit.idea_slug) else {
+                continue;
+            };
+            let key = (id.min(other), id.max(other));
+            let slug_words: BTreeSet<String> = if linked.contains(&key) {
+                [slug.as_str(), hit.idea_slug.as_str()]
+                    .into_iter()
+                    .flat_map(|s| s.split(|c: char| !c.is_alphanumeric()))
+                    .filter(|word| !word.is_empty())
+                    .map(str::to_lowercase)
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
+            let shared: BTreeSet<&String> = terms
+                .iter()
+                .filter(|term| corpus.contains(other, term))
+                .filter(|term| !corpus.in_every_idea(term))
+                .filter(|term| !slug_words.contains(*term))
+                .collect();
+            if shared.len() < LEXICAL_EDGE_MIN_SHARED {
+                continue;
+            }
+            let weight = LEXICAL_EDGE_WEIGHT * hit.score / top;
+            let (max, detail) = pairs.entry(key).or_insert((0.0, BTreeSet::new()));
+            *max = max.max(weight);
+            detail.extend(shared.into_iter().cloned());
+        }
+    }
+
+    for ((lo, hi), (weight, terms)) in pairs {
+        let detail: Vec<&str> = terms
+            .iter()
+            .take(LEXICAL_EDGE_MAX_TERMS)
+            .map(String::as_str)
+            .collect();
+        tx.execute(
+            "INSERT INTO edges (src_idea_id, dst_idea_id, type, weight, detail)
+             VALUES (?1, ?2, 'lexical', ?3, ?4)",
+            params![lo, hi, weight, detail.join(", ")],
         )?;
     }
     Ok(())
@@ -2040,5 +2138,329 @@ mod tests {
 
         // And the skip is stable: drift check ignores it the same way.
         assert!(!check_drift(&conn, tmp.path()).unwrap());
+    }
+
+    fn lexical_edge_rows(conn: &Connection) -> Vec<(String, String, f64, String)> {
+        edge_rows(conn)
+            .into_iter()
+            .filter(|edge| edge.2 == "lexical")
+            .map(|(a, b, _, weight, detail)| (a, b, weight, detail))
+            .collect()
+    }
+
+    fn write_hub_vault(vault: &Path) {
+        write_linked_ideas(
+            vault,
+            &[
+                ("hub", "Wombat quasar hubonly."),
+                ("n1", "Wombat quasar kelp fjord brine."),
+                ("n2", "Wombat quasar kelp fjord brine."),
+                ("n3", "Wombat quasar kelp fjord brine."),
+                ("n4", "Wombat quasar kelp fjord brine."),
+                ("n5", "Wombat quasar kelp fjord brine."),
+                ("f1", "Solitary tangerine."),
+                ("f2", "Distant glacier."),
+            ],
+        );
+    }
+
+    #[test]
+    fn lexical_edge_joins_two_ideas_sharing_two_rare_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("north", "Quokka lantern zephyr common filler."),
+                ("south", "Quokka lantern marmot common filler."),
+                ("east", "Common filler only here."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let rows = lexical_edge_rows(&conn);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (a, b, weight, detail) = &rows[0];
+        assert_eq!((a.as_str(), b.as_str()), ("north", "south"));
+        assert_eq!(
+            *weight, LEXICAL_EDGE_WEIGHT,
+            "each side is the other's top hit"
+        );
+        assert_eq!(detail, "lantern, quokka");
+    }
+
+    #[test]
+    fn lexical_edge_needs_two_shared_terms() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("north", "Quokka zephyr common filler."),
+                ("south", "Quokka marmot common filler."),
+                ("east", "Common filler here."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            queries::lexical_baseline(&conn, "north", 3)
+                .unwrap()
+                .iter()
+                .map(|hit| hit.idea_slug.as_str())
+                .collect::<Vec<_>>(),
+            ["south"],
+            "the pair is a baseline hit, so only the shared-term guard can drop it"
+        );
+        assert!(lexical_edge_rows(&conn).is_empty());
+    }
+
+    #[test]
+    fn lexical_edge_caps_each_idea_at_three_outgoing_candidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_hub_vault(tmp.path());
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            queries::lexical_baseline(&conn, "hub", 10).unwrap().len(),
+            5,
+            "all five neighbours are baseline hits of the hub"
+        );
+        for n in ["n1", "n2", "n3", "n4", "n5"] {
+            assert!(
+                queries::lexical_baseline(&conn, n, 3)
+                    .unwrap()
+                    .iter()
+                    .all(|hit| hit.idea_slug != "hub"),
+                "{n} must not propose the hub, so every hub edge is the hub's own proposal"
+            );
+        }
+        let touching_hub: Vec<(String, String, f64, String)> = lexical_edge_rows(&conn)
+            .into_iter()
+            .filter(|(a, b, _, _)| a == "hub" || b == "hub")
+            .collect();
+        assert_eq!(
+            touching_hub,
+            vec![
+                (
+                    "hub".into(),
+                    "n1".into(),
+                    LEXICAL_EDGE_WEIGHT,
+                    "quasar, wombat".into()
+                ),
+                (
+                    "hub".into(),
+                    "n2".into(),
+                    LEXICAL_EDGE_WEIGHT,
+                    "quasar, wombat".into()
+                ),
+                (
+                    "hub".into(),
+                    "n3".into(),
+                    LEXICAL_EDGE_WEIGHT,
+                    "quasar, wombat".into()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexical_edge_rows_are_byte_identical_across_reindexes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_hub_vault(tmp.path());
+        let raw = |conn: &Connection| -> Vec<(i64, i64, String, u64, String)> {
+            let mut stmt = conn
+                .prepare("SELECT * FROM edges WHERE type = 'lexical' ORDER BY 1, 2")
+                .unwrap();
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get::<_, f64>(3)?.to_bits(),
+                    r.get(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+        let first = raw(&conn);
+        assert!(!first.is_empty());
+        assert!(
+            first
+                .iter()
+                .all(|row| f64::from_bits(row.3) > 0.0
+                    && f64::from_bits(row.3) <= LEXICAL_EDGE_WEIGHT)
+        );
+
+        reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(first, raw(&conn));
+
+        let mut fresh = mem_conn();
+        reindex(&mut fresh, tmp.path()).unwrap();
+        assert_eq!(first, raw(&fresh));
+    }
+
+    #[test]
+    fn lexical_edge_related_excludes_own_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("north", "Builds on [[south]] with quokka lantern zephyr."),
+                ("south", "North quokka lantern marmot."),
+                ("east", "Unrelated glacier."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let of_north = queries::related_ideas(&conn, "north", 10).unwrap();
+        assert_eq!(
+            of_north
+                .iter()
+                .map(|r| (r.slug.as_str(), r.hops, r.reasons.clone()))
+                .collect::<Vec<_>>(),
+            [(
+                "south",
+                1,
+                vec!["lexical: lantern, quokka; link: north → south".to_string()]
+            )]
+        );
+        let of_south = queries::related_ideas(&conn, "south", 10).unwrap();
+        assert_eq!(
+            of_south.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
+            ["north"]
+        );
+    }
+
+    #[test]
+    fn lexical_edge_ignores_a_word_every_title_carries() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (slug, title, body) in [
+            ("north", "Project north", "Quokka zephyr filler."),
+            ("south", "Project south", "Quokka marmot filler."),
+            ("east", "Project east", "Filler here."),
+        ] {
+            store::write_idea(
+                tmp.path(),
+                &idea(slug, title, IdeaState::InDiscussion, &[], body),
+            )
+            .unwrap();
+        }
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            queries::lexical_baseline(&conn, "north", 3).unwrap()[0].idea_slug,
+            "south",
+            "the pair is the top baseline hit, so only the shared-term guards can drop it"
+        );
+        assert!(
+            lexical_edge_rows(&conn).is_empty(),
+            "{:?}",
+            lexical_edge_rows(&conn)
+        );
+    }
+
+    #[test]
+    fn lexical_edge_does_not_count_a_linked_slug_as_a_shared_term() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("north", "Builds on [[south]] with quokka."),
+                ("south", "Quokka marmot."),
+                ("east", "Unrelated glacier."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert_eq!(
+            queries::lexical_baseline(&conn, "north", 3).unwrap()[0].idea_slug,
+            "south",
+            "the pair is the top baseline hit, so only the shared-term guards can drop it"
+        );
+        assert!(edge_rows(&conn).iter().any(|edge| edge.2 == "link"));
+        assert!(
+            lexical_edge_rows(&conn).is_empty(),
+            "{:?}",
+            lexical_edge_rows(&conn)
+        );
+    }
+
+    #[test]
+    fn lexical_edge_counts_shared_title_words_of_unlinked_ideas() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (slug, title, body) in [
+            ("solar-kiln-quokka", "Solar Kiln Quokka", "Pottery wheel."),
+            ("solar-kiln-marmot", "Solar Kiln Marmot", "Brick oven."),
+            ("glacier-harbor", "Glacier Harbor", "Unrelated tide."),
+        ] {
+            store::write_idea(
+                tmp.path(),
+                &idea(slug, title, IdeaState::InDiscussion, &[], body),
+            )
+            .unwrap();
+        }
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        assert!(edge_rows(&conn).iter().all(|edge| edge.2 != "link"));
+        assert_eq!(
+            lexical_edge_rows(&conn),
+            vec![(
+                "solar-kiln-marmot".to_string(),
+                "solar-kiln-quokka".to_string(),
+                LEXICAL_EDGE_WEIGHT,
+                "kiln, solar".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn lexical_edge_two_hop_lexical_only_path_stays_below_the_related_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_linked_ideas(
+            tmp.path(),
+            &[
+                ("north", "Quokka lantern zephyr."),
+                ("middle", "Quokka lantern marmot fjord."),
+                ("south", "Marmot fjord glacier."),
+                ("east", "Unrelated tide pool."),
+            ],
+        );
+        let mut conn = mem_conn();
+        reindex(&mut conn, tmp.path()).unwrap();
+
+        let edges: Vec<(String, String, String)> = edge_rows(&conn)
+            .into_iter()
+            .map(|(a, b, kind, _, _)| (a, b, kind))
+            .collect();
+        assert_eq!(
+            edges,
+            vec![
+                ("middle".into(), "north".into(), "lexical".into()),
+                ("middle".into(), "south".into(), "lexical".into()),
+            ]
+        );
+        let related = scored(&conn, "north", 10);
+        assert_eq!(related[0], ("middle".to_string(), 1, LEXICAL_EDGE_WEIGHT));
+        let south = related
+            .iter()
+            .find(|(slug, _, _)| slug == "south")
+            .expect("south is reachable in two hops");
+        assert_eq!(south.1, 2);
+        assert!(
+            south.2 < 0.1,
+            "two-hop lexical-only score {} must stay under memory::related::MIN_RELATED_SCORE (0.1)",
+            south.2
+        );
     }
 }

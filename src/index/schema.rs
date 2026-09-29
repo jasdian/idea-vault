@@ -17,8 +17,9 @@ use super::IndexError;
 /// and recreates every derived table before rebuilding from the vault (ADR-0002).
 ///
 /// 0 = unstamped (binaries before the stamp), 2 = `fact_links` + `edges`, 3 = tag edges,
-/// 4 = `search_fts.ref` (fact slug of `memory` rows, artifact slug of `artifact` rows).
-pub const SCHEMA_VERSION: i64 = 4;
+/// 4 = `search_fts.ref` (fact slug of `memory` rows, artifact slug of `artifact` rows),
+/// 5 = lexical word-overlap edges.
+pub const SCHEMA_VERSION: i64 = 5;
 
 const DERIVED_TABLES: [&str; 8] = [
     "edges",

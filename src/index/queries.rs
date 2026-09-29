@@ -3,7 +3,7 @@
 //! These are pure reads of derived tables; they never mutate truth. If the index is stale a
 //! reindex reconciles it (ADR-0002).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rusqlite::Connection;
 
@@ -397,59 +397,121 @@ pub fn lexical_query_terms(conn: &Connection, slug: &str) -> Result<Vec<String>,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
-    conn.execute_batch(LEXICAL_VOCAB_DDL)?;
+    Ok(LexicalCorpus::load(conn)?.query_terms(idea_id))
+}
 
-    let mut tokens = Vec::new();
-    // CROSS JOIN pins the vocab scan as the outer loop: fts5vocab only filters on `term`, so as
-    // the inner table it would be rescanned once per search_fts row.
-    let mut stmt = conn.prepare(
-        "SELECT v.term
-         FROM temp.search_fts_vocab v CROSS JOIN search_fts s ON s.rowid = v.doc
-         WHERE s.idea_id = ?1 AND s.kind IN ('title', 'tags')
-         ORDER BY CASE s.kind WHEN 'title' THEN 0 ELSE 1 END, v.doc, v.offset",
-    )?;
-    for term in stmt.query_map([idea_id], |row| row.get::<_, String>(0))? {
-        push_token(&mut tokens, term?);
-    }
-    if tokens.len() == LEXICAL_MAX_TOKENS {
-        return Ok(tokens);
-    }
+/// Term statistics of the `search_fts` rows of kind `title`, `tags`, `idea_body` and `memory`,
+/// loaded once so a caller that needs [`lexical_query_terms`] for many ideas pays one scan.
+pub(crate) struct LexicalCorpus {
+    ideas: i64,
+    heads: BTreeMap<i64, Vec<(u8, i64, i64, String)>>,
+    tf: BTreeMap<i64, BTreeMap<String, i64>>,
+    df: BTreeMap<String, i64>,
+}
 
-    let ideas: i64 = conn.query_row(
-        &format!("SELECT COUNT(DISTINCT idea_id) FROM search_fts WHERE kind IN {LEXICAL_KINDS}"),
-        [],
-        |row| row.get(0),
-    )?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT v.term, SUM(s.idea_id = ?1) AS tf, COUNT(DISTINCT s.idea_id) AS df
-         FROM temp.search_fts_vocab v CROSS JOIN search_fts s ON s.rowid = v.doc
-         WHERE s.kind IN {LEXICAL_KINDS}
-         GROUP BY v.term
-         HAVING tf > 0 AND df < ?2"
-    ))?;
-    let rows = stmt.query_map(rusqlite::params![idea_id, ideas], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-    let mut ranked: Vec<(f64, String)> = Vec::new();
-    for row in rows {
-        let (term, tf, df) = row?;
-        if term.chars().count() < LEXICAL_MIN_TERM_CHARS || term.chars().all(char::is_numeric) {
-            continue;
+impl LexicalCorpus {
+    /// One read of the eligible rows' `(rowid, idea, kind)` and one scan of the `fts5vocab`
+    /// instance table, filtered by rowid here rather than joined in SQL.
+    pub(crate) fn load(conn: &Connection) -> Result<Self, IndexError> {
+        conn.execute_batch(LEXICAL_VOCAB_DDL)?;
+        let mut docs: HashMap<i64, (i64, Option<u8>)> = HashMap::new();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT rowid, idea_id, kind FROM search_fts WHERE kind IN {LEXICAL_KINDS}"
+        ))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let head = match row.get::<_, String>(2)?.as_str() {
+                "title" => Some(0),
+                "tags" => Some(1),
+                _ => None,
+            };
+            docs.insert(row.get(0)?, (row.get(1)?, head));
         }
-        ranked.push((tf as f64 * (ideas as f64 / df as f64).ln(), term));
+        drop(rows);
+        drop(stmt);
+        let ideas = docs
+            .values()
+            .map(|(idea, _)| *idea)
+            .collect::<HashSet<_>>()
+            .len() as i64;
+
+        let mut heads: BTreeMap<i64, Vec<(u8, i64, i64, String)>> = BTreeMap::new();
+        let mut tf: BTreeMap<i64, BTreeMap<String, i64>> = BTreeMap::new();
+        let mut stmt = conn.prepare("SELECT term, doc, offset FROM temp.search_fts_vocab")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let doc: i64 = row.get(1)?;
+            let Some(&(idea, head)) = docs.get(&doc) else {
+                continue;
+            };
+            let term: String = row.get(0)?;
+            if let Some(rank) = head {
+                heads
+                    .entry(idea)
+                    .or_default()
+                    .push((rank, doc, row.get(2)?, term.clone()));
+            }
+            *tf.entry(idea).or_default().entry(term).or_default() += 1;
+        }
+        for tokens in heads.values_mut() {
+            tokens.sort();
+        }
+        let mut df: BTreeMap<String, i64> = BTreeMap::new();
+        for terms in tf.values() {
+            for term in terms.keys() {
+                *df.entry(term.clone()).or_default() += 1;
+            }
+        }
+        Ok(Self {
+            ideas,
+            heads,
+            tf,
+            df,
+        })
     }
-    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    for (_, term) in ranked {
+
+    /// [`lexical_query_terms`] of the idea with id `idea_id`.
+    pub(crate) fn query_terms(&self, idea_id: i64) -> Vec<String> {
+        let mut tokens = Vec::new();
+        for (_, _, _, term) in self.heads.get(&idea_id).into_iter().flatten() {
+            push_token(&mut tokens, term.clone());
+        }
         if tokens.len() == LEXICAL_MAX_TOKENS {
-            break;
+            return tokens;
         }
-        push_token(&mut tokens, term);
+
+        let mut ranked: Vec<(f64, &str)> = Vec::new();
+        for (term, &tf) in self.tf.get(&idea_id).into_iter().flatten() {
+            let df = self.df[term];
+            if df >= self.ideas
+                || term.chars().count() < LEXICAL_MIN_TERM_CHARS
+                || term.chars().all(char::is_numeric)
+            {
+                continue;
+            }
+            ranked.push((tf as f64 * (self.ideas as f64 / df as f64).ln(), term));
+        }
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        for (_, term) in ranked {
+            if tokens.len() == LEXICAL_MAX_TOKENS {
+                break;
+            }
+            push_token(&mut tokens, term.to_string());
+        }
+        tokens
     }
-    Ok(tokens)
+
+    /// Whether `term` occurs in the eligible rows of every idea that has any, so its IDF is 0.
+    pub(crate) fn in_every_idea(&self, term: &str) -> bool {
+        self.df.get(term).is_some_and(|&df| df >= self.ideas)
+    }
+
+    /// Whether `term` occurs in any eligible row of the idea with id `idea_id`.
+    pub(crate) fn contains(&self, idea_id: i64, term: &str) -> bool {
+        self.tf
+            .get(&idea_id)
+            .is_some_and(|terms| terms.contains_key(term))
+    }
 }
 
 /// Fair lexical baseline retriever: the ideas most lexically similar to the idea `slug`.
@@ -471,6 +533,17 @@ pub fn lexical_baseline(
     limit: usize,
 ) -> Result<Vec<LexicalHit>, IndexError> {
     let terms = lexical_query_terms(conn, slug)?;
+    lexical_hits(conn, slug, &terms, limit)
+}
+
+/// [`lexical_baseline`] for the idea `slug` with its query `terms` already computed by
+/// [`lexical_query_terms`], so a caller that also needs the terms runs that scan once.
+pub(crate) fn lexical_hits(
+    conn: &Connection,
+    slug: &str,
+    terms: &[String],
+    limit: usize,
+) -> Result<Vec<LexicalHit>, IndexError> {
     if terms.is_empty() {
         return Ok(Vec::new());
     }
