@@ -101,18 +101,15 @@ idea-vault can also run as an MCP server, so Claude Code (or any Streamable-HTTP
 list, read, search and continue your ideas without opening the browser. It is **off by default**:
 the route only exists when a token is set.
 
-1. Generate a token and put it in `.env`, then restart the app (the route is mounted once at
-   boot, so a change needs a restart):
+1. Generate a token and give it to the app, then restart (the route is mounted once at boot):
 
    ```bash
-   openssl rand -hex 32          # paste the output as the value below
-   # .env
-   IDEA_VAULT_MCP_TOKEN=<the token>
+   openssl rand -hex 32          # the token
    ```
 
-   ```bash
-   docker compose up -d          # or restart `cargo run` if developing without Docker
-   ```
+   `.env` is read by `docker compose` only; the app has no dotenv loader. With Docker, add
+   `IDEA_VAULT_MCP_TOKEN=<the token>` to `.env` and run `docker compose up -d`. With `cargo run`,
+   export it in the shell that starts the app: `export IDEA_VAULT_MCP_TOKEN=<the token>`.
 
 2. Register the server with Claude Code (endpoint `POST /api/mcp`, bearer auth):
 
@@ -121,9 +118,10 @@ the route only exists when a token is set.
      --header "Authorization: Bearer <token>"
    ```
 
-   The default scope is `local` (this project, just you). Add `--scope user` to have idea-vault in
-   every project, or `--scope project` to write a shared `.mcp.json`. For a checked-in
-   `.mcp.json`, reference the token from the environment instead of pasting it:
+   This stores the literal token in Claude Code's own config, at `local` scope (this project, just
+   you) by default or with `--scope user` (every project). Do not add `--scope project` to that
+   command: it would write the token into `.mcp.json`, which is meant to be checked in. For a
+   shared `.mcp.json`, reference the token from the environment instead:
 
    ```json
    {
@@ -137,12 +135,15 @@ the route only exists when a token is set.
    }
    ```
 
+   `${IDEA_VAULT_MCP_TOKEN}` is expanded from the environment of the process running `claude`, so
+   export it in that shell (or your profile) too, whatever `.env` says.
+
 3. Check it: `claude mcp list` should show `idea-vault` as connected, and `/mcp` inside a Claude
    Code session shows its tools and prompts.
 
 In the container stack the URL is the same: the compose file publishes the app on
 `${IDEA_VAULT_HOST_BIND_IP:-127.0.0.1}:${IDEA_VAULT_HOST_PORT:-3000}`, so if you changed the host
-port, change the URL to match. Keep it on loopback; the token is the only gate.
+port, change the URL to match; if the bind IP is not loopback or `0.0.0.0`, use it as the host. Keep it on loopback; the token is the only gate.
 
 What the client gets:
 
