@@ -103,6 +103,23 @@ impl Item {
         self.depends_refs('Q')
     }
 
+    /// The `depends` entries that cite no id at all, kept verbatim when the ids are rewritten.
+    pub fn depends_free(&self) -> Vec<String> {
+        self.field("depends")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|e| {
+                        !e.is_empty()
+                            && !is_none(e)
+                            && ['T', 'P', 'Q'].iter().all(|l| refs_of(e, *l).is_empty())
+                    })
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn depends_refs(&self, letter: char) -> Vec<String> {
         self.field("depends")
             .map(|v| refs_of(v, letter))
@@ -110,10 +127,11 @@ impl Item {
     }
 }
 
-/// Every standalone `<letter><digits>` id in `text` (any case), uppercased and deduplicated.
-pub fn refs_of(text: &str, letter: char) -> Vec<String> {
+/// The most digits a `T#`/`P#`/`Q#` id carries; longer numbers (`P1234`) are not ids.
+const ID_DIGITS: usize = 3;
+
+fn scan_ids(text: &str, letter: char) -> Vec<String> {
     let upper = text.to_uppercase();
-    let letter = letter.to_ascii_uppercase();
     let mut out: Vec<String> = Vec::new();
     for (i, c) in upper.char_indices() {
         if c != letter || upper[..i].ends_with(|p: char| p.is_ascii_alphanumeric()) {
@@ -123,9 +141,46 @@ pub fn refs_of(text: &str, letter: char) -> Vec<String> {
             .chars()
             .take_while(char::is_ascii_digit)
             .collect();
+        let tail = upper[i + 1 + digits.len()..].chars().next();
         let id = format!("{letter}{digits}");
-        if !digits.is_empty() && !out.contains(&id) {
+        let bounded = !tail.is_some_and(|t| t.is_alphanumeric() || t == '_');
+        if (1..=ID_DIGITS).contains(&digits.len()) && bounded && !out.contains(&id) {
             out.push(id);
+        }
+    }
+    out
+}
+
+fn is_id_word(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '&' && c != '+');
+    if matches!(w.to_ascii_lowercase().as_str(), "and" | "&" | "+") {
+        return true;
+    }
+    let mut chars = w.chars();
+    let head = chars.next().map(|c| c.to_ascii_uppercase());
+    let rest = chars.as_str();
+    matches!(head, Some('T' | 'P' | 'Q'))
+        && (1..=ID_DIGITS).contains(&rest.len())
+        && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Every `<letter><digits>` id in `text` (any case), uppercased and deduplicated. A `T#` may sit
+/// anywhere in prose; a `P#` or `Q#` counts only in a comma-separated entry made of nothing but
+/// ids, so `P95 latency` or `Q4 planning` stay free text.
+pub fn refs_of(text: &str, letter: char) -> Vec<String> {
+    let letter = letter.to_ascii_uppercase();
+    if letter == 'T' {
+        return scan_ids(text, letter);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for entry in text.split(',').filter(|e| {
+        let mut words = e.split_whitespace().peekable();
+        words.peek().is_some() && words.all(is_id_word)
+    }) {
+        for id in scan_ids(entry, letter) {
+            if !out.contains(&id) {
+                out.push(id);
+            }
         }
     }
     out
@@ -368,16 +423,18 @@ fn split_inline(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// The canonical field key for a written key: `checked_by`, the line-form aliases, and the
-/// Plan-only accept aliases.
+/// The canonical field key for a written key. The line-form aliases apply only inside `## Plan`,
+/// so `Context:` or `After:` in Settled, Verify or Open stays prose.
 fn canonical_key(key: &str, section: Section) -> &str {
+    if section != Section::Plan {
+        return key;
+    }
     match key {
-        "checked_by" => "checked by",
         "files" | "file" | "paths" => "touches",
         "depends on" | "after" | "blocked by" => "depends",
         "red-first" | "red first" | "fails before" => "red",
         "open first" | "context" | "inputs" => "reads",
-        "test" | "command" | "acceptance" if section == Section::Plan => "accept",
+        "test" | "command" | "acceptance" => "accept",
         k => k,
     }
 }
@@ -391,7 +448,8 @@ fn as_field(part: &str, section: Section) -> Option<(String, String)> {
         .trim()
         .trim_end_matches("**")
         .trim()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+        .replace('_', " ");
     let key = canonical_key(&key, section);
     FIELD_KEYS.contains(&key).then(|| {
         let value = value.trim().trim_start_matches("**").trim();
@@ -807,6 +865,16 @@ fn prompt_section(out: &mut String, heading: &str, items: &[Item], keys: &[&str]
     }
 }
 
+fn cut(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", text[..at].trim_end()),
+        None => text.to_string(),
+    }
+}
+
+/// The most characters of the goal's first line that the `PROMPT.md` title carries.
+pub const GOAL_FIRST_CHARS: usize = 160;
+
 /// The most characters of the goal beyond its first line that `PROMPT.md` quotes.
 pub const GOAL_REST_CHARS: usize = 600;
 
@@ -814,19 +882,16 @@ pub const GOAL_REST_CHARS: usize = 600;
 /// confirm, fence, bootstrap checks, owner questions, tasks, kill criteria and the quarantined
 /// claims not to build on. Every item's gate markers follow it as `gate:` lines; the goal beyond
 /// its first line is kept as one quoted paragraph, cut at [`GOAL_REST_CHARS`] characters, so it
-/// cannot pose as a gate note or an item. Empty sections are omitted except the two settled ones.
+/// cannot pose as a gate note or an item; the title line is cut at [`GOAL_FIRST_CHARS`]. Empty sections are omitted except the two settled ones.
 pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
     let mut goal_lines = plan.goal.lines();
-    let goal = goal_lines.next().unwrap_or("").trim();
+    let goal = cut(goal_lines.next().unwrap_or("").trim(), GOAL_FIRST_CHARS);
     let mut out = format!("# Build: {goal}\n\n_idea: {idea_title} · plan: {stem}_\n");
     let rest = goal_lines
         .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ");
-    let rest = match rest.char_indices().nth(GOAL_REST_CHARS) {
-        Some((at, _)) => format!("{}…", rest[..at].trim_end()),
-        None => rest,
-    };
+    let rest = cut(&rest, GOAL_REST_CHARS);
     if !rest.is_empty() {
         out.push_str(&format!("\n> {rest}\n"));
     }
@@ -1596,8 +1661,70 @@ Run the cheapest disproof before any Rust exists.
         );
         assert!(quoted.ends_with('…'), "{quoted}");
         assert!(
-            !prompt.contains("Plan\n- T1: One\n  touches: `a.rs`\n> "),
-            "{prompt}"
+            !quoted.contains("T1") && !quoted.contains("## Plan"),
+            "{quoted}"
         );
+        assert!(prompt.contains("\n## Plan\n- [ ] T1: One"), "{prompt}");
+    }
+
+    #[test]
+    fn projection_markers_goal_title_is_bounded() {
+        let plan = BuildPlan {
+            goal: format!("{}\nmore", "x".repeat(400)),
+            ..BuildPlan::default()
+        };
+        let prompt = render_prompt(&plan, "T", "s");
+        let title = prompt.lines().next().unwrap();
+        assert!(
+            title.chars().count() <= "# Build: ".len() + GOAL_FIRST_CHARS + 1,
+            "{title}"
+        );
+        assert!(title.ends_with('…'), "{title}");
+    }
+
+    #[test]
+    fn field_aliases_stay_prose_outside_the_plan() {
+        let answer = "## Goal\nShip.\n## Settled\n- S1: The cache is warm\n  Context: the nightly job\n  After: the import\n## Verify first\n- P1: Scaler exists\n  File: calculator.rs\n## Open questions\n- Q1: Which spread?\n  Inputs: the price list\n## Plan\n- T1: One\n  Files: `a.rs`\n";
+        let plan = parse(answer).unwrap();
+        assert!(plan.settled[0].fields.is_empty(), "{:?}", plan.settled[0]);
+        assert!(plan.settled[0].text.contains("Context: the nightly job"));
+        assert!(plan.settled[0].text.contains("After: the import"));
+        assert!(plan.verify[0].fields.is_empty(), "{:?}", plan.verify[0]);
+        assert!(plan.verify[0].text.contains("File: calculator.rs"));
+        assert!(plan.open[0].fields.is_empty(), "{:?}", plan.open[0]);
+        assert!(plan.open[0].text.contains("Inputs: the price list"));
+        assert_eq!(plan.tasks[0].list("touches"), ["a.rs"]);
+    }
+
+    #[test]
+    fn field_snake_case_keys_fold_to_the_canonical_key() {
+        let answer = "## Goal\nShip.\n## Plan\n- T1: One\n  stop_if: the schema differs\n  red_first: `cargo test x` -> fails\n  depends_on: T2\n- T2: Two\n";
+        let plan = parse(answer).unwrap();
+        let t1 = &plan.tasks[0];
+        assert_eq!(t1.field("stop if"), Some("the schema differs"));
+        assert_eq!(t1.field("red"), Some("`cargo test x` -> fails"));
+        assert_eq!(t1.depends_tasks(), ["T2"]);
+    }
+
+    #[test]
+    fn field_depends_ids_need_a_boundary_and_stand_alone() {
+        let answer = "## Goal\nShip.\n## Plan\n- T1: One\n  depends: T2, P95 latency check, Q4 planning, P1234, P1x\n- T2: Two\n  depends: P1 and Q2, T1.\n";
+        let plan = parse(answer).unwrap();
+        let t1 = &plan.tasks[0];
+        assert_eq!(t1.depends_tasks(), ["T2"]);
+        assert!(
+            t1.depends_premises().is_empty(),
+            "{:?}",
+            t1.depends_premises()
+        );
+        assert!(t1.depends_questions().is_empty());
+        assert_eq!(
+            t1.depends_free(),
+            ["P95 latency check", "Q4 planning", "P1234", "P1x"]
+        );
+        let t2 = &plan.tasks[1];
+        assert_eq!(t2.depends_premises(), ["P1"]);
+        assert_eq!(t2.depends_questions(), ["Q2"]);
+        assert_eq!(t2.depends_tasks(), ["T1"]);
     }
 }

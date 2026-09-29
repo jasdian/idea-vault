@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use super::{GateInputs, GateReport};
-use crate::concepts::build_plan::plan::{render, BuildPlan, Item};
+use crate::concepts::build_plan::plan::{refs_of, render, BuildPlan, Item};
 
 const MAX_TASKS: usize = 15;
 const MAX_SETTLED: usize = 12;
@@ -236,6 +236,8 @@ fn reaches(plan: &BuildPlan, from: &str, to: &str) -> bool {
 }
 
 fn write_depends(task: &mut Item, refs: &[String]) {
+    let mut refs = refs.to_vec();
+    refs.extend(task.depends_free());
     if refs.is_empty() {
         task.fields.remove("depends");
     } else {
@@ -487,20 +489,7 @@ fn executable_tasks(plan: &mut BuildPlan, report: &mut GateReport) {
 }
 
 fn task_refs(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for (i, c) in text.char_indices() {
-        if c != 'T' || text[..i].ends_with(|p: char| p.is_ascii_alphanumeric()) {
-            continue;
-        }
-        let digits: String = text[i + 1..]
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        if !digits.is_empty() {
-            out.push(format!("T{digits}"));
-        }
-    }
-    out
+    refs_of(text, 'T')
 }
 
 fn kill_wiring(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateReport) {
@@ -767,6 +756,35 @@ mod tests {
         run(&mut plan);
         assert_eq!(plan.tasks[1].depends_tasks(), ["T1"]);
         assert_eq!(plan.tasks[1].depends_premises(), ["P1"]);
+        assert_eq!(plan.tasks[1].field("depends"), Some("T1, P1"));
+    }
+
+    #[test]
+    fn g8_free_text_in_depends_is_not_an_id_and_survives_a_rewrite() {
+        let mut plan = BuildPlan::default();
+        plan.tasks.push(item("T1", "A", &[("accept", RUNNABLE)]));
+        plan.tasks.push(item(
+            "T2",
+            "B",
+            &[
+                ("depends", "T1, P95 latency check, Q4 planning, T9"),
+                ("accept", RUNNABLE),
+            ],
+        ));
+        run(&mut plan);
+        let t2 = &plan.tasks[1];
+        assert!(has_marker(t2, "unknown dependency T9"));
+        assert!(
+            !has_marker(t2, "unknown dependency P95"),
+            "{:?}",
+            t2.markers
+        );
+        assert!(!has_marker(t2, "unknown dependency Q4"), "{:?}", t2.markers);
+        assert!(!t2.needs_owner, "{t2:?}");
+        assert_eq!(
+            t2.field("depends"),
+            Some("T1, P95 latency check, Q4 planning")
+        );
     }
 
     #[test]
