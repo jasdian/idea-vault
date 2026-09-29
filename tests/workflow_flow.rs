@@ -215,6 +215,16 @@ async fn run(
     name: &str,
     audit: bool,
 ) -> idea_vault::concepts::workflows::WorkflowOutcome {
+    run_at(mock, vault, name, audit, 8192).await
+}
+
+async fn run_at(
+    mock: &support::MockOllama,
+    vault: &Path,
+    name: &str,
+    audit: bool,
+    max_bytes: usize,
+) -> idea_vault::concepts::workflows::WorkflowOutcome {
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
     let registry = SkillRegistry::builtin();
@@ -225,7 +235,7 @@ async fn run(
         vault,
         "i",
         name,
-        ContextBudget::new(8192),
+        ContextBudget::new(max_bytes),
         audit,
         &|_| String::new(),
         &|_: &str| {},
@@ -469,6 +479,10 @@ async fn related_block_reaches_workflow_stages_but_not_audit() {
 }
 
 async fn chained_step_body(auditor_reply: &str) -> String {
+    chained_step_body_at(auditor_reply, 8192).await
+}
+
+async fn chained_step_body_at(auditor_reply: &str, max_bytes: usize) -> String {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
     let mock = spawn_sequence(
@@ -484,7 +498,7 @@ async fn chained_step_body(auditor_reply: &str) -> String {
         ],
     )
     .await;
-    run(&mock, tmp.path(), "ready-to-build", true).await;
+    run_at(&mock, tmp.path(), "ready-to-build", true, max_bytes).await;
     mock.chat_bodies().pop().unwrap().replace("\\n", "\n")
 }
 
@@ -540,16 +554,98 @@ async fn chained_findings_drop_the_auditor_suffix_when_the_reason_is_empty() {
     assert!(!line.contains("auditor:"), "{line}");
 }
 
+fn findings_block_of(chain: &str) -> &str {
+    let start = chain.find("## Prior stage: findings\n").unwrap();
+    let block = &chain[start..];
+    &block[..block.find("\n\n## ").unwrap_or(block.len())]
+}
+
 #[tokio::test]
-async fn chained_findings_clip_long_reasons_and_cap_the_block_at_half_the_budget() {
+async fn chained_findings_clip_each_reason() {
+    let long = "r".repeat(3000);
+    let reply =
+        format!("F1: CONFIRMED — {long}\nF2: CONFIRMED — ok\nF3: UNCERTAIN — ok\nF4: REFUTED — ok");
+    let chain = chained_step_body(&reply).await;
+    let block = findings_block_of(&chain);
+    assert!(block.contains('…'), "the long reason is clipped");
+    assert!(
+        block.len() < 8192 / 2,
+        "outer cap not reached: {}",
+        block.len()
+    );
+}
+
+#[tokio::test]
+async fn chained_findings_clip_the_block_to_half_the_budget() {
     let long = "r".repeat(1000);
     let reply = format!(
         "F1: CONFIRMED — {long}\nF2: CONFIRMED — {long}\nF3: UNCERTAIN — {long}\nF4: REFUTED — {long}"
     );
-    let chain = chained_step_body(&reply).await;
-    let start = chain.find("## Prior stage: findings\n").unwrap();
-    let block = &chain[start..];
-    let end = block.find("\n\n## ").unwrap_or(block.len());
-    assert!(block[..end].contains('…'), "reasons are clipped");
-    assert!(block[..end].len() <= 8192 / 2, "block is {} bytes", end);
+    let chain = chained_step_body_at(&reply, 1024).await;
+    let block = findings_block_of(&chain);
+    assert!(block.len() <= 1024 / 2, "block is {} bytes", block.len());
+}
+
+async fn empty_harvest_run(audit: bool) -> (Vec<String>, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens(""),
+            tokens(""),
+            tokens(""),
+            tokens(""),
+            tokens(""),
+            tokens("```markdown\n# Build\n```"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "ready-to-build", audit).await;
+    (
+        mock.chat_bodies(),
+        store::read_conversation(tmp.path(), "i").unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn an_empty_harvest_skips_the_audit_call() {
+    let (bodies, _) = empty_harvest_run(true).await;
+    assert!(
+        !bodies.iter().any(|b| b.contains("You are the Auditor")),
+        "no auditor request expected"
+    );
+    assert_eq!(bodies.len(), 6, "5 harvesters + the build-prompt step");
+}
+
+#[tokio::test]
+async fn an_empty_harvest_behaves_the_same_with_the_audit_on_or_off() {
+    let (on_bodies, on_convo) = empty_harvest_run(true).await;
+    let (off_bodies, off_convo) = empty_harvest_run(false).await;
+    assert_eq!(on_bodies.len(), off_bodies.len());
+    assert_eq!(on_convo, off_convo);
+
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn(&["llama3.2"], ChatScript::EofAfter(vec![])).await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let semaphore = Arc::new(Semaphore::new(2));
+    let registry = SkillRegistry::builtin();
+    for audit in [true, false] {
+        let err = run_workflow(
+            &client,
+            &semaphore,
+            &registry,
+            tmp.path(),
+            "i",
+            "interrogate",
+            ContextBudget::new(4096),
+            audit,
+            &|_| String::new(),
+            &|_: &str| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ConceptError::NothingToSynthesize));
+    }
 }

@@ -18,7 +18,7 @@ A workflow is an ordered list of `Stage`s:
 |---|---|
 | `FanOut(steps)` | Parallel agents over the same context, via the swarm's bounded fan-out primitive. Their answers become **findings**. |
 | `Chain(step)` | One agent alone. Mid-workflow, its output is **carried forward** as a `## Prior stage: <skill>` block into every later stage. As the last stage, its output is the result. A chained step after a fan-out reads the findings (with verdicts, if audited) as a `## Prior stage: findings` block. |
-| `Audit` | The factored audit over the findings so far ([ADR-0023](../adr/0023-verification-layer.md)). Skipped while the Settings toggle is off. |
+| `Audit` | The factored audit over the findings so far ([ADR-0023](../adr/0023-verification-layer.md)). Skipped while the Settings toggle is off, and skipped without a model call when the fan-out harvested nothing. |
 | `Synthesize` | Converge the findings into one position. |
 
 These are the skill book's named recipes (its "hot maps", [ADR-0022](../adr/0022-skills-as-markdown-and-the-skill-book.md)).
@@ -105,8 +105,8 @@ flowchart TD
   - A failed fan-out agent drops to a null result the judge skips; the workflow degrades rather
     than aborting, mirroring the swarm failure model ([D14](./swarm.md)).
   - A failed *middle* chained step is skipped with nothing carried forward.
-  - A failed *final* stage, or a fan-out with no usable result before an audit or synthesis, fails
-    the run with nothing persisted.
+  - A failed *final* stage, or a fan-out with no usable result before a synthesis, fails
+    the run with nothing persisted. An audit stage over an empty harvest is skipped, not failed.
 - **Persistence:** only the final stage's output — plus the audit appendix, if an audit ran — is
   appended to `conversation.md`. Intermediate stage outputs are never persisted as turns; they are
   kept out of truth to reduce noise.

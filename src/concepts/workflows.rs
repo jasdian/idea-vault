@@ -240,7 +240,8 @@ fn stage_context(
 ///
 /// Degradation: failed fan-out agents are skipped; a failed middle chained step is skipped with
 /// nothing carried forward; a failed final stage, or a fan-out with no usable result before an
-/// audit/synthesis, fails the run with nothing persisted.
+/// synthesis, fails the run with nothing persisted; an empty harvest skips the audit without a
+/// model call, exactly as when the audit is off.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_workflow(
     ollama: &LlmBackend,
@@ -338,7 +339,16 @@ pub async fn run_workflow(
                     continue;
                 }
                 if findings.is_none() {
-                    findings = Some(gather(&step_results)?);
+                    match gather(&step_results) {
+                        Ok(f) => findings = Some(f),
+                        Err(_) => {
+                            note("nothing harvested — audit skipped");
+                            carried.push(
+                                "## Prior stage: audit\nnothing harvested — audit skipped".into(),
+                            );
+                            continue;
+                        }
+                    }
                 }
                 let f = findings.as_deref().unwrap_or_default();
                 note(&format!("auditing {} findings", f.len()));
