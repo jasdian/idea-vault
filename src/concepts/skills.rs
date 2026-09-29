@@ -392,17 +392,25 @@ pub(crate) fn hydrate_context(
     ))
 }
 
-/// How usable a build-plan answer is, judged by the parser that later reads it: `None` when it
-/// does not parse or has no task, else (tasks, settled items). Higher is more usable.
+/// How usable a build-plan answer is, judged by the parser that later reads it, on three levels:
+/// `None` when it does not parse, `(0, settled)` when it parses with no task, else
+/// `(tasks, settled)`. Higher is more usable; a plan is usable only with at least one task.
 fn plan_score(answer: &str) -> Option<(usize, usize)> {
     let plan = build_plan::plan::parse(answer).ok()?;
-    (!plan.tasks.is_empty()).then_some((plan.tasks.len(), plan.settled.len()))
+    Some((plan.tasks.len(), plan.settled.len()))
+}
+
+fn plan_usable(score: Option<(usize, usize)>) -> bool {
+    score.is_some_and(|(tasks, _)| tasks >= 1)
 }
 
 /// One model call held to an output contract (docs/adr/0023): call, validate/repair, and on a
 /// violation ask exactly ONCE more — under the same permit — with the violation read back. If the
 /// retry still misses (or fails), the best answer is kept and a warning logged: a wrong-shaped
-/// answer beats none. Used by single interactive skill calls and by a workflow's chained step;
+/// answer beats none. For [`OutputContract::BuildPlan`] a validated answer with no parsed task also
+/// counts as a violation; the first answer is then kept only on a strictly higher
+/// (tasks, settled) score, a tie goes to the retry, and a retry with no task is not accepted as
+/// usable. Used by single interactive skill calls and by a workflow's chained step;
 /// fan-out agents never retry (`agents::run_agent` repairs only). Callers must NOT hold a permit.
 pub(crate) async fn ask_on_contract(
     llm: &LlmBackend,
@@ -426,17 +434,19 @@ pub(crate) async fn ask_on_contract(
     let plan_contract = contract == OutputContract::BuildPlan;
     let first_score = plan_contract.then(|| plan_score(&first));
     let violation = match contract::validate(contract, &first) {
-        Ok(_) if first_score == Some(None) => contract::Violation::NoUsablePlan,
+        Ok(_) if first_score.is_some_and(|score| !plan_usable(score)) => {
+            contract::Violation::NoUsablePlan
+        }
         Ok(repaired) => return Ok(repaired),
         Err(violation) => violation,
     };
     progress(&format!("{label} · reshaping the answer"));
     tracing::info!(label, %violation, "contract violated; retrying once");
     let retried = ask(format!("{prompt}{}", contract::retry_note(&violation))).await;
-    let first_wins = |second: &str| first_score.is_some_and(|f| f > plan_score(second));
+    let first_wins = |second: &str| first_score.is_some_and(|first| first > plan_score(second));
     let outcome = retried.as_deref().map(|r| contract::validate(contract, r));
     if let Ok(Ok(repaired)) = &outcome {
-        let usable = !plan_contract || plan_score(repaired).is_some();
+        let usable = !plan_contract || plan_usable(plan_score(repaired));
         if usable {
             return Ok(if first_wins(repaired) {
                 first.trim().to_string()

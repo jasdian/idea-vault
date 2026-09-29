@@ -710,6 +710,58 @@ async fn retry_plan_keeps_a_usable_first_answer_over_an_off_grammar_retry() {
     );
 }
 
+fn taskless(answer: &str) -> String {
+    format!("{}\n## Plan\n- none\n", without_section(answer, "## Plan"))
+}
+
+#[tokio::test]
+async fn retry_plan_retries_a_validated_plan_with_no_task() {
+    let first = taskless(PLANNER_ANSWER);
+    let (dir, mock, result) = quick_plan(&[&first, PLANNER_ANSWER]).await;
+    result.unwrap();
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 2);
+    assert!(
+        bodies[1].contains("at least one task under `## Plan`"),
+        "{}",
+        bodies[1]
+    );
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    assert!(
+        plans[0]
+            .body
+            .contains("T1: Write the spec with a dated kill criterion"),
+        "{}",
+        plans[0].body
+    );
+}
+
+#[tokio::test]
+async fn retry_plan_a_taskless_retry_after_a_taskless_first_is_deterministic() {
+    let first = taskless(PLANNER_ANSWER);
+    let retry = taskless(&table_plan("Retry goal.", SETTLED_ONE, &[]));
+    let (dir, mock, result) = quick_plan(&[&first, &retry]).await;
+    assert_eq!(mock.chat_bodies().len(), 2);
+    result.unwrap();
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    assert!(
+        plans[0].body.contains("Retry goal.") && !plans[0].body.contains("T1:"),
+        "{}",
+        plans[0].body
+    );
+}
+
+#[tokio::test]
+async fn retry_plan_a_goal_only_first_beats_an_unparseable_retry() {
+    let first = taskless(PLANNER_ANSWER);
+    let (dir, mock, result) = quick_plan(&[&first, "Sorry, I cannot format that."]).await;
+    result.unwrap();
+    assert_eq!(mock.chat_bodies().len(), 2);
+    assert_eq!(plan_artifacts(dir.path()).len(), 1);
+}
+
 const REFUTED_CLAIM: &str = "Call three agencies next week";
 
 async fn audited_plan() -> (

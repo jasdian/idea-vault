@@ -209,18 +209,20 @@ mod tests {
     }
 
     #[test]
-    fn evidence_keeps_exactly_the_turns_the_capstone_predicate_keeps() {
+    fn evidence_keeps_the_owner_and_chat_turns_and_drops_capstone_and_pointer_turns() {
         let conversation = format!(
             "{CONVERSATION}\n## assistant (skill: house-plan)\n**Build plan** → [p](/idea/x/artifact/p.md) · quick\n\n\
 ## assistant\n**Build plan** → [a chat reply that echoes it](/x)\n"
         );
         let ev = Evidence::new("", &conversation);
-        let kept = split_turns(&conversation)
-            .iter()
-            .filter(|t| !is_capstone_turn(t))
-            .count();
-        assert_eq!(ev.turns().len(), kept);
-        assert_eq!(kept, 3);
+        assert_eq!(
+            ev.turns().iter().map(|t| t.speaker).collect::<Vec<_>>(),
+            [Provenance::Owner, Provenance::Foil, Provenance::Foil]
+        );
+        assert_eq!(ev.locate("p](/idea/x/artifact/p.md"), None);
+        assert_eq!(ev.locate("parser ships after the probe"), None);
+        let (turn, _) = ev.locate("a chat reply that echoes it").unwrap();
+        assert_eq!(ev.turns()[turn].speaker, Provenance::Foil);
     }
 
     #[test]
