@@ -485,7 +485,7 @@ async fn chained_step_body(auditor_reply: &str) -> String {
     )
     .await;
     run(&mock, tmp.path(), "ready-to-build", true).await;
-    mock.chat_bodies().pop().unwrap()
+    mock.chat_bodies().pop().unwrap().replace("\\n", "\n")
 }
 
 #[tokio::test]
@@ -515,6 +515,41 @@ async fn chained_findings_open_with_the_verdict_guidance() {
         "F1: CONFIRMED — ok\nF2: UNCERTAIN — maybe\nF3: REFUTED — no\nF4: CONFIRMED — ok",
     )
     .await;
-    assert!(chain.contains("Build the position on CONFIRMED findings"));
-    assert!(chain.contains("do not build on REFUTED ones"));
+    let heading = "## Prior stage: findings\n";
+    let at = chain.find(heading).unwrap() + heading.len();
+    assert!(chain[at..].starts_with(idea_vault::concepts::audit::VERDICT_GUIDANCE));
+    assert_eq!(
+        chain
+            .matches(idea_vault::concepts::audit::VERDICT_GUIDANCE)
+            .count(),
+        1
+    );
+    assert!(!chain.contains("listed separately"));
+}
+
+#[tokio::test]
+async fn chained_findings_drop_the_auditor_suffix_when_the_reason_is_empty() {
+    let chain = chained_step_body(
+        "F1: CONFIRMED —\nF2: CONFIRMED — said\nF3: UNCERTAIN — maybe\nF4: REFUTED — no",
+    )
+    .await;
+    let line = chain
+        .lines()
+        .find(|l| l.starts_with("- [CONFIRMED] Ship solo first"))
+        .unwrap();
+    assert!(!line.contains("auditor:"), "{line}");
+}
+
+#[tokio::test]
+async fn chained_findings_clip_long_reasons_and_cap_the_block_at_half_the_budget() {
+    let long = "r".repeat(1000);
+    let reply = format!(
+        "F1: CONFIRMED — {long}\nF2: CONFIRMED — {long}\nF3: UNCERTAIN — {long}\nF4: REFUTED — {long}"
+    );
+    let chain = chained_step_body(&reply).await;
+    let start = chain.find("## Prior stage: findings\n").unwrap();
+    let block = &chain[start..];
+    let end = block.find("\n\n## ").unwrap_or(block.len());
+    assert!(block[..end].contains('…'), "reasons are clipped");
+    assert!(block[..end].len() <= 8192 / 2, "block is {} bytes", end);
 }

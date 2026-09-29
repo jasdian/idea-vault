@@ -34,7 +34,7 @@ const UNIFORM_PASS_MIN_FINDINGS: usize = 4;
 /// and chained workflow steps.
 pub const VERDICT_GUIDANCE: &str = "Each finding carries an auditor's verdict. Build the position \
 on CONFIRMED findings, present UNCERTAIN ones as open questions, and do not build on REFUTED \
-ones — they are listed separately after your answer.";
+ones.";
 
 const AUDIT_INSTRUCTION: &str = "Below are numbered findings other agents produced about an \
 idea, then the idea itself, its memory, and the discussion so far. Judge each finding ONLY \

@@ -118,7 +118,10 @@ pub(crate) async fn synthesize(
         .collect::<Vec<_>>()
         .join("\n\n");
     let guidance = if report.is_some_and(|r| !r.failed) {
-        format!("\n\n{}", audit::VERDICT_GUIDANCE)
+        format!(
+            "\n\n{} Refuted findings are listed separately after your answer.",
+            audit::VERDICT_GUIDANCE
+        )
     } else {
         String::new()
     };

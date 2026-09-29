@@ -151,9 +151,9 @@ pub struct WorkflowOutcome {
     pub audit: Option<AuditReport>,
 }
 
-/// The findings as a carried-forward block for a chained step. Audited lines carry the verdict
-/// and the auditor's reason; when the audit failed the verdicts are defaults, so the findings are
-/// listed unlabelled and the block says so.
+/// The findings as a carried-forward block for a chained step, capped at half the stage budget.
+/// Audited lines carry the verdict and the auditor's clipped reason; when the audit failed the
+/// verdicts are defaults, so the findings are listed unlabelled and the block says so.
 fn findings_block(
     findings: &[Finding],
     report: Option<&AuditReport>,
@@ -174,7 +174,7 @@ fn findings_block(
                     "- [{}] {text} ({}) — auditor: {}",
                     v.label.as_str(),
                     f.provenance(),
-                    v.reason.trim()
+                    audit::clip(v.reason.trim(), allowance / 2)
                 ),
                 None => format!("- {text} ({})", f.provenance()),
             }
@@ -182,19 +182,19 @@ fn findings_block(
         .collect::<Vec<_>>()
         .join("\n");
     let preface = match report {
-        Some(r) if r.failed => {
+        Some(r) if r.failed => Some(
             "The audit was unavailable, so these findings carry no verdicts; treat every one as \
-             unchecked."
-                .to_string()
-        }
-        Some(_) => audit::VERDICT_GUIDANCE.to_string(),
-        None => String::new(),
+             unchecked.",
+        ),
+        Some(_) => Some(audit::VERDICT_GUIDANCE),
+        None => None,
     };
-    if preface.is_empty() {
-        format!("## Prior stage: findings\n{lines}")
-    } else {
-        format!("## Prior stage: findings\n{preface}\n\n{lines}")
-    }
+    let heading = "## Prior stage: findings\n";
+    let block = match preface {
+        Some(p) => format!("{heading}{p}\n\n{lines}"),
+        None => format!("{heading}{lines}"),
+    };
+    audit::clip(&block, budget.max_bytes / 2)
 }
 
 /// The findings a run's fan-outs produced, judged, deduped and capped — or
