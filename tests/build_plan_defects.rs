@@ -869,3 +869,45 @@ fn gates_source_never_names_a_model_call() {
         assert_eq!(model_calls(source), Vec::<&str>::new(), "{name}");
     }
 }
+
+const WIRE_PLAN: &str =
+    "- [ ] T1: Write the parser\n  touches: `src/parser.rs`\n  accept: `cargo test` → exit 0\n\
+- [ ] T2: Log the spread\n  touches: `src/log.rs`\n  accept: `cargo test` → exit 0";
+
+#[test]
+fn premise_wired_a_check_grepping_a_touched_file_gets_wired() {
+    let (plan, report) = gate(
+        "## user\nBuild the parser.\n",
+        Answer {
+            verify: "- P1: The tokenizer exists\n  check: `grep -rnF tokenize src/parser.rs`",
+            plan: WIRE_PLAN,
+            ..Answer::default()
+        },
+    );
+    let t1 = with_text(&plan.tasks, "parser");
+    assert_eq!(t1.depends_premises(), ["P1"], "{:?}", t1.fields);
+    assert!(
+        t1.markers.iter().any(|m| m == "premise P1 wired"),
+        "{}",
+        markers(t1)
+    );
+    let t2 = with_text(&plan.tasks, "spread");
+    assert!(t2.depends_premises().is_empty(), "{:?}", t2.fields);
+    assert_eq!(report.tally.get("premises_wired"), Some(&1));
+}
+
+#[test]
+fn premise_wired_a_premise_sharing_only_a_plain_word_is_not_wired() {
+    let (plan, report) = gate(
+        "## user\nBuild the parser.\n",
+        Answer {
+            verify: "- P1: The parser handles quoting\n  check: `grep -rnF quoting src/lexer.rs`",
+            plan: WIRE_PLAN,
+            ..Answer::default()
+        },
+    );
+    for t in &plan.tasks {
+        assert!(t.depends_premises().is_empty(), "{:?}", t.fields);
+    }
+    assert_eq!(report.tally.get("premises_wired"), None);
+}

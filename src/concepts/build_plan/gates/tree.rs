@@ -17,6 +17,7 @@ pub const GATES_NO_TASK: &str = "gates no task";
 pub const SELF_EDGE: &str = "self dependency dropped";
 pub const SPLIT_SCORE: &str = "split before building";
 pub const REVIEW: &str = "review@opus";
+pub const PREMISE_WIRED: &str = "wired";
 
 const UNKNOWN_DEP: &str = "unknown dependency ";
 const NO_RUNNABLE: &str = "no runnable accept";
@@ -80,6 +81,7 @@ pub fn apply(plan: &mut BuildPlan, report: &mut GateReport) {
         unique_ids(items, report);
     }
     resolve_refs(plan, report);
+    wire_premises(plan, report);
     kill_targets(plan, report);
     name_cycles(plan, report);
     quarantine_deps(plan, report);
@@ -195,6 +197,91 @@ fn resolve_refs(plan: &mut BuildPlan, report: &mut GateReport) {
             .collect();
         for d in dropped {
             note_once(report, format!("{own}: dropped dangling reference {d}"));
+        }
+    }
+}
+
+/// The backticked tokens of `text`: a one-word span whole, a longer span only by its path-like
+/// words. Plain words outside backticks are never tokens.
+fn backticked_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for span in text.split('`').skip(1).step_by(2) {
+        let span = span.trim();
+        if span.contains(char::is_whitespace) {
+            out.extend(
+                span.split_whitespace()
+                    .map(|w| w.trim_matches(|c: char| ",;()\"'".contains(c)))
+                    .filter(|w| path_like(w))
+                    .map(norm_path),
+            );
+        } else if span.len() >= 3 && !span.starts_with('-') {
+            out.push(norm_path(span));
+        }
+    }
+    out.retain(|t| !t.is_empty());
+    out
+}
+
+fn path_like(word: &str) -> bool {
+    !word.starts_with('-')
+        && !word.contains("://")
+        && (word.contains('/')
+            || word.rsplit_once('.').is_some_and(|(stem, ext)| {
+                !stem.is_empty()
+                    && (1..=5).contains(&ext.len())
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            }))
+}
+
+fn same_token(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || (a.contains('/') && b.contains('/') && paths_overlap(a, b))
+}
+
+/// Add each Verify-first `P#` to the `depends` of every task whose `touches` or backticked text
+/// names one of the premise's backticked or path tokens, so the task waits for its bootstrap check.
+fn wire_premises(plan: &mut BuildPlan, report: &mut GateReport) {
+    let premises: Vec<(String, Vec<String>)> = plan
+        .verify
+        .iter()
+        .map(|p| {
+            let mut tokens = backticked_tokens(&p.text);
+            tokens.extend(backticked_tokens(p.field("check").unwrap_or_default()));
+            (p.id.clone(), tokens)
+        })
+        .filter(|(_, tokens)| !tokens.is_empty())
+        .collect();
+    for task in &mut plan.tasks {
+        let mut task_tokens: Vec<String> =
+            task.list("touches").iter().map(|t| norm_path(t)).collect();
+        task_tokens.extend(backticked_tokens(&task.text));
+        for (key, value) in &task.fields {
+            if key != "depends" && key != "touches" {
+                task_tokens.extend(backticked_tokens(value));
+            }
+        }
+        let have = task.depends_premises();
+        let wired: Vec<String> = premises
+            .iter()
+            .filter(|(id, tokens)| {
+                !have.contains(id)
+                    && tokens
+                        .iter()
+                        .any(|t| task_tokens.iter().any(|u| same_token(t, u)))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if wired.is_empty() {
+            continue;
+        }
+        let mut refs = task.depends_tasks();
+        refs.extend(have);
+        refs.extend(wired.iter().cloned());
+        refs.extend(task.depends_questions());
+        refs.extend(task.depends_free());
+        task.fields.insert("depends".to_string(), refs.join(", "));
+        for id in wired {
+            mark(task, format!("premise {id} {PREMISE_WIRED}"));
+            report.count("premises_wired");
         }
     }
 }
@@ -725,6 +812,85 @@ mod tests {
         let t1 = get(&p, "T1");
         assert!(!t1.needs_owner, "{:?}", t1.markers);
         assert!(!t1.markers.iter().any(|m| m.starts_with(QUARANTINED_DEP)));
+    }
+
+    fn premise(id: &str, text: &str, check: &str) -> Item {
+        let mut it = Item::new(id, text);
+        it.fields.insert("check".into(), check.into());
+        it
+    }
+
+    #[test]
+    fn a_premise_whose_check_path_a_task_touches_is_wired_and_keeps_free_text() {
+        let mut p = plan(vec![
+            task("T1", &[("touches", "src/a.rs")]),
+            task(
+                "T2",
+                &[
+                    ("touches", "src/scaler.rs"),
+                    ("depends", "T1, the spread model"),
+                ],
+            ),
+        ]);
+        p.verify.push(premise(
+            "P1",
+            "A scaler exists",
+            "`grep -rnF Scaler src/scaler.rs`",
+        ));
+        let report = run(&mut p);
+        assert_eq!(
+            get(&p, "T2").field("depends"),
+            Some("T1, P1, the spread model")
+        );
+        assert!(get(&p, "T2")
+            .markers
+            .contains(&"premise P1 wired".to_string()));
+        assert_eq!(get(&p, "T1").field("depends"), None);
+        assert_eq!(report.tally.get("premises_wired"), Some(&1));
+    }
+
+    #[test]
+    fn a_premise_backticked_token_in_a_tasks_text_is_wired() {
+        let mut p = plan(vec![task("T1", &[("touches", "src/a.rs")])]);
+        p.tasks[0].text = "Call `Scaler::fit` from the loop".into();
+        p.verify.push(premise(
+            "P1",
+            "`Scaler::fit` is public",
+            "`grep -n fit src/x.rs`",
+        ));
+        run(&mut p);
+        assert_eq!(get(&p, "T1").depends_premises(), ["P1"]);
+    }
+
+    #[test]
+    fn a_premise_sharing_only_a_plain_word_is_not_wired() {
+        let mut p = plan(vec![task("T1", &[("touches", "src/scaler.rs")])]);
+        p.tasks[0].text = "Add the scaler to the loop".into();
+        p.verify.push(premise(
+            "P1",
+            "The scaler exists in the codebase",
+            "`grep -rnF scaler src/other.rs`",
+        ));
+        let report = run(&mut p);
+        assert_eq!(get(&p, "T1").field("depends"), None);
+        assert!(get(&p, "T1").markers.iter().all(|m| !m.contains("premise")));
+        assert_eq!(report.tally.get("premises_wired"), None);
+    }
+
+    #[test]
+    fn a_premise_already_cited_is_not_wired_twice() {
+        let mut p = plan(vec![task(
+            "T1",
+            &[("touches", "src/a.rs"), ("depends", "P1")],
+        )]);
+        p.verify.push(premise("P1", "Exists", "`test -f src/a.rs`"));
+        run(&mut p);
+        assert_eq!(get(&p, "T1").field("depends"), Some("P1"));
+        assert!(
+            get(&p, "T1").markers.is_empty(),
+            "{:?}",
+            get(&p, "T1").markers
+        );
     }
 
     #[test]
