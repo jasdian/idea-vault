@@ -223,6 +223,30 @@ fn backticked_tokens(text: &str) -> Vec<String> {
     out
 }
 
+/// Prefixes of standard names shaped like record ids (`SHA-256`, `UTF-16`, `ISO-4217`), which
+/// many unrelated tasks mention and so never wire a premise.
+const STANDARD_PREFIXES: &[&str] = &[
+    "AES", "CRC", "ECMA", "FIPS", "HTTP", "IEEE", "ISO", "RFC", "RSA", "SHA", "TLS", "UCS", "UTF",
+];
+
+/// Record ids anywhere in `text`, backticked or not: an uppercase prefix of two or more letters,
+/// a hyphen and two or more digits (`ADR-002`, `JIRA-1234`). One-digit names (`UTF-8`, `SHA-1`)
+/// and [`STANDARD_PREFIXES`] never count.
+fn record_ids(text: &str) -> Vec<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|w| {
+            w.split_once('-').is_some_and(|(prefix, num)| {
+                prefix.len() >= 2
+                    && prefix.chars().all(|c| c.is_ascii_uppercase())
+                    && !STANDARD_PREFIXES.contains(&prefix)
+                    && num.len() >= 2
+                    && num.chars().all(|c| c.is_ascii_digit())
+            })
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// Whether a one-word span is identifier-shaped: `a::b`, snake_case with `_`, or CamelCase.
 fn identifier(word: &str) -> bool {
     let camel = word
@@ -272,10 +296,11 @@ fn same_token(a: &str, b: &str) -> bool {
 }
 
 /// Add each Verify-first `P#` to the `depends` of every task whose `touches` or backticked text
-/// names one of the premise's backticked or path tokens. The edge is advisory for waves:
-/// `derive_waves` follows only `T#` edges, and the `plan.md` projection orders a wired `P#`
-/// through its T0 bootstrap row. A one-word span wires only when path-like or identifier-shaped,
-/// and a directory-level path never wires by overlap.
+/// names one of the premise's backticked or path tokens, or shares a record id such as
+/// `ADR-002` anywhere in its text. The edge is advisory for waves: `derive_waves` follows only
+/// `T#` edges, and the `plan.md` projection orders a wired `P#` through its T0 bootstrap row.
+/// A one-word span wires only when path-like or identifier-shaped, and a directory-level path
+/// never wires by overlap.
 fn wire_premises(plan: &mut BuildPlan, report: &mut GateReport) {
     let premises: Vec<(String, Vec<String>)> = plan
         .verify
@@ -283,6 +308,8 @@ fn wire_premises(plan: &mut BuildPlan, report: &mut GateReport) {
         .map(|p| {
             let mut tokens = backticked_tokens(&p.text);
             tokens.extend(backticked_tokens(p.field("check").unwrap_or_default()));
+            tokens.extend(record_ids(&p.text));
+            tokens.extend(record_ids(p.field("check").unwrap_or_default()));
             (p.id.clone(), tokens)
         })
         .filter(|(_, tokens)| !tokens.is_empty())
@@ -291,9 +318,11 @@ fn wire_premises(plan: &mut BuildPlan, report: &mut GateReport) {
         let mut task_tokens: Vec<String> =
             task.list("touches").iter().map(|t| norm_path(t)).collect();
         task_tokens.extend(backticked_tokens(&task.text));
+        task_tokens.extend(record_ids(&task.text));
         for (key, value) in &task.fields {
             if key != "depends" && key != "touches" {
                 task_tokens.extend(backticked_tokens(value));
+                task_tokens.extend(record_ids(value));
             }
         }
         let have = task.depends_premises();
@@ -900,6 +929,32 @@ mod tests {
         ));
         run(&mut p);
         assert_eq!(get(&p, "T1").depends_premises(), ["P1"]);
+    }
+
+    #[test]
+    fn a_premise_record_id_shared_with_a_task_is_wired_even_unbackticked() {
+        let mut p = plan(vec![
+            task("T1", &[("touches", "docs/engine.md")]),
+            task("T2", &[("touches", "docs/other.md")]),
+        ]);
+        p.tasks[0].fields.insert(
+            "accept".into(),
+            "`grep -cE \"11,576|ADR-002|transfers/sec\" docs/engine.md` → 3".into(),
+        );
+        p.tasks[1].text = "Mention UTF-8, SHA-1, SHA-256 and ISO-4217 in the notes".into();
+        p.verify.push(premise(
+            "P1",
+            "ADR-002 requires string-typed money; UTF-8, SHA-1, SHA-256 and ISO-4217 do not matter",
+            "`grep -rn ADR-002 /srv/map`",
+        ));
+        let report = run(&mut p);
+        assert_eq!(get(&p, "T1").depends_premises(), ["P1"]);
+        assert_eq!(
+            get(&p, "T2").field("depends"),
+            None,
+            "UTF-8 and SHA-1 are not record ids"
+        );
+        assert_eq!(report.tally.get("premises_wired"), Some(&1));
     }
 
     #[test]
