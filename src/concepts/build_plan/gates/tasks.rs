@@ -37,11 +37,6 @@ const DESTRUCTIVE_PAIRS: &[(&str, &str)] = &[
     ("drop", "table"),
 ];
 
-const STOP_WORDS: &[&str] = &[
-    "stop", "stops", "stopped", "stopping", "kill", "kills", "killed", "killing", "abort",
-    "aborts", "aborted", "aborting", "halt", "halts", "halted", "halting",
-];
-
 const OWNER_WORK: &[&str] = &[
     "hand-label",
     "owner fills",
@@ -640,14 +635,6 @@ fn kill_wiring(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateRepor
         if gated.is_empty() {
             missing.push("gates");
         }
-        if !kill
-            .text
-            .to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|w| STOP_WORDS.contains(&w))
-        {
-            missing.push("stop action");
-        }
         if !missing.is_empty() {
             mark(
                 &mut plan.kills[k],
@@ -1077,7 +1064,7 @@ mod tests {
         assert!(has_marker(&plan.tasks[1], "added: K1 gates T2"));
         assert!(has_marker(
             &plan.kills[1],
-            "incomplete kill wiring: checked by, gates, stop action"
+            "incomplete kill wiring: checked by, gates"
         ));
         assert!(plan.kills[0].markers.is_empty());
     }
@@ -1340,29 +1327,12 @@ mod tests {
     }
 
     #[test]
-    fn g10_stop_action_is_a_whole_word_in_the_row_text() {
+    fn g10_a_wired_kill_row_needs_no_stop_word() {
         let mut plan = kill_plan();
-        plan.kills[0].text = "Review the skill output".to_string();
-        plan.kills.push(item(
-            "K2",
-            "Halting the build",
-            &[("checked by", "T1"), ("gates", "T2")],
-        ));
-        plan.kills.push(item(
-            "K3",
-            "Nothing",
-            &[("checked by", "T1"), ("gates", "T2"), ("note", "stopped")],
-        ));
+        plan.kills[0].text =
+            "The chart of accounts needs an account per external payer".to_string();
         run(&mut plan);
-        assert!(has_marker(
-            &plan.kills[0],
-            "incomplete kill wiring: stop action"
-        ));
-        assert!(plan.kills[1].markers.is_empty(), "{:?}", plan.kills[1]);
-        assert!(has_marker(
-            &plan.kills[2],
-            "incomplete kill wiring: stop action"
-        ));
+        assert!(plan.kills[0].markers.is_empty(), "{:?}", plan.kills[0]);
     }
 
     #[test]
