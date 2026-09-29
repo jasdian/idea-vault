@@ -7,4 +7,15 @@
 </div>
 
 <div class="statement">{{ content_html|safe }}</div>
+
+{% if let Some(prompt) = prompt_md %}{% if let Some(attack) = attack_plan_md %}
+<section class="useit" id="use-it">
+  <h2 class="useit__title">Use it</h2>
+  <p class="useit__hint">derived from this plan when the page loads — copy into a coding agent or an /attack loop.</p>
+  <h3 class="useit__label">PROMPT.md</h3>
+  <pre class="copyable">{{ prompt }}</pre>
+  <h3 class="useit__label">@plan.md</h3>
+  <pre class="copyable">{{ attack }}</pre>
+</section>
+{% endif %}{% endif %}
 {% endblock %}

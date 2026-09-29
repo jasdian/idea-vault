@@ -492,6 +492,17 @@ fn parse_items(lines: &[&str], section: Section) -> Vec<Item> {
 /// heading aliases — [`repair_build_plan`]); required sections it still lacks are recorded in
 /// [`BuildPlan::missing`] and parse as empty. Fails only when there is neither a goal nor a task.
 pub fn parse(answer: &str) -> Result<BuildPlan, Unusable> {
+    parse_inner(answer, false)
+}
+
+/// Parse a stored build-plan artifact body. Unlike [`parse`] it reads the code-owned
+/// `## Quarantined` section back (each item with its `reason`); the two italic header lines and
+/// any `> note` lines before `## Goal` are dropped. Never call it on a model answer.
+pub fn parse_artifact(body: &str) -> Result<BuildPlan, Unusable> {
+    parse_inner(body, true)
+}
+
+fn parse_inner(answer: &str, read_quarantine: bool) -> Result<BuildPlan, Unusable> {
     let repaired = repair_build_plan(answer);
     let mut plan = BuildPlan::default();
     let mut blocks: Vec<(Section, Vec<&str>)> = Vec::new();
@@ -528,6 +539,9 @@ pub fn parse(answer: &str) -> Result<BuildPlan, Unusable> {
             Section::Plan => plan.tasks.extend(parse_items(body, *section)),
             Section::Kill => plan.kills.extend(parse_items(body, *section)),
             Section::Fence => plan.fence.extend(parse_items(body, *section)),
+            Section::Quarantined if read_quarantine => {
+                plan.quarantined.extend(parse_items(body, *section));
+            }
             Section::Quarantined | Section::Other => {}
         }
     }
@@ -601,6 +615,129 @@ pub fn render(plan: &BuildPlan) -> String {
         );
     }
     out.trim_end().to_string()
+}
+
+fn push_item(out: &mut String, item: &Item, box_: &str) {
+    out.push_str(&format!("- {box_}{}: {}", item.id, item.text));
+    for m in &item.markers {
+        out.push_str(&format!(" ⟨{m}⟩"));
+    }
+    out.push('\n');
+}
+
+fn push_fields(out: &mut String, item: &Item, keys: &[&str]) {
+    for key in keys {
+        if let Some(v) = item.field(key) {
+            out.push_str(&format!("  {key}: {v}\n"));
+        }
+    }
+}
+
+fn prompt_section(out: &mut String, heading: &str, items: &[Item], keys: &[&str], none: bool) {
+    if items.is_empty() && !none {
+        return;
+    }
+    out.push_str(&format!("\n{heading}\n"));
+    if items.is_empty() {
+        out.push_str("- none\n");
+    }
+    for item in items {
+        push_item(out, item, "");
+        push_fields(out, item, keys);
+    }
+}
+
+/// Project a plan to a `PROMPT.md` any coding agent can follow: owner pins, foil conclusions to
+/// confirm, fence, bootstrap checks, owner questions, tasks, kill criteria and the quarantined
+/// claims not to build on. Empty sections are omitted except the two settled ones.
+pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
+    let goal = plan.goal.lines().next().unwrap_or("").trim();
+    let mut out = format!("# Build: {goal}\n\n_idea: {idea_title} · plan: {stem}_\n");
+    let (pinned, foil): (Vec<Item>, Vec<Item>) = plan
+        .settled
+        .iter()
+        .cloned()
+        .partition(|i| matches!(i.provenance, Some(Provenance::Owner | Provenance::Idea)));
+    prompt_section(
+        &mut out,
+        "## PINNED — the owner said it",
+        &pinned,
+        &["quote"],
+        true,
+    );
+    prompt_section(
+        &mut out,
+        "## Foil conclusions — confirm at bootstrap",
+        &foil,
+        &["quote"],
+        true,
+    );
+    prompt_section(&mut out, "## Fence", &plan.fence, &[], false);
+    prompt_section(
+        &mut out,
+        "## Bootstrap checks — a failed check stops the run",
+        &plan.verify,
+        &["check"],
+        false,
+    );
+    prompt_section(
+        &mut out,
+        "## Ask the owner before building past these",
+        &plan.open,
+        &[],
+        false,
+    );
+    if !plan.tasks.is_empty() {
+        out.push_str("\n## Plan\n");
+        for t in &plan.tasks {
+            push_item(&mut out, t, if t.needs_owner { "[?] " } else { "[ ] " });
+            push_fields(&mut out, t, &["depends", "touches", "accept"]);
+        }
+    }
+    prompt_section(
+        &mut out,
+        "## Kill criteria",
+        &plan.kills,
+        &["checked by", "gates"],
+        false,
+    );
+    prompt_section(
+        &mut out,
+        "## Do not build on",
+        &plan.quarantined,
+        &["reason"],
+        false,
+    );
+    out
+}
+
+fn table_cell(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('|', "\\|")
+}
+
+/// Project a plan to an `/attack`-style `@plan.md`: one table row per task with `score` and
+/// `model` left as `?`, `[?]` marking owner tasks a loop must never auto-select, and an empty
+/// `## Log`.
+pub fn render_attack_plan(plan: &BuildPlan) -> String {
+    let mut out = String::from(
+        "| [ ] | T | Task | Depends | score | model | accept |\n|---|---|---|---|---|---|---|\n",
+    );
+    for t in &plan.tasks {
+        let depends = t.list("depends").join(", ");
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | ? | ? | {} |\n",
+            if t.needs_owner { "[?]" } else { "[ ]" },
+            table_cell(&t.id),
+            table_cell(&t.text),
+            table_cell(&depends),
+            table_cell(t.field("accept").unwrap_or("")),
+        ));
+    }
+    out.push_str("\n## Log\n");
+    out
 }
 
 #[cfg(test)]
@@ -806,5 +943,89 @@ Run the cheapest disproof before any Rust exists.
         let plan = parse(answer).unwrap();
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].field("accept"), Some("`make` → exit 0"));
+    }
+
+    fn projected() -> BuildPlan {
+        let mut plan = parse(PLAN).unwrap();
+        plan.settled[0].provenance = Some(Provenance::Owner);
+        plan.settled[1].provenance = Some(Provenance::Foil);
+        plan.quarantine(
+            Item::new("", "The owner chose freeze at entry"),
+            "quote not in the discussion",
+        );
+        plan
+    }
+
+    #[test]
+    fn projection_splits_owner_pins_from_foil_conclusions() {
+        let prompt = render_prompt(&projected(), "Trader", "20260928-build-plan");
+        let pinned = prompt.find("## PINNED — the owner said it").unwrap();
+        let foil = prompt
+            .find("## Foil conclusions — confirm at bootstrap")
+            .unwrap();
+        let bocpd = prompt.find("S1: BOCPD").unwrap();
+        let close = prompt.find("S2: Close is never").unwrap();
+        assert!(pinned < bocpd && bocpd < foil && foil < close, "{prompt}");
+        assert!(
+            prompt.starts_with("# Build: Run the cheapest disproof"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Trader") && prompt.contains("20260928-build-plan"));
+        assert!(prompt.contains("quote: \"going forward with BOCPD"));
+        assert!(prompt.contains("- [?] T1:") && prompt.contains("- [ ] T2:"));
+        assert!(prompt.contains("  accept: `python backtest/run.py"));
+        assert!(prompt.contains("## Bootstrap checks — a failed check stops the run"));
+        assert!(!prompt.contains("## Fence"), "empty sections are omitted");
+    }
+
+    #[test]
+    fn projection_lists_quarantined_items_as_do_not_build_on() {
+        let prompt = render_prompt(&projected(), "Trader", "stem");
+        let at = prompt.find("## Do not build on").unwrap();
+        let tail = &prompt[at..];
+        assert!(tail.contains("The owner chose freeze at entry"), "{tail}");
+        assert!(
+            tail.contains("reason: quote not in the discussion"),
+            "{tail}"
+        );
+        let none = render_prompt(&parse(PLAN).unwrap(), "T", "s");
+        assert!(!none.contains("## Do not build on"));
+    }
+
+    #[test]
+    fn projection_attack_plan_marks_owner_tasks_and_leaves_score_unset() {
+        let mut plan = parse(PLAN).unwrap();
+        plan.tasks[1]
+            .fields
+            .insert("accept".into(), "`a | b` → ok".into());
+        let out = render_attack_plan(&plan);
+        assert!(out.starts_with("| [ ] | T | Task | Depends | score | model | accept |\n"));
+        assert!(
+            out.contains("| [?] | T1 | Write SPEC.md with a dated kill criterion |  | ? | ? |  |"),
+            "{out}"
+        );
+        assert!(
+            out.contains("| [ ] | T2 | Backtest SPEC.md at a pessimistic spread | T1 | ? | ? | `a \\| b` → ok |"),
+            "{out}"
+        );
+        assert!(out.ends_with("\n## Log\n"));
+    }
+
+    #[test]
+    fn projection_parse_artifact_reads_quarantine_back() {
+        let plan = projected();
+        let body = format!(
+            "# Build plan — Trader\n_quick · m · 2026-09-28 21:40_\n_gates: settled 2_\n\n> a note\n\n{}\n",
+            render(&plan)
+        );
+        let back = parse_artifact(&body).unwrap();
+        assert_eq!(back.quarantined.len(), 1);
+        assert_eq!(back.quarantined[0].text, "The owner chose freeze at entry");
+        assert_eq!(
+            back.quarantined[0].field("reason"),
+            Some("quote not in the discussion")
+        );
+        assert_eq!(back.goal, plan.goal);
+        assert!(parse(&body).unwrap().quarantined.is_empty());
     }
 }

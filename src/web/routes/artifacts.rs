@@ -6,6 +6,7 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 
+use crate::concepts::build_plan::plan;
 use crate::concepts::knowledge;
 use crate::domain::{slug as domain_slug, ArtifactKind};
 use crate::vault::store;
@@ -176,6 +177,19 @@ pub async fn view_artifact(
     match ext {
         store::ArtifactExt::Md => {
             let artifact = store::read_artifact(vault_dir, &slug, stem)?;
+            let projections = (artifact.frontmatter.kind == ArtifactKind::BuildPlan)
+                .then(|| plan::parse_artifact(&artifact.body).ok())
+                .flatten()
+                .map(|p| {
+                    (
+                        plan::render_prompt(&p, &idea.frontmatter.title, stem),
+                        plan::render_attack_plan(&p),
+                    )
+                });
+            let (prompt_md, attack_plan_md) = match projections {
+                Some((a, b)) => (Some(a), Some(b)),
+                None => (None, None),
+            };
             Ok(ArtifactPage {
                 title: artifact.frontmatter.title.clone(),
                 idea_slug: slug,
@@ -183,6 +197,8 @@ pub async fn view_artifact(
                 file_name: name,
                 meta: artifact_meta(&artifact.frontmatter),
                 content_html: render_markdown(&artifact.body),
+                prompt_md,
+                attack_plan_md,
             }
             .into_response())
         }

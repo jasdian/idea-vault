@@ -956,3 +956,15 @@ a.srcchip:hover { border-color: var(--accent); color: var(--accent); }
   background: var(--warn-soft);
 }
 .spine__untested { color: var(--warn); }
+
+/* ---- build-plan page: the "Use it" copy blocks -------------------------- */
+.useit { margin: 2rem 0 1rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+.useit__title { font-family: var(--serif); font-size: 1.15rem; margin: 0 0 .25rem; }
+.useit__hint { font-family: var(--serif); font-style: italic; font-size: .82rem; color: var(--faint); margin: 0 0 .75rem; }
+.useit__label { font-family: var(--mono); font-size: .72rem; letter-spacing: .04em; color: var(--accent); margin: 1rem 0 .3rem; font-weight: 500; }
+.useit pre {
+  position: relative; margin: 0; padding: .6rem .75rem; border-radius: 6px; font-size: .8rem;
+  font-family: var(--mono); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--ink) 5%, var(--paper)); border: 1px solid var(--rule);
+}
+.useit pre:hover .copy-btn, .useit .copy-btn:focus { opacity: 1; }
