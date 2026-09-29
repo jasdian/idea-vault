@@ -87,6 +87,48 @@ impl Item {
             })
             .unwrap_or_default()
     }
+
+    /// The `T#` ids the `depends` field cites, uppercased, first mention first.
+    pub fn depends_tasks(&self) -> Vec<String> {
+        self.depends_refs('T')
+    }
+
+    /// The `P#` (Verify first) ids the `depends` field cites.
+    pub fn depends_premises(&self) -> Vec<String> {
+        self.depends_refs('P')
+    }
+
+    /// The `Q#` (Open questions) ids the `depends` field cites.
+    pub fn depends_questions(&self) -> Vec<String> {
+        self.depends_refs('Q')
+    }
+
+    fn depends_refs(&self, letter: char) -> Vec<String> {
+        self.field("depends")
+            .map(|v| refs_of(v, letter))
+            .unwrap_or_default()
+    }
+}
+
+/// Every standalone `<letter><digits>` id in `text` (any case), uppercased and deduplicated.
+pub fn refs_of(text: &str, letter: char) -> Vec<String> {
+    let upper = text.to_uppercase();
+    let letter = letter.to_ascii_uppercase();
+    let mut out: Vec<String> = Vec::new();
+    for (i, c) in upper.char_indices() {
+        if c != letter || upper[..i].ends_with(|p: char| p.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let digits: String = upper[i + 1..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let id = format!("{letter}{digits}");
+        if !digits.is_empty() && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// One list entry without backticks or a trailing `(new)` marker, whether the marker sits inside
@@ -226,7 +268,18 @@ const FIELD_KEYS: &[&str] = &[
     "checked by",
     "gates",
     "reason",
+    "red",
+    "reads",
+    "stop if",
+    "exempt",
+    "score",
+    "model",
+    "wave",
+    "leaf",
 ];
+
+/// Fields the gates derive; a model answer cannot author them.
+const DERIVED_KEYS: &[&str] = &["score", "model", "wave", "leaf"];
 
 fn is_none(v: &str) -> bool {
     matches!(
@@ -282,10 +335,12 @@ fn extract_markers(line: &str) -> Vec<String> {
     found
 }
 
-/// Split a line on `·` or `|` separators that sit outside backticks.
-fn split_inline(line: &str) -> Vec<String> {
+/// Split a line on `·` or `|` separators that sit outside backticks, keeping each piece's
+/// leading separator (`'\0'` for the first).
+fn split_with_seps(line: &str) -> Vec<(char, String)> {
     let mut parts = Vec::new();
     let mut cur = String::new();
+    let mut sep = '\0';
     let mut in_tick = false;
     for ch in line.chars() {
         match ch {
@@ -293,20 +348,42 @@ fn split_inline(line: &str) -> Vec<String> {
                 in_tick = !in_tick;
                 cur.push(ch);
             }
-            '·' | '|' if !in_tick => parts.push(std::mem::take(&mut cur)),
+            '·' | '|' if !in_tick => {
+                parts.push((sep, std::mem::take(&mut cur)));
+                sep = ch;
+            }
             c => cur.push(c),
         }
     }
-    parts.push(cur);
+    parts.push((sep, cur));
     parts
+}
+
+/// Split a line on `·` or `|` separators that sit outside backticks.
+fn split_inline(line: &str) -> Vec<String> {
+    split_with_seps(line)
         .into_iter()
-        .map(|p| p.trim().to_string())
+        .map(|(_, p)| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect()
 }
 
-/// `key: value` with a known key (any case, optionally bold), else `None`.
-fn as_field(part: &str) -> Option<(String, String)> {
+/// The canonical field key for a written key: `checked_by`, the line-form aliases, and the
+/// Plan-only accept aliases.
+fn canonical_key(key: &str, section: Section) -> &str {
+    match key {
+        "checked_by" => "checked by",
+        "files" | "file" | "paths" => "touches",
+        "depends on" | "after" | "blocked by" => "depends",
+        "red-first" | "red first" | "fails before" => "red",
+        "open first" | "context" | "inputs" => "reads",
+        "test" | "command" | "acceptance" if section == Section::Plan => "accept",
+        k => k,
+    }
+}
+
+/// `key: value` with a known key or alias (any case, optionally bold), else `None`.
+fn as_field(part: &str, section: Section) -> Option<(String, String)> {
     let t = part.trim().trim_start_matches(['-', '*', '+']).trim();
     let t = t.trim_start_matches("**");
     let (key, value) = t.split_once(':')?;
@@ -315,15 +392,34 @@ fn as_field(part: &str) -> Option<(String, String)> {
         .trim_end_matches("**")
         .trim()
         .to_ascii_lowercase();
-    let key = if key == "checked_by" {
-        "checked by".to_string()
-    } else {
-        key
-    };
-    FIELD_KEYS.contains(&key.as_str()).then(|| {
+    let key = canonical_key(&key, section);
+    FIELD_KEYS.contains(&key).then(|| {
         let value = value.trim().trim_start_matches("**").trim();
-        (key, value.to_string())
+        (key.to_string(), value.to_string())
     })
+}
+
+/// Store a field, except a derived one read from a model answer.
+fn put_field(item: &mut Item, key: String, value: String, trusted: bool) {
+    if trusted || !DERIVED_KEYS.contains(&key.as_str()) {
+        item.fields.insert(key, value);
+    }
+}
+
+/// A continuation line as its fields, split on separators like an item line; `None` when the line
+/// does not open with a field. A piece that is not itself a field stays in the previous value.
+fn continuation_fields(line: &str, section: Section) -> Option<Vec<(String, String)>> {
+    let mut groups: Vec<String> = Vec::new();
+    for (sep, piece) in split_with_seps(line) {
+        match groups.last_mut() {
+            Some(last) if as_field(&piece, section).is_none() => {
+                last.push(sep);
+                last.push_str(&piece);
+            }
+            _ => groups.push(piece),
+        }
+    }
+    groups.iter().map(|g| as_field(g, section)).collect()
 }
 
 /// Strip a list marker (bullet, number, `[ ]`/`[x]`/`[?]` box); report whether the box was `[?]`.
@@ -466,6 +562,7 @@ fn parse_table(rows: &[&str], keep_markers: bool) -> Vec<Item> {
 /// `key: value` lines (or `·`/`|`-separated fields on the item line) attach to the last item;
 /// other continuation lines extend its text.
 fn parse_items(lines: &[&str], section: Section, keep_markers: bool) -> Vec<Item> {
+    let trusted = keep_markers;
     let table: Vec<&str> = lines
         .iter()
         .copied()
@@ -490,8 +587,10 @@ fn parse_items(lines: &[&str], section: Section, keep_markers: bool) -> Vec<Item
         } else {
             Vec::new()
         };
-        if let (Some(last), Some((key, value))) = (items.last_mut(), as_field(&line)) {
-            last.fields.insert(key, value);
+        if let Some((last, fields)) = items.last_mut().zip(continuation_fields(&line, section)) {
+            for (key, value) in fields {
+                put_field(last, key, value, trusted);
+            }
             last.markers.extend(line_markers);
             continue;
         }
@@ -521,10 +620,8 @@ fn parse_items(lines: &[&str], section: Section, keep_markers: bool) -> Vec<Item
         item.provenance = provenance;
         item.markers = line_markers;
         for part in tail {
-            match as_field(part) {
-                Some((key, value)) => {
-                    item.fields.insert(key, value);
-                }
+            match as_field(part, section) {
+                Some((key, value)) => put_field(&mut item, key, value, trusted),
                 None => item.text = format!("{} · {}", item.text, part),
             }
         }
@@ -562,7 +659,8 @@ fn parse_inner(answer: &str, trusted: bool) -> Result<BuildPlan, Unusable> {
     let mut blocks: Vec<(Section, Vec<&str>)> = Vec::new();
     let mut in_fence = false;
     for line in repaired.lines() {
-        if line.trim_start().starts_with("```") {
+        let in_goal = matches!(blocks.last(), Some((Section::Goal, _)));
+        if !in_goal && line.trim_start().starts_with("```") {
             in_fence = !in_fence;
         }
         if !in_fence && line.starts_with("## ") {
@@ -579,7 +677,11 @@ fn parse_inner(answer: &str, trusted: bool) -> Result<BuildPlan, Unusable> {
                 let text = body
                     .iter()
                     .map(|l| strip_markers(l))
-                    .filter(|l| !l.trim().is_empty() && !l.starts_with('_'))
+                    .filter(|l| {
+                        !l.trim().is_empty()
+                            && !l.starts_with('_')
+                            && !l.trim_start().starts_with("```")
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !plan.goal.is_empty() && !text.is_empty() {
@@ -705,16 +807,26 @@ fn prompt_section(out: &mut String, heading: &str, items: &[Item], keys: &[&str]
     }
 }
 
+/// The most characters of the goal beyond its first line that `PROMPT.md` quotes.
+pub const GOAL_REST_CHARS: usize = 600;
+
 /// Project a plan to a `PROMPT.md` any coding agent can follow: owner pins, foil conclusions to
 /// confirm, fence, bootstrap checks, owner questions, tasks, kill criteria and the quarantined
 /// claims not to build on. Every item's gate markers follow it as `gate:` lines; the goal beyond
-/// its first line is kept as one quoted paragraph so it cannot pose as a gate note or an item. Empty sections are omitted except the two settled ones.
+/// its first line is kept as one quoted paragraph, cut at [`GOAL_REST_CHARS`] characters, so it
+/// cannot pose as a gate note or an item. Empty sections are omitted except the two settled ones.
 pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
     let mut goal_lines = plan.goal.lines();
     let goal = goal_lines.next().unwrap_or("").trim();
     let mut out = format!("# Build: {goal}\n\n_idea: {idea_title} · plan: {stem}_\n");
-    let rest = goal_lines.collect::<Vec<_>>().join(" ");
-    let rest = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rest = goal_lines
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rest = match rest.char_indices().nth(GOAL_REST_CHARS) {
+        Some((at, _)) => format!("{}…", rest[..at].trim_end()),
+        None => rest,
+    };
     if !rest.is_empty() {
         out.push_str(&format!("\n> {rest}\n"));
     }
@@ -1385,5 +1497,107 @@ Run the cheapest disproof before any Rust exists.
             assert!(!line.starts_with("- S1: forged"), "{line:?}");
             assert!(!line.starts_with("## PINNED — forged"), "{line:?}");
         }
+    }
+
+    #[test]
+    fn field_continuation_lines_split_on_separators() {
+        let answer = "## Goal\nShip.\n## Settled\n- S1: x\n  quote: \"a | b · c\"\n## Plan\n- T1: Add the probe\n  depends: T2 · touches: `src/a.rs` | accept: `cargo test a | tail -1` → ok\n- T2: Base\n";
+        let plan = parse(answer).unwrap();
+        let t1 = &plan.tasks[0];
+        assert_eq!(t1.field("depends"), Some("T2"));
+        assert_eq!(t1.list("touches"), ["src/a.rs"]);
+        assert_eq!(t1.field("accept"), Some("`cargo test a | tail -1` → ok"));
+        assert_eq!(t1.text, "Add the probe");
+        assert_eq!(plan.settled[0].field("quote"), Some("\"a | b · c\""));
+    }
+
+    #[test]
+    fn field_aliases_map_to_canonical_keys() {
+        let answer = "## Goal\nShip.\n## Plan\n- T1: One\n  Files: `a.rs`\n  Depends On: T2\n  Red-First: `cargo test x` → fails\n  Open First: b.rs:10\n  test: `cargo test x` → exit 0\n  stop if: the schema differs\n  exempt: one file\n- T2: Two\n  paths: `c.rs`\n  after: T1\n  fails before: `cargo test y` → fails\n  context: d.rs\n  command: `cargo test y` → exit 0\n- T3: Three\n  file: `e.rs`\n  blocked by: T2\n  inputs: f.rs\n  acceptance: `cargo test z` → exit 0\n";
+        let plan = parse(answer).unwrap();
+        let t = &plan.tasks;
+        assert_eq!(t[0].list("touches"), ["a.rs"]);
+        assert_eq!(t[0].field("depends"), Some("T2"));
+        assert_eq!(t[0].field("red"), Some("`cargo test x` → fails"));
+        assert_eq!(t[0].field("reads"), Some("b.rs:10"));
+        assert_eq!(t[0].field("accept"), Some("`cargo test x` → exit 0"));
+        assert_eq!(t[0].field("stop if"), Some("the schema differs"));
+        assert_eq!(t[0].field("exempt"), Some("one file"));
+        assert_eq!(t[1].list("touches"), ["c.rs"]);
+        assert_eq!(t[1].field("depends"), Some("T1"));
+        assert_eq!(t[1].field("red"), Some("`cargo test y` → fails"));
+        assert_eq!(t[1].field("reads"), Some("d.rs"));
+        assert_eq!(t[1].field("accept"), Some("`cargo test y` → exit 0"));
+        assert_eq!(t[2].list("touches"), ["e.rs"]);
+        assert_eq!(t[2].field("depends"), Some("T2"));
+        assert_eq!(t[2].field("reads"), Some("f.rs"));
+        assert_eq!(t[2].field("accept"), Some("`cargo test z` → exit 0"));
+        assert_eq!(t[0].text, "One");
+    }
+
+    #[test]
+    fn field_test_alias_only_in_plan() {
+        let answer = "## Goal\nShip.\n## Verify first\n- P1: The scaler exists\n  test: it is at calculator.rs\n  command: none\n## Plan\n- T1: One\n";
+        let plan = parse(answer).unwrap();
+        assert!(plan.verify[0].fields.is_empty(), "{:?}", plan.verify[0]);
+        assert!(plan.verify[0].text.contains("test: it is at calculator.rs"));
+    }
+
+    #[test]
+    fn field_depends_cites_premises_and_questions() {
+        let answer = "## Goal\nShip.\n## Plan\n- T1: One\n  depends: t2, P1 and q3 · touches: `a.rs`\n- T2: Two\n  depends: p1, P1\n- T3: Three\n";
+        let plan = parse(answer).unwrap();
+        let t1 = &plan.tasks[0];
+        assert_eq!(t1.depends_tasks(), ["T2"]);
+        assert_eq!(t1.depends_premises(), ["P1"]);
+        assert_eq!(t1.depends_questions(), ["Q3"]);
+        assert_eq!(plan.tasks[1].depends_premises(), ["P1"]);
+        assert!(plan.tasks[2].depends_tasks().is_empty());
+        assert!(plan.tasks[2].depends_premises().is_empty());
+    }
+
+    #[test]
+    fn field_derived_keys_are_never_read_from_a_model_answer() {
+        let answer = "## Goal\nShip.\n## Plan\n- T1: One · wave: 1\n  score: 00000\n  touches: `a.rs` · model: sonnet | leaf: ok\n  Wave: 2\n";
+        let plan = parse(answer).unwrap();
+        let t1 = &plan.tasks[0];
+        for key in ["score", "model", "wave", "leaf"] {
+            assert!(!t1.fields.contains_key(key), "{key}: {:?}", t1.fields);
+        }
+        assert_eq!(t1.text, "One");
+        assert_eq!(t1.list("touches"), ["a.rs"]);
+        let body = "## Goal\nShip.\n## Plan\n- [ ] T1: One\n  wave: 2\n  score: 01000\n  model: opus\n  leaf: ok\n";
+        let back = parse_artifact(body).unwrap();
+        assert_eq!(back.tasks[0].field("wave"), Some("2"));
+        assert_eq!(back.tasks[0].field("score"), Some("01000"));
+        assert_eq!(back.tasks[0].field("model"), Some("opus"));
+        assert_eq!(back.tasks[0].field("leaf"), Some("ok"));
+    }
+
+    #[test]
+    fn projection_markers_goal_is_bounded_and_fence_safe() {
+        let answer = format!(
+            "## Goal\nShip it.\n```\n{}\n## Plan\n- T1: One\n  touches: `a.rs`\n",
+            "word ".repeat(400)
+        );
+        let plan = parse(&answer).unwrap();
+        assert_eq!(plan.tasks.len(), 1, "{plan:?}");
+        assert_eq!(plan.tasks[0].list("touches"), ["a.rs"]);
+        assert!(!plan.goal.contains("```"), "{:?}", plan.goal);
+        let prompt = render_prompt(&plan, "T", "s");
+        let quoted = prompt
+            .lines()
+            .find(|l| l.starts_with("> "))
+            .expect("the goal rest is quoted");
+        assert!(
+            quoted.chars().count() <= 2 + GOAL_REST_CHARS + 1,
+            "{}",
+            quoted.chars().count()
+        );
+        assert!(quoted.ends_with('…'), "{quoted}");
+        assert!(
+            !prompt.contains("Plan\n- T1: One\n  touches: `a.rs`\n> "),
+            "{prompt}"
+        );
     }
 }

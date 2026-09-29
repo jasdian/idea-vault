@@ -210,17 +210,7 @@ fn scope_fence(plan: &mut BuildPlan, report: &mut GateReport) {
 }
 
 fn task_deps(task: &Item) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for id in task
-        .field("depends")
-        .map(|v| task_refs(&v.to_uppercase()))
-        .unwrap_or_default()
-    {
-        if !out.contains(&id) {
-            out.push(id);
-        }
-    }
-    out
+    task.depends_tasks()
 }
 
 fn depends_of(plan: &BuildPlan, id: &str) -> Vec<String> {
@@ -245,12 +235,19 @@ fn reaches(plan: &BuildPlan, from: &str, to: &str) -> bool {
     false
 }
 
-fn set_depends(task: &mut Item, deps: &[String]) {
-    if deps.is_empty() {
+fn write_depends(task: &mut Item, refs: &[String]) {
+    if refs.is_empty() {
         task.fields.remove("depends");
     } else {
-        task.fields.insert("depends".to_string(), deps.join(", "));
+        task.fields.insert("depends".to_string(), refs.join(", "));
     }
+}
+
+fn set_depends(task: &mut Item, deps: &[String]) {
+    let mut refs = deps.to_vec();
+    refs.extend(task.depends_premises());
+    refs.extend(task.depends_questions());
+    write_depends(task, &refs);
 }
 
 fn add_dependency(task: &mut Item, dep: &str) {
@@ -260,18 +257,45 @@ fn add_dependency(task: &mut Item, dep: &str) {
 }
 
 fn dependency_repair(plan: &mut BuildPlan, report: &mut GateReport) {
-    let known: BTreeSet<String> = plan.tasks.iter().map(|t| t.id.clone()).collect();
+    let ids = |items: &[Item]| -> BTreeSet<String> { items.iter().map(|t| t.id.clone()).collect() };
+    let (known, premises, questions) = (ids(&plan.tasks), ids(&plan.verify), ids(&plan.open));
     for task in &mut plan.tasks {
-        let deps = task_deps(task);
-        if deps.iter().all(|d| known.contains(d)) {
+        let refs: Vec<(String, bool)> = task_deps(task)
+            .into_iter()
+            .map(|d| (d.clone(), known.contains(&d)))
+            .chain(
+                task.depends_premises()
+                    .into_iter()
+                    .map(|d| (d.clone(), premises.contains(&d))),
+            )
+            .chain(
+                task.depends_questions()
+                    .into_iter()
+                    .map(|d| (d.clone(), questions.contains(&d))),
+            )
+            .collect();
+        if refs.iter().all(|(_, ok)| *ok) {
             continue;
         }
-        for dropped in deps.iter().filter(|d| !known.contains(*d)) {
+        for (dropped, _) in refs.iter().filter(|(_, ok)| !ok) {
             mark(task, format!("unknown dependency {dropped}"));
             report.count("repaired");
         }
-        let kept: Vec<String> = deps.into_iter().filter(|d| known.contains(d)).collect();
-        set_depends(task, &kept);
+        let kept: Vec<String> = refs
+            .into_iter()
+            .filter(|(_, ok)| *ok)
+            .map(|(d, _)| d)
+            .collect();
+        write_depends(task, &kept);
+    }
+
+    for task in &mut plan.tasks {
+        for q in task.depends_questions() {
+            if questions.contains(&q) {
+                mark(task, format!("blocked by {q}"));
+                need_owner(task, report);
+            }
+        }
     }
 
     let cyclic: Vec<bool> = plan
@@ -692,6 +716,75 @@ mod tests {
         assert!(has_marker(&plan.tasks[1], "added: shares src/x.rs with T1"));
         assert!(has_marker(&plan.tasks[1], "unknown dependency T9"));
         assert_eq!(report.tally.get("repaired"), Some(&2));
+    }
+
+    #[test]
+    fn g8_premise_and_question_refs_are_not_dropped() {
+        let mut plan = BuildPlan::default();
+        plan.verify.push(item("P1", "Scaler exists", &[]));
+        plan.tasks.push(item(
+            "T1",
+            "First",
+            &[("depends", "P1, P9, Q9"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T2",
+            "Second",
+            &[("depends", "T1, P1"), ("accept", RUNNABLE)],
+        ));
+        run(&mut plan);
+        assert_eq!(plan.tasks[0].depends_premises(), ["P1"]);
+        assert!(plan.tasks[0].depends_questions().is_empty());
+        assert!(has_marker(&plan.tasks[0], "unknown dependency P9"));
+        assert!(has_marker(&plan.tasks[0], "unknown dependency Q9"));
+        assert!(!has_marker(&plan.tasks[0], "unknown dependency P1"));
+        assert_eq!(plan.tasks[1].depends_tasks(), ["T1"]);
+        assert_eq!(plan.tasks[1].depends_premises(), ["P1"]);
+        assert!(!plan.tasks[1]
+            .markers
+            .iter()
+            .any(|m| m.starts_with("unknown")));
+    }
+
+    #[test]
+    fn g8_an_edge_added_beside_a_premise_keeps_the_premise() {
+        let mut plan = BuildPlan::default();
+        plan.verify.push(item("P1", "Scaler exists", &[]));
+        plan.tasks.push(item(
+            "T1",
+            "First",
+            &[("touches", "src/x.rs"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks.push(item(
+            "T2",
+            "Second",
+            &[
+                ("touches", "src/x.rs"),
+                ("depends", "P1"),
+                ("accept", RUNNABLE),
+            ],
+        ));
+        run(&mut plan);
+        assert_eq!(plan.tasks[1].depends_tasks(), ["T1"]);
+        assert_eq!(plan.tasks[1].depends_premises(), ["P1"]);
+    }
+
+    #[test]
+    fn g8_a_task_depending_on_an_open_question_is_blocked() {
+        let mut plan = BuildPlan::default();
+        plan.open.push(item("Q1", "Which spread?", &[]));
+        plan.tasks.push(item(
+            "T1",
+            "First",
+            &[("depends", "Q1"), ("accept", RUNNABLE)],
+        ));
+        plan.tasks
+            .push(item("T2", "Second", &[("accept", RUNNABLE)]));
+        run(&mut plan);
+        assert!(plan.tasks[0].needs_owner);
+        assert!(has_marker(&plan.tasks[0], "blocked by Q1"));
+        assert_eq!(plan.tasks[0].depends_questions(), ["Q1"]);
+        assert!(!plan.tasks[1].needs_owner);
     }
 
     #[test]
