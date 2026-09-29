@@ -598,7 +598,92 @@ async fn retry_plan_missing_kill_criteria_gets_no_retry() {
     let plans = plan_artifacts(dir.path());
     assert_eq!(plans.len(), 1);
     assert!(
-        plans[0].body.contains("## Kill criteria"),
+        plans[0]
+            .body
+            .contains("missing section: ## Kill criteria — placeholder"),
+        "{}",
+        plans[0].body
+    );
+    assert!(
+        !plans[0].body.contains("missing section: ## Verify first"),
+        "{}",
+        plans[0].body
+    );
+}
+
+fn table_plan(goal: &str, settled: &str, rows: &[(&str, &str)]) -> String {
+    let mut out = format!(
+        "## Goal\n{goal}\n\n## Settled\n{settled}\n\n## Open questions\n- none\n\n## Plan\n| T | Task | Touches | Accept |\n|---|---|---|---|\n"
+    );
+    for (id, task) in rows {
+        out.push_str(&format!(
+            "| {id} | {task} | `SPEC.md` | `test -s SPEC.md` |\n"
+        ));
+    }
+    out
+}
+
+const SETTLED_ONE: &str =
+    "- S1: Disproof comes before any code.\n  quote: \"the cheapest disproof before any Rust exists\"";
+
+#[tokio::test]
+async fn retry_plan_accepts_a_table_shaped_plan_without_retry() {
+    let answer = table_plan(
+        "Table goal.",
+        SETTLED_ONE,
+        &[("T1", "Write the spec"), ("T2", "Run the backtest")],
+    );
+    let (dir, mock, result) = quick_plan(&[&answer, "a retry must not happen"]).await;
+    result.unwrap();
+    assert_eq!(
+        mock.chat_bodies().len(),
+        1,
+        "a plan the parser reads is not retried"
+    );
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    assert!(
+        plans[0].body.contains("T2: Run the backtest"),
+        "{}",
+        plans[0].body
+    );
+}
+
+#[tokio::test]
+async fn retry_plan_keeps_the_first_when_the_retry_has_fewer_tasks() {
+    let first = without_section(
+        &table_plan(
+            "First goal.",
+            SETTLED_ONE,
+            &[("T1", "Write the spec"), ("T2", "Run the backtest")],
+        ),
+        "## Settled",
+    );
+    let retry = table_plan("Retry goal.", SETTLED_ONE, &[("T1", "Write the spec")]);
+    let (dir, mock, result) = quick_plan(&[&first, &retry]).await;
+    result.unwrap();
+    assert_eq!(mock.chat_bodies().len(), 2);
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    assert!(
+        plans[0].body.contains("First goal.") && plans[0].body.contains("T2: Run the backtest"),
+        "{}",
+        plans[0].body
+    );
+}
+
+#[tokio::test]
+async fn retry_plan_tie_goes_to_the_retry() {
+    let first = without_section(PLANNER_ANSWER, "## Settled");
+    let retry = table_plan("Retry goal.", "- none", &[("T1", "Write the spec")]);
+    let (dir, mock, result) = quick_plan(&[&first, &retry]).await;
+    result.unwrap();
+    assert_eq!(mock.chat_bodies().len(), 2);
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    assert!(
+        plans[0].body.contains("Retry goal.")
+            && !plans[0].body.contains("Disprove the strategy cheaply"),
         "{}",
         plans[0].body
     );

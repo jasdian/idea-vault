@@ -17,7 +17,7 @@ pub enum Violation {
     NoFencedBlock,
     /// A sectioned answer lacked these `## ` headings (canonical spelling, in contract order).
     MissingSections(Vec<String>),
-    /// A build plan carried its headings but no goal or no task under `## Plan`.
+    /// A build plan carried its headings but the plan parser finds no task in it.
     NoUsablePlan,
 }
 
@@ -41,7 +41,7 @@ impl std::fmt::Display for Violation {
                 missing.join(", ")
             ),
             Violation::NoUsablePlan => f.write_str(
-                "the plan needs a goal sentence under `## Goal` and at least one task under `## Plan`",
+                "the plan needs at least one task under `## Plan`",
             ),
         }
     }
@@ -242,41 +242,6 @@ pub fn repair_build_plan(text: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
-/// The number of tasks a build-plan answer carries under `## Plan`, or 0 when it has no goal
-/// text — the measure of how usable an answer is. `- none` placeholders do not count.
-pub fn build_plan_tasks(raw: &str) -> usize {
-    let repaired = repair_build_plan(raw.trim());
-    let mut section = "";
-    let mut in_fence = false;
-    let mut goal = false;
-    let mut tasks = 0;
-    for line in repaired.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-        } else if !in_fence && line.starts_with("## ") {
-            section = line;
-            continue;
-        }
-        match section {
-            "## Goal" if !line.trim().is_empty() && !line.trim_start().starts_with('_') => {
-                goal = true;
-            }
-            "## Plan" if !in_fence && !line.starts_with([' ', '\t']) && is_list_item(line) => {
-                let body = line.trim().trim_start_matches(['-', '*', '+']).trim();
-                if !body.eq_ignore_ascii_case("none") {
-                    tasks += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    if goal {
-        tasks
-    } else {
-        0
-    }
-}
-
 /// Check `raw` against `contract`, returning the repaired answer (chatter stripped, shape
 /// normalized) or why it cannot be repaired. `BulletsOrEmpty` accepts an empty answer.
 pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation> {
@@ -327,8 +292,6 @@ pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation
                 .collect();
             if !missing.is_empty() {
                 Err(Violation::MissingSections(missing))
-            } else if build_plan_tasks(&plan) == 0 {
-                Err(Violation::NoUsablePlan)
             } else {
                 Ok(plan)
             }
@@ -601,24 +564,10 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_with_every_heading_but_no_task_or_goal_is_unusable() {
-        let no_task = "## Goal\nShip it.\n## Settled\n- a\n## Open questions\n- c\n## Plan\n- none";
-        assert_eq!(
-            validate(OutputContract::BuildPlan, no_task),
-            Err(Violation::NoUsablePlan)
-        );
-        let no_goal = "## Goal\n\n## Settled\n- a\n## Open questions\n- c\n## Plan\n- T1: x";
-        assert_eq!(
-            validate(OutputContract::BuildPlan, no_goal),
-            Err(Violation::NoUsablePlan)
-        );
-    }
-
-    #[test]
-    fn build_plan_tasks_counts_top_level_items_under_plan_only() {
-        let raw = "## Goal\nx\n## Settled\n- a\n## Plan\n- [ ] T1: a\n  accept: `x`\n2. T2: b\n```sh\n- not a task\n```\n## Kill criteria\n- k";
-        assert_eq!(build_plan_tasks(raw), 2);
-        assert_eq!(build_plan_tasks("prose only"), 0);
+    fn build_plan_required_sections_are_a_subset_of_the_canonical_ones() {
+        assert!(BUILD_PLAN_REQUIRED
+            .iter()
+            .all(|h| BUILD_PLAN_SECTIONS.contains(h)));
     }
 
     #[test]

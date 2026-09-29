@@ -14,6 +14,7 @@ use crate::ai::contract;
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::AgentRole;
+use crate::concepts::build_plan;
 use crate::concepts::build_plan::finish::{finish, Finished, PlanInputs};
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::ConceptError;
@@ -391,6 +392,13 @@ pub(crate) fn hydrate_context(
     ))
 }
 
+/// How usable a build-plan answer is, judged by the parser that later reads it: `None` when it
+/// does not parse or has no task, else (tasks, settled items). Higher is more usable.
+fn plan_score(answer: &str) -> Option<(usize, usize)> {
+    let plan = build_plan::plan::parse(answer).ok()?;
+    (!plan.tasks.is_empty()).then_some((plan.tasks.len(), plan.settled.len()))
+}
+
 /// One model call held to an output contract (docs/adr/0023): call, validate/repair, and on a
 /// violation ask exactly ONCE more — under the same permit — with the violation read back. If the
 /// retry still misses (or fails), the best answer is kept and a warning logged: a wrong-shaped
@@ -415,24 +423,27 @@ pub(crate) async fn ask_on_contract(
         .await
         .map_err(|_| ConceptError::SemaphoreClosed)?;
     let first = ask(prompt.clone()).await?;
+    let plan_contract = contract == OutputContract::BuildPlan;
+    let first_score = plan_contract.then(|| plan_score(&first));
     let violation = match contract::validate(contract, &first) {
+        Ok(_) if first_score == Some(None) => contract::Violation::NoUsablePlan,
         Ok(repaired) => return Ok(repaired),
         Err(violation) => violation,
     };
     progress(&format!("{label} · reshaping the answer"));
     tracing::info!(label, %violation, "contract violated; retrying once");
     let retried = ask(format!("{prompt}{}", contract::retry_note(&violation))).await;
-    let plan_first_wins = |second: &str| {
-        contract == OutputContract::BuildPlan
-            && contract::build_plan_tasks(&first) > contract::build_plan_tasks(second)
-    };
+    let first_wins = |second: &str| first_score.is_some_and(|f| f > plan_score(second));
     let outcome = retried.as_deref().map(|r| contract::validate(contract, r));
-    if let Ok(Ok(repaired)) = outcome {
-        return Ok(if plan_first_wins(&repaired) {
-            first.trim().to_string()
-        } else {
-            repaired
-        });
+    if let Ok(Ok(repaired)) = &outcome {
+        let usable = !plan_contract || plan_score(repaired).is_some();
+        if usable {
+            return Ok(if first_wins(repaired) {
+                first.trim().to_string()
+            } else {
+                repaired.clone()
+            });
+        }
     }
     tracing::warn!(
         label,
@@ -440,7 +451,7 @@ pub(crate) async fn ask_on_contract(
         "retry did not produce an on-contract answer; keeping the best one"
     );
     Ok(match retried {
-        Ok(second) if !second.trim().is_empty() && !plan_first_wins(&second) => {
+        Ok(second) if !second.trim().is_empty() && !first_wins(&second) => {
             second.trim().to_string()
         }
         _ => first.trim().to_string(),
