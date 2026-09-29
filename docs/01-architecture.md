@@ -137,17 +137,17 @@ sequenceDiagram
     Main->>Cfg: load config (vault dir, db path, Ollama URL, initial backend/temperature/effort, concurrency limit)
     Main->>Idx: open index.db (create if missing)
     Idx->>Vault: check drift (index vs vault/**)
-    alt index missing or drifted
+    alt index missing, drifted, or carries a different schema version
         Idx->>Vault: walk vault/** and rebuild (reindex, D15)
         Note over Idx,Vault: reindex invariant — rebuild from markdown only
     else index fresh
         Idx-->>Main: ready
     end
-    Main->>LLM: construct router (both backends; initial LlmSettings from config)
+    Main->>LLM: construct router (both backends, initial LlmSettings from config)
     Main->>LLM: health probe of the initially-active backend (non-blocking)
-    Note over Main,LLM: absence is a valid state (D20); do NOT block boot. The Settings\npage can change the active backend later — this only probes the initial one.
+    Note over Main,LLM: absence is a valid state (D20), do NOT block boot. The Settings\npage can change the active backend later — this only probes the initial one.
     Main->>Axum: build AppState, mount router, bind IDEA_VAULT_BIND
-    Note over Main,Axum: default 127.0.0.1:3000 for bare `cargo run`; 0.0.0.0:3000 in containers (D26)
+    Note over Main,Axum: default 127.0.0.1:3000 for bare `cargo run`, 0.0.0.0:3000 in containers (D26)
     Axum-->>Main: serving
 ```
 

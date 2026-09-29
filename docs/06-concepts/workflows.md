@@ -72,9 +72,9 @@ flowchart TD
     CHECK -->|no| UNK["UnknownSkill — fail fast, no model call"]
     CHECK -->|yes| NEXT{"next stage"}
 
-    NEXT -->|"FanOut(steps)"| FO["hydrate context = carried blocks + idea/memory/discussion (budget minus carried)<br/>bounded fan_out → results (failed agent → None)"]
+    NEXT -->|"FanOut(steps)"| FO["hydrate context = related block + carried blocks + idea/memory/discussion (budget minus carried; related block computed per stage against the remaining budget)<br/>bounded fan_out → results (failed agent → None)"]
     FO --> NEXT
-    NEXT -->|"Chain(step)"| CH["carry findings block if a fan-out ran<br/>persona + skill prompt → ask_on_contract (one retry max)"]
+    NEXT -->|"Chain(step)"| CH["related block + carried findings block if a fan-out ran<br/>persona + skill prompt → ask_on_contract (one retry max)"]
     CH --> LASTC{"last stage?"}
     LASTC -->|"no"| CARRY["carry '## Prior stage: skill' forward (a failed middle step is skipped)"] --> NEXT
     LASTC -->|"yes"| OUT["output = answer (a failure aborts the run)"]
@@ -96,6 +96,11 @@ flowchart TD
 - **Bounded fan-out:** the parallel stage runs under the same concurrency semaphore and context
   budget as any swarm ([D21](./swarm.md), [ADR-0006](../adr/0006-bounded-concurrency-swarm.md)).
   A chained step's single retry happens under the permit its first call holds.
+- **Related block:** every fan-out and chained stage prepends the related-ideas block to its
+  context, computed per stage against the budget that stage has left after carried blocks.
+  Audit, synthesis and knowledge extraction never receive the block: those call paths do not
+  take it as a parameter ([ADR-0027](../adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
+  A persisted turn may still quote a related idea.
 - **Failure handling:**
   - A failed fan-out agent drops to a null result the judge skips; the workflow degrades rather
     than aborting, mirroring the swarm failure model ([D14](./swarm.md)).

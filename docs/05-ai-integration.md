@@ -165,7 +165,7 @@ sequenceDiagram
         H->>Task: tokio::spawn (detached — outlives the request)
     end
     Task->>L: scoped_llm(slug) — per-turn clone with the idea's attached sources (ADR-0021)
-    Task->>Bud: assemble prompt (foil instruction + ≤1 KB skill book + body + memory + trimmed convo)
+    Task->>Bud: assemble prompt (foil instruction + ≤1 KB skill book + related block + body + memory + trimmed convo)
     Task->>L: acquire semaphore, then chat(prompt) [dispatches to the active backend]
     L-->>Task: reply (or AiError)
     alt success, non-empty reply
@@ -208,6 +208,14 @@ Key obligations:
   — every visible move, one "name — use when" line, capped at 1 KB and taken out of the context
   budget) so the foil can recommend a move by name
   ([ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)).
+
+- **The related block:** the prompt is `compose_prompt(book, related, own)`: the "Related ideas
+  elsewhere in the vault" block (`memory::related`, fed by the derived `edges`) sits before the
+  idea's own context. It is assembled after the own context and takes only the leftover budget,
+  `related_allowance` = min(leftover, min(max/10, 2048)) bytes (`RELATED_CAP_BYTES`), so the own
+  context is byte-identical with or without it and a full own context gets no block. Audit,
+  synthesis and knowledge extraction never receive it
+  ([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
 
 Skills (`POST /idea/:slug/skill/:name`) and swarm (`POST /idea/:slug/swarm`) use the identical
 claim → spawn → poll shape; see [06-concepts/skills](./06-concepts/skills.md) D18 and

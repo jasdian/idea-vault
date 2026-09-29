@@ -28,7 +28,7 @@
 
 | ID | Type | Depicts | Home |
 |----|------|---------|------|
-| **D6** | ER | SQLite index schema (ideas, tags, memory_facts, backlinks, search_fts) | [03-data-model](./03-data-model.md) |
+| **D6** | ER | SQLite index schema (ideas, tags, memory_facts, backlinks, search_fts, fact_links, edges) | [03-data-model](./03-data-model.md) |
 | **D7** | ER | Vault on-disk entity map (idea.md, conversation.md, memory/) | [03-data-model](./03-data-model.md) |
 | **D8** | Class | Frontmatter schema + IdeaState enum | [03-data-model](./03-data-model.md) |
 
@@ -63,7 +63,7 @@
 | **D20** | State machine | Ollama-unavailable degradation | [05-ai-integration](./05-ai-integration.md) |
 | **D21** | Sequence | Concurrency & context-budget model | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D22** | Activity | Slug lifecycle & collision handling | [03-data-model](./03-data-model.md) |
-| **D23** | Data-flow | `[[slug]]` backlink resolution | [06-concepts/memory](./06-concepts/memory.md) |
+| **D23** | Data-flow | `[[slug]]` backlink resolution and `[[idea#fact]]` → `fact_links` | [06-concepts/memory](./06-concepts/memory.md) |
 | **D24** | Taxonomy (flowchart) | Error/failure domains → user outcomes | [05-ai-integration](./05-ai-integration.md) |
 
 ### Deployment (containers)

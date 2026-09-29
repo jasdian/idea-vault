@@ -158,7 +158,11 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact, `ref` = the fact's frontmatter slug — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
 | Knowledge-extraction artifact (finding or synthesis) or quarantined store-time facts | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
-| `[[slug]]` links | inside bodies (idea/conversation/memory only — **not** mined from artifact bodies) | `backlinks` |
+| `[[slug]]` links | inside the idea body and memory facts only — **not** mined from conversation or artifact bodies | `backlinks` |
+| `[[idea#fact]]` refs (plus bare `[[x]]` / `links:` candidates inside a fact) | idea body and `memory/<fact>.md` | `fact_links` (`explicit = 1` for `[[idea#fact]]`; an explicit ref to another idea also adds a `backlinks` row for `idea`) |
+| Link edge | resolved `backlinks` + resolved cross-idea `fact_links` | `edges` (`type = 'link'`, weight 1.0) |
+| Tag edge | `idea.md` frontmatter `tags:` (exact names) | `edges` (`type = 'tag'`): a tag on `df` of `N` ideas weighs `0.3·ln(N/df)/ln(N)`, summed per pair, capped at 1.0 |
+| Lexical edge | title, tags, idea body and memory rows of `search_fts` | `edges` (`type = 'lexical'`): top 3 per idea, at least 2 shared terms after the idf-0 guard and the linked-pair slug-word guard, weight at most 0.19 |
 | Timestamps | frontmatter `created:`/`updated:` | `ideas.created_at`/`updated_at` |
 
 All strings funneled into `search_fts` are passed through a `sanitized()` helper (`index::reindex`)
@@ -260,6 +264,9 @@ erDiagram
     ideas ||--o{ backlinks : "source of"
     ideas ||--o{ backlinks : "target of"
     ideas ||--o{ search_fts : "indexed by"
+    ideas ||--o{ fact_links : "source of"
+    memory_facts ||--o{ fact_links : "source / target fact"
+    ideas ||--o{ edges : "joined by"
 
     ideas {
         integer id PK
@@ -290,6 +297,22 @@ erDiagram
         text target_slug
         integer target_idea_id FK "nullable if unresolved"
     }
+    fact_links {
+        integer id PK
+        integer src_idea_id FK
+        integer src_fact_id FK "nullable: ref from the idea body"
+        text dst_idea_slug
+        text dst_fact_slug
+        integer dst_fact_id FK "nullable if unresolved"
+        integer explicit "1 = [[idea#fact]], 0 = bare in-fact link"
+    }
+    edges {
+        integer src_idea_id PK, FK "CHECK src < dst"
+        integer dst_idea_id PK, FK
+        text type PK "link | tag | lexical"
+        real weight
+        text detail
+    }
     search_fts {
         integer idea_id
         text kind "title | tags | idea_body | conversation | memory | artifact"
@@ -299,7 +322,25 @@ erDiagram
 ```
 
 > `backlinks.target_idea_id` is nullable: a `[[slug]]` may point at an idea that doesn't exist yet.
-> Resolution happens during reindex ([D23](./06-concepts/memory.md)).
+> Resolution happens during reindex ([D23](./06-concepts/memory.md)). `fact_links.dst_fact_id` is
+> nullable for the same reason, but only an explicit `[[idea#fact]]` may stay dangling; an
+> unresolved bare candidate is dropped.
+
+**Schema stamp.** `schema::SCHEMA_VERSION` (currently **6**) is written into `PRAGMA user_version`
+by a completed reindex. An index stamped with another value was built by a different binary, so
+`reindex::check_drift` reports drift and `reindex` drops and recreates every derived table before
+rebuilding ([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)). The derived
+tables are never migrated. Any change to the DDL or to how a table is derived must bump the
+version.
+
+### Derived edges
+
+`edges` holds one canonical row per idea pair and type (`PRIMARY KEY (src_idea_id, dst_idea_id, type)`,
+`CHECK (src_idea_id < dst_idea_id)`, never a self-pair). The types are `link`, `tag` and `lexical`
+(weights in the traceability table above). Edges are rebuilt entirely by reindex from the markdown
+already on disk, with no model call, so deleting `index.db` and reindexing reproduces them
+([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)). `index::queries::related_ideas`
+reads them (up to two hops) for the related block and panel.
 
 ## D15 — Reindex: rebuild SQLite from markdown
 
@@ -320,18 +361,20 @@ sequenceDiagram
     alt walk empty AND index holds ideas AND not forced
         Reidx-->>Trig: Err(RefusingEmptyRebuild) — nothing deleted (ADR-0019)
     end
-    Reidx->>DB: BEGIN; drop/clear derived tables
+    Reidx->>DB: BEGIN, clear derived tables (drop + recreate if PRAGMA user_version != SCHEMA_VERSION)
     loop each idea dir
         Walk-->>Reidx: idea.md, conversation.md, memory/*.md, artifacts/*.md
         Reidx->>Parse: parse frontmatter + bodies
         Reidx->>DB: upsert ideas, tags, idea_tags
         Reidx->>DB: upsert memory_facts
         Reidx->>DB: insert search_fts (title, tags, body, conversation, memory facts, artifacts — kind-tagged, sanitized)
-        Reidx->>DB: insert backlinks ([[slug]] found in idea/conversation/memory only)
+        Reidx->>DB: insert backlinks + fact_links candidates ([[slug]] / [[idea#fact]] found in idea body and memory facts only)
     end
-    Reidx->>DB: resolve backlinks.target_idea_id by slug
+    Reidx->>DB: resolve backlinks.target_idea_id and fact_links.dst_fact_id by slug
+    Reidx->>DB: derive edges (link, tag, lexical) — no model call
+    Reidx->>DB: stamp PRAGMA user_version = SCHEMA_VERSION
     Reidx->>DB: COMMIT
-    Reidx-->>Trig: counts (ideas, facts, links) for verification
+    Reidx-->>Trig: counts (ideas, facts, links, fact_links) for verification
 ```
 
 **The empty-vault guard** ([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)). At this

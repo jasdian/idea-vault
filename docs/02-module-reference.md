@@ -25,7 +25,8 @@ flowchart TB
             D_FM["frontmatter.rs — parse/emit YAML (incl. parse_skill)"]
             D_SLUG["slug.rs — slug + collisions (D22)"]
             D_SKILL["skill.rs — SkillStage/SkillRole/OutputContract vocabulary (docs/adr/0022)"]
-            D_LINKS["links.rs — extract_links: pure [[slug]] extraction (D23)"]
+            D_LINKS["links.rs — extract_links / extract_fact_refs: pure [[slug]] and [[idea#fact]] extraction (D23)"]
+            D_TAG["tag.rs — near_duplicate: the tag near-duplicate (drift) predicate (ADR-0027)"]
             D_COMP["compacted.rs — Compacted: the compacted.md sidecar type (docs/adr/0012)"]
             D_NAME["name.rs — Name: validated registry name (mcp + sources keys), slug alphabet (ADR-0025)"]
         end
@@ -36,9 +37,9 @@ flowchart TB
         end
 
         subgraph index["index/ (SQLite = derived)"]
-            I_SCHEMA["schema.rs — DDL + FTS5 (D6)"]
-            I_QUERY["queries.rs — search, tags, backlinks"]
-            I_REIDX["reindex.rs — rebuild-from-disk (D15)"]
+            I_SCHEMA["schema.rs — DDL + FTS5 + SCHEMA_VERSION stamp (D6)"]
+            I_QUERY["queries.rs — search, tags, backlinks, related_ideas (edges), lexical baseline"]
+            I_REIDX["reindex.rs — rebuild-from-disk incl. fact_links + edges, drift check (D15)"]
         end
 
         subgraph ai["ai/ (LLM backend boundary)"]
@@ -60,6 +61,7 @@ flowchart TB
             M_EXTRACT["extract.rs — conv → facts on Store (D12)"]
             M_LOAD["load.rs — facts → context on Reopen (D13)"]
             M_BACK["backlinks.rs — [[slug]] resolve (D23)"]
+            M_REL["related.rs — related-ideas block + shared related_entries builder (reads index; index never reads memory; ADR-0027)"]
             M_COMPACT["compact.rs — auto-compact: fold the conversation head into compacted.md,\neffective_window for the load path (docs/adr/0012)"]
         end
 

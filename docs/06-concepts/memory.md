@@ -175,15 +175,35 @@ not at write time, so forward references (to not-yet-created ideas) are allowed.
 
 ```mermaid
 flowchart TD
-    A["reindex walks vault/**"] --> B["scan bodies + memory/*.md for [[slug]]"]
-    B --> C["insert backlinks(source_idea_id, target_slug)"]
+    A["reindex walks vault/**"] --> B["scan idea body + memory/*.md for [[slug]] and [[idea#fact]]"]
+    B --> C["insert backlinks(source_idea_id, target_slug)<br/>+ fact_links candidates"]
     C --> D{"target slug exists in ideas?"}
     D -- yes --> E["set target_idea_id"]
     D -- no --> F["leave target_idea_id NULL (unresolved)"]
     E --> G["backlinks queryable both directions"]
     F --> G
     G --> H["later reindex re-resolves once target created"]
+    C --> I{"fact_links: dst fact exists?"}
+    I -- yes --> J["set dst_fact_id"]
+    I -- "no, explicit [[idea#fact]]" --> K["keep row, dst_fact_id NULL (dangling)"]
+    I -- "no, bare candidate" --> L["drop row (it named an idea, not a fact)"]
 ```
+
+Link rules, as `index::reindex` applies them (parsing is `domain::links`):
+
+- **Syntax.** `[[slug]]` targets an idea. `[[idea#fact]]` targets one memory fact inside an idea:
+  exactly one `#`, and both halves must be canonical slugs, otherwise the token is prose. The two
+  forms are disjoint in `domain::links`. Conversation and artifact bodies are never mined.
+- **Bare `[[token]]` inside a fact** (and a fact's frontmatter `links:` entry) is a candidate for
+  both readings: an idea backlink to `token`, and a `fact_links` candidate for a sibling fact
+  `token` in the same idea. A candidate that resolves to no fact is dropped from `fact_links`;
+  the `backlinks` row stays.
+- **`[[idea#fact]]`** in the idea body or a fact body always keeps its `fact_links` row
+  (`explicit = 1`), resolved or dangling, and also adds an idea backlink to `idea`.
+- **Self-refs are excluded.** A fact never links to itself, and a `[[idea#fact]]` into the
+  fact's own idea adds no backlink. Edges never pair an idea with itself.
+- Resolved backlinks and cross-idea `fact_links` become `link` edges of weight 1.0
+  ([D6](../03-data-model.md)), the strongest cross-idea signal for the related block.
 
 ## Mapping to code
 
@@ -192,7 +212,8 @@ flowchart TD
 | Extraction on Store (D12) | `memory::extract` |
 | Reload on Reopen (D13) | `memory::load` |
 | Rolling summary of the head (D13, ADR-0012) | `memory::compact` + `vault::store::read_compacted` |
-| Backlink parse/resolve (D23) | `memory::backlinks` + `index::reindex` |
+| Backlink parse/resolve (D23) | `memory::backlinks` + `index::reindex` (pure parsing in `domain::links`) |
+| Related-ideas block (chat, skills, swarm, workflows) | `memory::related` |
 | Fact type | `domain::memory::MemoryFact` |
 | On-disk shape | [03-data-model](../03-data-model.md) D7/D8 |
 

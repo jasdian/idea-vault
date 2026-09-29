@@ -214,7 +214,8 @@ Compile-time templates under `templates/`, backed by `web::templates` structs.
 templates/
   base.html              # layout: head, vendored htmx.min.js, nav, {% block content %}
   list.html              # extends base — idea list + search box
-  idea.html              # extends base — one idea: body (rendered md), conversation, memory panel
+  idea.html              # extends base — one idea: body (rendered md), conversation, memory panel,
+                         #   and the related panel (related_html, pre-rendered from _related.html)
   history.html            # extends base — the "btw" read-only full thread + Fork control
   settings.html           # extends base — live LLM backend + params page
   _idea_row.html         # partial — a single idea in the list
@@ -230,6 +231,11 @@ templates/
                           #   the R9b poll once a store job (R4) lands truth as Stored, via
                           #   HX-Retarget #discussion (respond_discussion_or_stored)
   _search_results.html   # partial — FTS results
+  _related.html          # partial — the #related panel: related ideas (title, hop label, reasons,
+                         #   latest fact titles) from memory::related::related_entries, then "Tag
+                         #   drift" near-duplicate tag pairs (domain::tag::near_duplicate; at most 5
+                         #   notes, 5 carrier slugs each, never merged), or an "unavailable" note
+                         #   when the index or its lock fails (web::templates::RelatedPanel)
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
   _settings.html          # partial — the settings form (re-rendered after a save)
   artifact.html           # extends base — one .md artifact rendered as a full page (R19)

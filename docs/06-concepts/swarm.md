@@ -59,24 +59,24 @@ sequenceDiagram
         D->>S: acquire
         S-->>W: slot
         W->>L: run agent role prompt
-        L-->>W: AgentResult (lens kept; answer repaired to the skill's contract)
+        L-->>W: AgentResult (lens kept, answer repaired to the skill's contract)
         W->>S: release
     and queued tasks wait for a slot
         Note over S,W: N-K tasks queue (backpressure, D21)
     end
     W-->>Jg: all AgentResults
-    Jg->>Jg: drop failed/empty; split into findings; interleave lenses; merge near-duplicates (≤20)
+    Jg->>Jg: drop failed/empty, split into findings, interleave lenses, merge near-duplicates (≤20)
     opt audit toggle on (default)
         Jg-->>A: numbered findings only (no critic framing) + idea/memory/discussion
         A->>L: one Auditor call [own permit]
         L-->>A: F1: CONFIRMED|UNCERTAIN|REFUTED — reason …
-        A->>A: parse; missing → UNCERTAIN; garbled → all UNCERTAIN ("unverified")
+        A->>A: parse, missing → UNCERTAIN, garbled → all UNCERTAIN ("unverified")
     end
     Jg-->>Y: idea statement + findings (lens · role [verdict])
     Y->>L: synthesize into one position
     L-->>Y: converged result
     Y-->>J: result + audit tally + "Disproven objections" — one turn "## assistant (swarm: angles)", only if non-empty
-    J-->>U: mark_done; next poll returns the finished transcript
+    J-->>U: mark_done, next poll returns the finished transcript
     Note over W,Jg: a failed agent → null result, skipped by judge (degrade, don't abort)
 ```
 
@@ -167,7 +167,7 @@ sequenceDiagram
         Note over S,W: N-K tasks queue (backpressure, D21)
     end
     W-->>Jg: all AgentResults
-    Jg->>Jg: drop failed/empty; split + dedupe findings
+    Jg->>Jg: drop failed/empty, split + dedupe findings
     alt every lens failed or empty
         Jg-->>K: empty shortlist
         K-->>J: NothingToSynthesize — zero writes
@@ -185,7 +185,7 @@ sequenceDiagram
         end
         K-->>J: KnowledgeOutcome (findings, optional synthesis_slug, run_stamp)
     end
-    J-->>U: mark_done; next poll returns the finished transcript
+    J-->>U: mark_done, next poll returns the finished transcript
     Note over U,J: optional html=true — after this returns, the job renders and writes a<br/>standalone artifacts/<stamp>-report.html export (derived, unindexed)
 ```
 
@@ -206,13 +206,13 @@ sequenceDiagram
     loop for each task
         D->>Sem: acquire (blocks if K in flight)
         Sem-->>D: permit
-        D->>Bud: build prompt ≤ budget (body + top memory + trimmed convo)
+        D->>Bud: build prompt ≤ budget (one shared related block + body + top memory + trimmed convo)
         Bud-->>D: budgeted prompt
         D->>L: call (counts toward the K in flight)
         L-->>D: result
         D->>Sem: release (wakes a queued task)
     end
-    Note over D,L: steady state = K concurrent calls to the active backend; rest queued (bounded latency)
+    Note over D,L: steady state = K concurrent calls to the active backend, rest queued (bounded latency)
 ```
 
 Budget composition per agent (priority order when trimming to fit):
@@ -220,6 +220,12 @@ Budget composition per agent (priority order when trimming to fit):
 1. the idea's current best statement (`idea.md` body) — always included;
 2. top memory facts (`MEMORY.md` + selected `memory/*.md`);
 3. the most recent conversation turns (trimmed from the oldest).
+
+One related-ideas block (`memory::related`) is computed per fan-out, sized by
+`ai::budget::related_allowance` from what the shared own context leaves, and shared by every agent.
+Audit, synthesis and knowledge extraction never receive the block: those call paths do not
+take it as a parameter ([ADR-0027](../adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
+A persisted turn may still quote a related idea.
 
 Both the semaphore limit `K` and each agent's context budget are live values, not fixed constants:
 `K` is `IDEA_VAULT_AI_CONCURRENCY` ([ADR-0006](../adr/0006-bounded-concurrency-swarm.md)), and the

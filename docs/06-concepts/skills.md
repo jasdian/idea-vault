@@ -47,12 +47,17 @@ Skills are:
 
 - **Composable** — a [workflow](./workflows.md) chains and fans out skills; a [swarm](./swarm.md)
   assigns a different skill to each agent (diverse lenses), each running under its skill's `role`.
-- **Budget-aware** — the `{context}` slot is filled by `ai::budget` ([D21](./swarm.md)), not the raw
+- **Budget-aware** — the `{context}` slot is the related-ideas block (`memory::related`, sized by
+  `ai::budget::related_allowance` from what the own context leaves) followed by the idea's own
+  context, filled by `ai::budget` ([D21](./swarm.md)), not the raw
   full history.
 - **Shape-checked** — the answer is validated against the skill's `contract`
   (`ai::contract::validate`). Preamble and sign-off are stripped. A single interactive call that
   still violates its contract is retried **once**, with the violation read back to the model.
   `build-prompt` persists only its fenced block ([ADR-0023](../adr/0023-verification-layer.md)).
+- **Related-block exclusion** — Audit, synthesis and knowledge extraction never receive the block: those call paths do not
+  take it as a parameter ([ADR-0027](../adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
+  A persisted turn may still quote a related idea.
 - **Stateless** — applying a skill appends its output as an assistant turn
   (`## assistant (skill: <name>)`); it does not itself change idea state.
 
@@ -122,7 +127,7 @@ sequenceDiagram
 
     U->>J: POST /idea/:slug/skill/:name — claim job, return indicator immediately
     J->>Reg: snapshot().get(name) → invoke(skill, idea)
-    Reg->>Bud: fill {context} (idea body + memory + recent turns, under budget)
+    Reg->>Bud: fill {context} (related block + idea body + memory + recent turns, under budget)
     Bud-->>Reg: hydrated prompt
     Reg->>L: chat(prompt) [one semaphore permit, active backend]
     L-->>Reg: answer
@@ -133,7 +138,7 @@ sequenceDiagram
     end
     Reg->>V: append result as assistant turn to conversation.md (only if non-empty)
     Reg-->>J: skill output
-    J-->>U: mark_done; next poll returns the finished transcript
+    J-->>U: mark_done, next poll returns the finished transcript
 ```
 
 ## Registry & discovery
