@@ -608,6 +608,8 @@ async fn empty_harvest_run(audit: bool) -> (Vec<String>, String) {
     )
 }
 
+const SKIP_NOTE: &str = "nothing harvested — audit skipped";
+
 #[tokio::test]
 async fn an_empty_harvest_skips_the_audit_call() {
     let (bodies, _) = empty_harvest_run(true).await;
@@ -616,6 +618,10 @@ async fn an_empty_harvest_skips_the_audit_call() {
         "no auditor request expected"
     );
     assert_eq!(bodies.len(), 6, "5 harvesters + the build-prompt step");
+    assert!(
+        bodies.last().unwrap().contains(SKIP_NOTE),
+        "the build-prompt step sees the carried skip note"
+    );
 }
 
 #[tokio::test]
@@ -624,18 +630,25 @@ async fn an_empty_harvest_behaves_the_same_with_the_audit_on_or_off() {
     let (off_bodies, off_convo) = empty_harvest_run(false).await;
     assert_eq!(on_bodies.len(), off_bodies.len());
     assert_eq!(on_convo, off_convo);
+    assert!(
+        !off_bodies.iter().any(|b| b.contains(SKIP_NOTE)),
+        "the audit-off run carries no skip note"
+    );
+}
 
-    let tmp = tempfile::tempdir().unwrap();
-    seed_idea(tmp.path(), "i");
-    let mock = spawn(&["llama3.2"], ChatScript::EofAfter(vec![])).await;
-    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
-    let semaphore = Arc::new(Semaphore::new(2));
-    let registry = SkillRegistry::builtin();
+#[tokio::test]
+async fn an_empty_interrogate_fan_out_fails_in_synthesize_without_an_audit_call() {
     for audit in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_idea(tmp.path(), "i");
+        let mock = spawn_sequence(&["llama3.2"], vec![tokens(""); 4]).await;
+        let client =
+            LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+        let semaphore = Arc::new(Semaphore::new(2));
         let err = run_workflow(
             &client,
             &semaphore,
-            &registry,
+            &SkillRegistry::builtin(),
             tmp.path(),
             "i",
             "interrogate",
@@ -647,5 +660,11 @@ async fn an_empty_harvest_behaves_the_same_with_the_audit_on_or_off() {
         .await
         .unwrap_err();
         assert!(matches!(err, ConceptError::NothingToSynthesize));
+        let bodies = mock.chat_bodies();
+        assert_eq!(bodies.len(), 4, "fan-out only, audit={audit}");
+        assert!(
+            !bodies.iter().any(|b| b.contains("You are the Auditor")),
+            "no auditor request, audit={audit}"
+        );
     }
 }

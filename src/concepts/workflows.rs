@@ -341,13 +341,14 @@ pub async fn run_workflow(
                 if findings.is_none() {
                     match gather(&step_results) {
                         Ok(f) => findings = Some(f),
-                        Err(_) => {
+                        Err(ConceptError::NothingToSynthesize) => {
                             note("nothing harvested — audit skipped");
                             carried.push(
                                 "## Prior stage: audit\nnothing harvested — audit skipped".into(),
                             );
                             continue;
                         }
+                        Err(e) => return Err(e),
                     }
                 }
                 let f = findings.as_deref().unwrap_or_default();
