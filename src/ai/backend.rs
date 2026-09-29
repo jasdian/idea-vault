@@ -196,6 +196,13 @@ impl LlmBackend {
         scoped
     }
 
+    /// A bounded, read-only probe over this turn's attached sources (docs/adr/0029), used by the
+    /// build-plan gates to check anchors and tokens without a model call. Empty on an unscoped
+    /// backend, so every check reports `Unverified`.
+    pub fn source_probe(&self) -> crate::ai::sources::SourceProbe {
+        crate::ai::sources::SourceProbe::new(&self.turn_sources)
+    }
+
     /// A scoped view that calls as agent role `role` (docs/adr/0026): same settings, caches and
     /// registries, with that role's [`RoleProfile`] overlaid per call while role tuning is on.
     pub fn for_role(&self, role: &str) -> Self {
@@ -1104,6 +1111,16 @@ mod tests {
             name: Name::try_from("rf-docs").unwrap(),
             root: std::path::PathBuf::from("/mnt/sources/rf-docs"),
         }]
+    }
+
+    #[test]
+    fn source_probe_follows_the_turn_scope() {
+        let shared = test_backend();
+        assert!(shared.source_probe().is_empty());
+        assert!(!shared
+            .with_turn_sources(turn_sources_fixture())
+            .source_probe()
+            .is_empty());
     }
 
     #[test]

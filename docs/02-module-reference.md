@@ -52,7 +52,7 @@ flowchart TB
             A_WEB["web.rs — keyless web_search/fetch_url + tool defs (ADR-0017)"]
             A_MCP["mcp.rs — MCP Streamable-HTTP wire client (init/session/tools-list/tools-call, ADR-0018)"]
             A_CONTRACT["contract.rs — pure output-contract validate/repair/items/trim_sections (ADR-0023)"]
-            A_SRC["sources.rs — deterministic source_list/source_grep/source_read tool leaves (ADR-0021)"]
+            A_SRC["sources.rs — deterministic source_list/source_grep/source_read tool leaves (ADR-0021)\n+ SourceProbe: bounded anchor/token checks for the build-plan gates (ADR-0029)"]
         end
 
         MCP["mcp.rs — owner-global MCP server registry: McpServerConfig, McpRegistry\npersisted .mcp-servers.json (ADR-0018)"]

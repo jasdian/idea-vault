@@ -64,6 +64,15 @@ Submodules:
   `ai::web::execute_tool`: an escape attempt or a missing file comes back as readable text. Output is
   bounded (`MAX_LIST_ENTRIES` 200 entries, `MAX_GREP_FILES` 2,000 files scanned, `MAX_GREP_MATCHES`
   40 lines, `READ_MAX_CHARS` 12,000 characters) and deterministic (sorted walks, hidden trees skipped).
+  The same module owns `SourceProbe`, which `LlmBackend::source_probe()` builds over a turn's
+  attached sources for the build-plan gates ([ADR-0029](./adr/0029-gated-build-plan.md)). It makes
+  no model call. `check_anchor` reports whether a cited `path:first-last` plus symbol is `Resolved`,
+  `Moved`, `SymbolMissing`, `NoFile`, `Ambiguous` or `Unverified`. `find_tokens` returns a
+  `TokenScan` whose `complete` flag is false when the walk hit a cap. It walks once per probe with
+  the same containment and pruning, within `MAX_GREP_FILES` files, `MAX_SCAN_FILE_BYTES` per file
+  and `PROBE_MAX_TOTAL_BYTES` (20 MiB) in all. A capped walk, a hidden path, or an unreadable or
+  oversized file yields `Unverified` (and an incomplete `TokenScan`), never a miss. Symbols match case-sensitively on identifier boundaries. The probe is
+  blocking I/O, so callers run it in `spawn_blocking`.
 - `ai::contract` — pure output-contract checks for skill answers (`validate`, the repair that strips
   chatter, `retry_note`, `items`, `trim_sections`; [ADR-0023](./adr/0023-verification-layer.md)).
   The evaluator-optimizer loop lives with the callers.

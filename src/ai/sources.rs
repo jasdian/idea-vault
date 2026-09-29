@@ -15,6 +15,7 @@
 //! - **Deterministic.** Directory walks are `sort_by_file_name`-ordered and hidden trees are
 //!   skipped, so the same query over the same tree always returns the same text.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -292,28 +293,15 @@ fn is_hidden(name: &std::ffi::OsStr) -> bool {
 fn grep_source(root: &Path, query: &str, source: &str) -> String {
     let needle = query.to_lowercase();
     let mut matches: Vec<String> = Vec::new();
-    let mut files_scanned = 0usize;
     let mut stopped: Option<String> = None;
 
-    let walker = WalkDir::new(root)
-        .follow_links(false)
-        .sort_by_file_name()
-        .into_iter()
-        // depth 0 is the root itself — exempt it, its own name may legitimately start with '.'.
-        .filter_entry(|e| e.depth() == 0 || !is_hidden(e.file_name()));
-    'files: for entry in walker {
-        // An unreadable subtree is skipped, not fatal — grep stays best-effort content.
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_file() {
-            continue;
-        }
+    'files: for (files_scanned, entry) in source_files(root).enumerate() {
         if files_scanned == MAX_GREP_FILES {
             stopped = Some(format!(
                 "…(scanned {MAX_GREP_FILES} files, stopped — narrow with source_list first)"
             ));
             break;
         }
-        files_scanned += 1;
         // Oversized files are assets, not reference text — skip without reading.
         if entry
             .metadata()
@@ -481,6 +469,262 @@ fn truncate_chars(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((idx, _)) => format!("{}…", &s[..idx]),
         None => s.to_string(),
+    }
+}
+
+/// Most bytes one [`SourceProbe`] walk reads across all attached sources before it stops.
+pub const PROBE_MAX_TOTAL_BYTES: u64 = 20 * 1_048_576;
+
+/// What a [`SourceProbe`] found for a `path:line` anchor paired with a symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnchorCheck {
+    /// The symbol is on the cited lines of the one file the path resolves to.
+    Resolved { source: String, path: String },
+    /// The file exists but the symbol sits on another line (the first one it occurs on).
+    Moved {
+        source: String,
+        path: String,
+        line: usize,
+    },
+    /// The file exists but never mentions the symbol.
+    SymbolMissing { source: String, path: String },
+    /// No attached source has a file at (or uniquely ending in) this path, and the walk was
+    /// complete.
+    NoFile,
+    /// The path suffix-matches more than one file; the candidates, as `source:path`.
+    Ambiguous(Vec<String>),
+    /// Nothing could be settled: no source is attached, the symbol is empty, the file is not
+    /// bounded text (binary, oversized, unreadable), or the walk hit its cap before the path was
+    /// found or shown unique.
+    Unverified,
+}
+
+/// Which tokens a [`SourceProbe`] found; `complete` is false when the walk hit its cap or passed
+/// an oversized file it never reads, so a token outside `found` is unknown rather than absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenScan {
+    pub found: BTreeSet<String>,
+    pub complete: bool,
+}
+
+/// Every text-candidate file under `root`: hidden names pruned (the root itself exempt), symlinks
+/// never followed, sorted walk order. Shared by `source_grep` and [`SourceProbe`].
+fn source_files(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    WalkDir::new(root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        // depth 0 is the root itself — exempt it, its own name may legitimately start with '.'.
+        .filter_entry(|e| e.depth() == 0 || !is_hidden(e.file_name()))
+        // An unreadable subtree is skipped, not fatal.
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+}
+
+/// True when `needle` occurs in `hay` with no identifier character glued to either end, so `id`
+/// does not match inside `idea`. An edge of `needle` that is itself punctuation needs no boundary.
+fn contains_word(hay: &str, needle: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let (Some(head), Some(tail)) = (needle.chars().next(), needle.chars().last()) else {
+        return false;
+    };
+    hay.match_indices(needle).any(|(at, _)| {
+        let before = hay[..at].chars().next_back();
+        let after = hay[at + needle.len()..].chars().next();
+        let glued_before = ident(head) && before.is_some_and(ident);
+        let glued_after = ident(tail) && after.is_some_and(ident);
+        !glued_before && !glued_after
+    })
+}
+
+/// The files one probe walk visited, and whether the walk stopped at a cap.
+#[derive(Debug, Clone, Default)]
+struct Walk {
+    files: Vec<(String, String, PathBuf)>,
+    truncated: bool,
+    /// A file over [`MAX_SCAN_FILE_BYTES`] was listed but will never be read.
+    oversized: bool,
+}
+
+/// A read-only, bounded view over the reference sources attached to one idea (ADR-0021), used
+/// by the build-plan gates (docs/adr/0029) to check that a cited file and symbol exist. It never
+/// runs a command and never leaves a source root: exact paths go through [`resolve_rel`], suffix
+/// matches come from the same hidden-pruned, symlink-free walk as `source_grep` (done once per
+/// probe, capped at [`MAX_GREP_FILES`] files and [`PROBE_MAX_TOTAL_BYTES`]), and no file larger
+/// than [`MAX_SCAN_FILE_BYTES`] is read. Symbols and tokens match case-sensitively on identifier
+/// boundaries. Every method is blocking file I/O — call it from `spawn_blocking`.
+#[derive(Debug, Clone, Default)]
+pub struct SourceProbe {
+    roots: Vec<(String, PathBuf)>,
+    max_files: usize,
+    walk: std::sync::OnceLock<Walk>,
+}
+
+impl SourceProbe {
+    /// A probe over the given resolved sources (their roots are canonical by invariant).
+    pub fn new(sources: &[ResolvedSource]) -> Self {
+        SourceProbe {
+            roots: sources
+                .iter()
+                .map(|s| (s.name.to_string(), s.root.clone()))
+                .collect(),
+            max_files: MAX_GREP_FILES,
+            walk: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// True when no source is attached — every check then reports [`AnchorCheck::Unverified`].
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    /// Every text-candidate file under every root, as (source, root-relative path, absolute
+    /// path), within the probe's caps — walked on first use and reused after.
+    fn walk(&self) -> &Walk {
+        self.walk.get_or_init(|| {
+            let mut walk = Walk::default();
+            let mut bytes = 0u64;
+            for (name, root) in &self.roots {
+                for entry in source_files(root) {
+                    let len = entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+                    // An oversized file stays listed (a matching anchor is then Unverified,
+                    // not NoFile) but costs none of the byte budget, since it is never read.
+                    let oversized = len > MAX_SCAN_FILE_BYTES;
+                    let cost = if oversized { 0 } else { len };
+                    if walk.files.len() == self.max_files || bytes + cost > PROBE_MAX_TOTAL_BYTES {
+                        walk.truncated = true;
+                        return walk;
+                    }
+                    bytes += cost;
+                    walk.oversized |= oversized;
+                    let rel = entry
+                        .path()
+                        .strip_prefix(root)
+                        .unwrap_or(entry.path())
+                        .to_string_lossy()
+                        .into_owned();
+                    walk.files
+                        .push((name.clone(), rel, entry.path().to_path_buf()));
+                }
+            }
+            walk
+        })
+    }
+
+    /// The file's text, or `None` when it is larger than [`MAX_SCAN_FILE_BYTES`] (checked
+    /// while reading, so a file growing mid-read stays bounded), binary, or unreadable.
+    fn read_text(path: &Path) -> Option<String> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(MAX_SCAN_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= MAX_SCAN_FILE_BYTES && !looks_binary(&bytes))
+            .then(|| String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Check that `path` (root-relative, or a unique path suffix) names a file whose lines
+    /// `first..=last` (1-based; a reversed range is read in order, line 0 as line 1) contain
+    /// `symbol`. A path with a hidden component is never opened and reports `Unverified`.
+    pub fn check_anchor(&self, path: &str, first: usize, last: usize, symbol: &str) -> AnchorCheck {
+        if self.roots.is_empty() || symbol.trim().is_empty() {
+            return AnchorCheck::Unverified;
+        }
+        let path = path.trim().trim_start_matches("./");
+        if Path::new(path)
+            .components()
+            .any(|c| matches!(c, Component::Normal(n) if is_hidden(n)))
+        {
+            return AnchorCheck::Unverified;
+        }
+        let exact: Vec<(String, String, PathBuf)> = self
+            .roots
+            .iter()
+            .filter_map(|(name, root)| {
+                let abs = resolve_rel(root, path).ok()?;
+                let rel = abs.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+                abs.is_file().then(|| (name.clone(), rel, abs))
+            })
+            .collect();
+        let (hits, truncated) = if exact.is_empty() {
+            let suffix = format!("/{path}");
+            let walk = self.walk();
+            let hits: Vec<_> = walk
+                .files
+                .iter()
+                .filter(|(_, rel, _)| rel.ends_with(&suffix))
+                .cloned()
+                .collect();
+            (hits, walk.truncated)
+        } else {
+            (exact, false)
+        };
+        match hits.as_slice() {
+            [] | [_] if truncated => AnchorCheck::Unverified,
+            [] => AnchorCheck::NoFile,
+            [(source, rel, abs)] => {
+                let Some(text) = Self::read_text(abs) else {
+                    return AnchorCheck::Unverified;
+                };
+                let lines: Vec<&str> = text.lines().collect();
+                let (lo, hi) = (first.min(last).max(1), first.max(last).max(1));
+                let cited = lines
+                    .get(lo - 1..hi.min(lines.len()))
+                    .is_some_and(|span| span.iter().any(|l| contains_word(l, symbol)));
+                let (source, path) = (source.clone(), rel.clone());
+                if cited {
+                    AnchorCheck::Resolved { source, path }
+                } else if let Some(i) = lines.iter().position(|l| contains_word(l, symbol)) {
+                    AnchorCheck::Moved {
+                        source,
+                        path,
+                        line: i + 1,
+                    }
+                } else {
+                    AnchorCheck::SymbolMissing { source, path }
+                }
+            }
+            many => AnchorCheck::Ambiguous(
+                many.iter()
+                    .map(|(source, rel, _)| format!("{source}:{rel}"))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Which of `tokens` occur in any attached source file, over the probe's one bounded walk.
+    /// Blank tokens are ignored. With no source attached nothing is found and the scan is
+    /// incomplete.
+    pub fn find_tokens(&self, tokens: &[String]) -> TokenScan {
+        let wanted: BTreeSet<&str> = tokens
+            .iter()
+            .map(|t| t.as_str())
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+        if self.roots.is_empty() {
+            return TokenScan::default();
+        }
+        let mut found = BTreeSet::new();
+        let walk = self.walk();
+        for (_, _, abs) in &walk.files {
+            if found.len() == wanted.len() {
+                break;
+            }
+            let Some(text) = Self::read_text(abs) else {
+                continue;
+            };
+            for token in &wanted {
+                if !found.contains(*token) && contains_word(&text, token) {
+                    found.insert(token.to_string());
+                }
+            }
+        }
+        TokenScan {
+            complete: !(walk.truncated || walk.oversized) || found.len() == wanted.len(),
+            found,
+        }
     }
 }
 
@@ -769,5 +1013,283 @@ mod tests {
                 "every tool constrains `source` to the attached names (DRT)"
             );
         }
+    }
+
+    fn code_root() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize tempdir");
+        std::fs::create_dir_all(root.join("risk/src")).unwrap();
+        std::fs::write(
+            root.join("risk/src/calculator.rs"),
+            "use x;\n\npub fn calculate_regime_factor() {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::write(root.join("a/mod.rs"), "fn one() {}\n").unwrap();
+        std::fs::write(root.join("b/mod.rs"), "fn two() {}\n").unwrap();
+        (dir, root)
+    }
+
+    fn at(path: &str) -> (String, String) {
+        ("notes".to_string(), path.to_string())
+    }
+
+    fn resolved(path: &str) -> AnchorCheck {
+        let (source, path) = at(path);
+        AnchorCheck::Resolved { source, path }
+    }
+
+    #[test]
+    fn probe_reports_resolved_moved_missing_anchors() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let path = "risk/src/calculator.rs";
+        assert_eq!(
+            probe.check_anchor(path, 3, 3, "calculate_regime_factor"),
+            resolved(path)
+        );
+        let (source, p) = at(path);
+        assert_eq!(
+            probe.check_anchor(path, 1, 2, "calculate_regime_factor"),
+            AnchorCheck::Moved {
+                source: source.clone(),
+                path: p.clone(),
+                line: 3
+            }
+        );
+        assert_eq!(
+            probe.check_anchor(path, 1, 3, "load_context"),
+            AnchorCheck::SymbolMissing { source, path: p }
+        );
+        assert_eq!(
+            probe.check_anchor("risk/src/budget.rs", 1, 1, "x"),
+            AnchorCheck::NoFile
+        );
+    }
+
+    #[test]
+    fn probe_line_range_edges() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let path = "risk/src/calculator.rs";
+        let sym = "calculate_regime_factor";
+        assert_eq!(
+            probe.check_anchor(path, 2, 3, sym),
+            resolved(path),
+            "last cited line"
+        );
+        assert_eq!(
+            probe.check_anchor(path, 2, 1, "x"),
+            resolved(path),
+            "reversed range"
+        );
+        assert_eq!(
+            probe.check_anchor(path, 0, 3, sym),
+            resolved(path),
+            "line 0 reads as 1"
+        );
+        assert_eq!(
+            probe.check_anchor(path, 3, 99, sym),
+            resolved(path),
+            "past the end"
+        );
+        assert_eq!(
+            probe.check_anchor(path, 1, usize::MAX, sym),
+            resolved(path),
+            "a huge line number never overflows"
+        );
+        assert!(matches!(
+            probe.check_anchor(path, 50, 60, sym),
+            AnchorCheck::Moved { line: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn probe_matches_on_identifier_boundaries() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let path = "risk/src/calculator.rs";
+        assert!(matches!(
+            probe.check_anchor(path, 3, 3, "regime"),
+            AnchorCheck::SymbolMissing { .. }
+        ));
+        assert_eq!(probe.check_anchor(path, 3, 3, ""), AnchorCheck::Unverified);
+        assert_eq!(
+            probe.check_anchor(path, 3, 3, "fn calculate_regime_factor()"),
+            resolved(path)
+        );
+        let scan = probe.find_tokens(&["one".into(), "on".into(), " ".into()]);
+        assert_eq!(scan.found.into_iter().collect::<Vec<_>>(), ["one"]);
+        assert!(scan.complete);
+    }
+
+    #[test]
+    fn probe_suffix_matches_only_a_unique_path() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        assert_eq!(
+            probe.check_anchor("src/calculator.rs", 3, 3, "calculate_regime_factor"),
+            resolved("risk/src/calculator.rs")
+        );
+        assert_eq!(
+            probe.check_anchor("mod.rs", 1, 1, "fn"),
+            AnchorCheck::Ambiguous(vec!["notes:a/mod.rs".into(), "notes:b/mod.rs".into()])
+        );
+    }
+
+    #[test]
+    fn probe_reports_the_opened_path() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        assert_eq!(
+            probe.check_anchor("risk//src/calculator.rs", 3, 3, "calculate_regime_factor"),
+            resolved("risk/src/calculator.rs")
+        );
+    }
+
+    #[test]
+    fn probe_leaves_hidden_paths_unverified() {
+        let (_dir, root) = fixture_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        assert_eq!(
+            probe.check_anchor(".hidden/secret.md", 1, 1, "needle"),
+            AnchorCheck::Unverified,
+            "refusing to look is not a miss"
+        );
+    }
+
+    #[test]
+    fn probe_leaves_unreadable_files_unverified() {
+        let (_dir, root) = fixture_root();
+        std::fs::write(
+            root.join("big.log"),
+            vec![b'a'; MAX_SCAN_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sub/huge.log"),
+            [
+                b"large_only_token ".as_slice(),
+                &vec![b'a'; MAX_SCAN_FILE_BYTES as usize],
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let probe = SourceProbe::new(&[source(&root)]);
+        assert_eq!(
+            probe.check_anchor("huge.log", 1, 1, "large_only_token"),
+            AnchorCheck::Unverified,
+            "a suffix match on an oversized file is not a miss"
+        );
+        let scan = probe.find_tokens(&["large_only_token".to_string()]);
+        assert!(scan.found.is_empty());
+        assert!(
+            !scan.complete,
+            "an unread oversized file leaves absent tokens unknown"
+        );
+        assert!(probe.find_tokens(&["Needle".to_string()]).complete);
+        assert_eq!(
+            probe.check_anchor("bin.dat", 1, 1, "needle"),
+            AnchorCheck::Unverified
+        );
+        assert_eq!(
+            probe.check_anchor("big.log", 1, 1, "a"),
+            AnchorCheck::Unverified
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_rejects_escapes_and_symlinks_out() {
+        let (dir, root) = code_root();
+        let outside = tempfile::Builder::new()
+            .prefix("outside")
+            .tempdir_in(dir.path().parent().unwrap())
+            .unwrap();
+        let outside_root = outside.path().canonicalize().unwrap();
+        std::fs::write(outside_root.join("secret.rs"), "fn leaked() {}\n").unwrap();
+        std::os::unix::fs::symlink(outside_root.join("secret.rs"), root.join("risk/link.rs"))
+            .unwrap();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let escaping = format!(
+            "../{}/secret.rs",
+            outside_root.file_name().unwrap().to_str().unwrap()
+        );
+        assert!(
+            root.join(&escaping).is_file(),
+            "the escaping path names a real file"
+        );
+        assert_eq!(
+            probe.check_anchor(&escaping, 1, 1, "leaked"),
+            AnchorCheck::NoFile
+        );
+        assert_eq!(
+            probe.check_anchor(
+                outside_root.join("secret.rs").to_str().unwrap(),
+                1,
+                1,
+                "leaked"
+            ),
+            AnchorCheck::NoFile
+        );
+        assert_eq!(
+            probe.check_anchor("link.rs", 1, 1, "leaked"),
+            AnchorCheck::NoFile
+        );
+        assert!(probe.find_tokens(&["leaked".to_string()]).found.is_empty());
+    }
+
+    #[test]
+    fn probe_finds_tokens_in_one_bounded_walk() {
+        let (_dir, root) = fixture_root();
+        std::fs::write(root.join("only.bin"), b"\x00binary_only_token\x00").unwrap();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let scan = probe.find_tokens(&[
+            "Needle".to_string(),
+            "Needle".to_string(),
+            "NEEDLE".to_string(),
+            "needle hidden".to_string(),
+            "binary_only_token".to_string(),
+            "absent_token".to_string(),
+        ]);
+        assert_eq!(scan.found.into_iter().collect::<Vec<_>>(), ["Needle"]);
+        assert!(scan.complete);
+    }
+
+    #[test]
+    fn probe_at_its_cap_never_reports_a_miss() {
+        let (_dir, root) = code_root();
+        let mut probe = SourceProbe::new(&[source(&root)]);
+        probe.max_files = 1;
+        assert_eq!(
+            probe.check_anchor("b/mod.rs", 1, 1, "two"),
+            resolved("b/mod.rs"),
+            "an exact path does not need the walk"
+        );
+        assert_eq!(
+            probe.check_anchor("mod.rs", 1, 1, "fn"),
+            AnchorCheck::Unverified
+        );
+        assert_eq!(
+            probe.check_anchor("gone.rs", 1, 1, "fn"),
+            AnchorCheck::Unverified
+        );
+        let scan = probe.find_tokens(&["two".to_string()]);
+        assert!(scan.found.is_empty());
+        assert!(!scan.complete, "a capped walk leaves absent tokens unknown");
+    }
+
+    #[test]
+    fn probe_without_sources_is_unverified() {
+        let probe = SourceProbe::default();
+        assert!(probe.is_empty());
+        assert_eq!(
+            probe.check_anchor("any.rs", 1, 1, "x"),
+            AnchorCheck::Unverified
+        );
+        let scan = probe.find_tokens(&["x".to_string()]);
+        assert!(scan.found.is_empty());
+        assert!(!scan.complete);
     }
 }
