@@ -29,7 +29,7 @@ These are the skill book's named recipes (its "hot maps", [ADR-0022](../adr/0022
 |---|---|---|
 | `interrogate` | FanOut(Critic·premortem, Critic·cheapest-disproof, Researcher·constraints, Critic·second-order-effects) → Audit → Synthesize | the canonical run-it-into-the-ground pass (D19) |
 | `steelman-then-attack` | Chain(Advocate·steelman) → FanOut(Critic·premortem, Critic·cheapest-disproof, Critic·devils-advocate) → Audit → Synthesize | the idea is still vague: give the critics its best version to attack |
-| `ready-to-build` | FanOut(Harvester × the five `extract-*` lenses) → Audit → Chain(Synthesizer·build-prompt) | the discussion is settled: fold the surviving findings into a build prompt |
+| `ready-to-build` | FanOut(Harvester × the five `extract-*` lenses) → Audit → Chain(Synthesizer·build-prompt) | the discussion is settled: fold the audited findings into a gated build plan ([below](#ready-to-build)) |
 
 ## D19 — The interrogate workflow
 
@@ -74,7 +74,7 @@ flowchart TD
 
     NEXT -->|"FanOut(steps)"| FO["hydrate context = related block + carried blocks + idea/memory/discussion (budget minus carried; related block computed per stage against the remaining budget)<br/>bounded fan_out → results (failed agent → None)"]
     FO --> NEXT
-    NEXT -->|"Chain(step)"| CH["related block + carried findings block if a fan-out ran<br/>persona + skill prompt → ask_on_contract (one retry max)"]
+    NEXT -->|"Chain(step)"| CH["related block + carried findings block if a fan-out ran<br/>persona + skill prompt → ask_on_contract (one retry max)<br/>a build-plan planner after an empty harvest → NothingHarvested, nothing persisted"]
     CH --> LASTC{"last stage?"}
     LASTC -->|"no"| CARRY["carry '## Prior stage: skill' forward (a failed middle step is skipped)"] --> NEXT
     LASTC -->|"yes"| OUT["output = answer (a failure aborts the run)"]
@@ -86,8 +86,35 @@ flowchart TD
     LASTS -->|"no"| CARRY2["carry '## Prior stage: synthesis' forward"] --> NEXT
     LASTS -->|"yes"| OUT
     NEXT -->|"done"| OUT
-    OUT --> PERSIST["append output (+ audit appendix if an audit ran) as '## assistant (workflow: name)'"]
+    OUT --> PLAN{"last stage a build_plan skill?"}
+    PLAN -->|"no"| PERSIST["append output (+ audit appendix or cap line, + angles line) as '## assistant (workflow: name)'"]
+    PLAN -->|"yes"| FINISH["build_plan::finish — gates G1–G14, write the build-plan artifact, append a pointer turn"]
 ```
+
+## Ready-to-build
+
+`ready-to-build` is the audited depth of the build plan
+([ADR-0030](../adr/0030-gated-build-plan.md)); the quick depth is the `build-prompt` skill alone
+([skills](./skills.md#the-build-plan-capstone)). Its cost is five harvester calls, one audit call
+and one planner call (plus at most one reshape retry), all under the shared semaphore.
+
+- **Harvest:** the five `extract-*` lenses fan out unchanged; they are shared with knowledge
+  extraction.
+- **Audit:** the factored audit labels each finding CONFIRMED / UNCERTAIN / REFUTED, unless the
+  Settings toggle is off.
+- **Planner:** the chained `build-prompt` step gets a code-owned "How to use the findings" preamble,
+  then the findings block. Each finding line leads with its kind (decision, open question, risk,
+  next action, fact) and, when audited, its verdict and the auditor's clipped reason. The
+  preamble routes them: a REFUTED finding never becomes Settled or a task; a CONFIRMED decision
+  is Settled only with a verbatim owner quote; open questions and UNCERTAIN decisions go to
+  Open questions; risks go to Verify first or Kill criteria; CONFIRMED next actions become task
+  candidates; facts are background. Preamble and findings take at most a third of the stage
+  budget, above a small floor for the findings block, so quotable discussion survives. When hydration clipped the discussion, the planner's
+  context says how many turns are shown.
+- **Persist:** the answer goes through `build_plan::finish` with the audited harvest, so G3 moves a
+  Settled claim that matches a REFUTED finding to Quarantined, with the auditor's reason. The plan
+  lands as `artifacts/<stamp>-build-plan.md` and the transcript gets a
+  `## assistant (workflow: ready-to-build)` pointer turn.
 
 ## Determinism & failure
 
@@ -108,14 +135,21 @@ flowchart TD
   - A failed *final* stage, or a fan-out with no usable result before a synthesis, fails
     the run with nothing persisted. An audit stage over an empty harvest is skipped, not failed,
     unless the final stage is the build-plan planner: then the run fails with `harvest produced
-    nothing; use the quick build prompt` (`ConceptError::NothingHarvested`, HTTP 422) and persists
+    nothing; use the quick build prompt` (`ConceptError::NothingHarvested`) and persists
     nothing. The plan's mode label names what ran: `ready-to-build · audit skipped (audit off in
     Settings)`, `ready-to-build · audit failed`, `audited · uniform pass (weak)` or plain
     `audited`. Without audit verdicts the planner routes findings by kind, so next actions stay
-    task candidates marked unchecked.
+    task candidates marked unchecked. A planner answer with neither a goal nor a task fails the
+    run with `ConceptError::PlanUnusable`, and nothing is persisted. Either error fails the
+    background job, and its message shows on the next `/pending` poll.
 - **Persistence:** only the final stage's output — plus the audit appendix, if an audit ran — is
   appended to `conversation.md`. Intermediate stage outputs are never persisted as turns; they are
-  kept out of truth to reduce noise.
+  kept out of truth to reduce noise. Two code-owned lines may follow the output: the cap line
+  (`_N further findings not audited (cap 20)_`, or `left out` when no audit ran) when the judge's
+  shortlist ran past `audit::MAX_AUDIT_FINDINGS`, and the angles line
+  (`_k of N angles answered; missing: …_`) when a fan-out angle failed or came back empty. A
+  workflow ending in a `build_plan` skill persists through `build_plan::finish` instead: an
+  artifact plus a pointer turn.
 
 ## UI trigger
 
@@ -137,7 +171,8 @@ The transcript label keeps the workflow kind (`foil · workflow {name}`), so a w
 visually distinct from a same-named skill turn (`foil · {name}`).
 
 **Buttons:** `templates/_actions.html` renders one `chip chip--workflow` button per
-`builtin_workflows()` entry.
+`builtin_workflows()` entry except `ready-to-build`, which sits in the capstone row as
+`⌁⌁ audited build plan`, paired with the quick `⌁ quick build prompt` chip.
 
 ## Workflow vs swarm
 
@@ -159,6 +194,8 @@ A workflow *uses* the swarm fan-out as its parallel stage; a swarm is the lower-
 - **Fan-out, judge, synthesizer:** delegate to `concepts::swarm`.
 - **Audit stage:** `concepts::audit`.
 - **Chained step:** `concepts::skills::ask_on_contract` over `concepts::agents::build_prompt`.
+- **Build-plan persist boundary:** `concepts::skills::persist_plan` →
+  `concepts::build_plan::finish::finish_as` (gates in `concepts::build_plan::gates`).
 - **Steps:** `concepts::agents` applying `concepts::skills`.
 
 ## Related

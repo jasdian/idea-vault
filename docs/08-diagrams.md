@@ -50,7 +50,7 @@
 | **D30** | Sequence | Knowledge extraction — per-lens artifacts + synthesis, run as a background job (ADR-0015) | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D15** | Sequence | Reindex — rebuild SQLite from markdown | [03-data-model](./03-data-model.md) |
 | **D16** | Activity | HTTP request / middleware pipeline — AI-driven routes branch into a background job, not an SSE stream | [09-web-ui](./09-web-ui.md) |
-| **D18** | Sequence | Skill invocation with output-contract validation + at most one retry, run as a background job when interactive (ADR-0010, ADR-0023) | [06-concepts/skills](./06-concepts/skills.md) |
+| **D18** | Sequence | Skill invocation with output-contract validation + at most one retry, run as a background job when interactive; a build_plan skill persists via build_plan::finish (ADR-0010, ADR-0023, ADR-0030) | [06-concepts/skills](./06-concepts/skills.md) |
 | **D25** | Sequence | Startup / boot | [01-architecture](./01-architecture.md) |
 
 ### Structure of the web + orchestration
@@ -59,7 +59,7 @@
 |----|------|---------|------|
 | **D17** | Route graph | Every route (including `/settings`, `/pending`, `/history`, `/fork`, turn/memory delete) → response shape → template | [09-web-ui](./09-web-ui.md) |
 | **D19** | DAG (activity) | The interrogate workflow (fan-out → judge → audit → synthesize) | [06-concepts/workflows](./06-concepts/workflows.md) |
-| **D32** | Flowchart | Workflow stage model: FanOut / Chain (carried forward) / Audit / Synthesize, failure paths, persistence (ADR-0022, ADR-0023) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D32** | Flowchart | Workflow stage model: FanOut / Chain (carried forward) / Audit / Synthesize, failure paths, persistence, the build-plan persist branch (ADR-0022, ADR-0023, ADR-0030) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D20** | State machine | Ollama-unavailable degradation | [05-ai-integration](./05-ai-integration.md) |
 | **D21** | Sequence | Concurrency & context-budget model | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D22** | Activity | Slug lifecycle & collision handling | [03-data-model](./03-data-model.md) |

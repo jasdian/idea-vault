@@ -54,7 +54,11 @@ Skills are:
 - **Shape-checked** — the answer is validated against the skill's `contract`
   (`ai::contract::validate`). Preamble and sign-off are stripped. A single interactive call that
   still violates its contract is retried **once**, with the violation read back to the model.
-  `build-prompt` persists only its fenced block ([ADR-0023](../adr/0023-verification-layer.md)).
+  For the `build_plan` contract, an answer that parses into no task also counts as a violation, and
+  of the two answers the one with more (tasks, settled) wins, a tie going to the retry. A skill that
+  declares `fenced_markdown` persists only its fenced block
+  ([ADR-0023](../adr/0023-verification-layer.md)); `build-prompt` persists through the build-plan
+  gates instead ([ADR-0030](../adr/0030-gated-build-plan.md)).
 - **Related-block exclusion** — Audit, synthesis and knowledge extraction never receive the block: those call paths do not
   take it as a parameter ([ADR-0027](../adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
   A persisted turn may still quote a related idea.
@@ -134,9 +138,13 @@ sequenceDiagram
     Reg->>C: validate(skill.contract, answer) — strip chatter, check shape
     alt contract violated
         Reg->>L: chat(prompt + violation note) [same permit, at most once]
-        L-->>Reg: second answer (kept even if still off-contract)
+        L-->>Reg: second answer (kept even if still off-contract, build_plan: the better-scoring of the two answers)
     end
-    Reg->>V: append result as assistant turn to conversation.md (only if non-empty)
+    alt contract = build_plan (build-prompt)
+        Reg->>V: build_plan::finish — parse, gates G1–G14, write artifacts/STAMP-build-plan.md, append a pointer turn
+    else any other contract
+        Reg->>V: append result as assistant turn to conversation.md (only if non-empty)
+    end
     Reg-->>J: skill output
     J-->>U: mark_done, next poll returns the finished transcript
 ```
@@ -189,7 +197,7 @@ guidance in their tooltips.
 | `market-size` | consequence · researcher | Bottom-up size of the opportunity, every assumption visible, with the swing factor. |
 | `triz` | consequence · researcher | Name the idea's core contradiction (improving X worsens Y), describe the ideal final result, and resolve it **without** a trade-off via at least 3 separation/inversion principles. |
 | `converge` | converge · synthesizer | The **converge move**: judge what the earlier moves found rather than summarise it — a first-line verdict (pursue / kill / pursue only if …), the finding that decides it, every finding merged by mechanism and labelled CONFIRMED / UNCERTAIN / REFUTED (refuted ones kept with their reason), what holds up, the trade-off taken with at least one rejected alternative, 2–3 kill criteria, and the open questions with the default assumed until they are settled. |
-| `build-prompt` | capstone · synthesizer | The **capstone move**: fold the entire discussion into one ready-to-paste build prompt for a coding agent (e.g. Claude Code). It extracts the settled decisions, constraints and disproofs rather than transcribing them, and gives an ordered plan, explicit fan-out-vs-sequential guidance, and acceptance criteria. Contract: one fenced block, and only that block is persisted. |
+| `build-prompt` | capstone · synthesizer | The **capstone move**: fold the entire discussion into a gated build plan for a coding agent (e.g. Claude Code). The model writes Goal, Settled (each with a verbatim owner `quote:`), Verify first, Open questions, an optional Fence, Plan (leaf tasks with `depends:`, `touches:` and a runnable `accept:`) and Kill criteria; the code then runs the deterministic gates G1–G14. Contract: `build_plan`. See [The build plan](#the-build-plan-capstone). |
 
 `premortem`, `cheapest-disproof`, `constraints`, and `second-order-effects` are also the default
 angle set a swarm run uses when the owner doesn't specify angles ([D14](./swarm.md)). The swarm
@@ -222,6 +230,37 @@ Five more built-ins carry the reserved `extract-` prefix. They have stage `extra
 the owner picks one at a time — but they stay registered and resolvable. Nothing stops them from
 also being used as ordinary swarm angles.
 
+## The build plan (capstone)
+
+`build-prompt` is the `capstone` move and the only built-in skill on the `build_plan` contract
+([ADR-0030](../adr/0030-gated-build-plan.md)). It runs at two depths, one chip each in the capstone
+row:
+
+- **Quick** (`⌁ quick build prompt`, `POST /idea/{slug}/skill/build-prompt`) — one planner call
+  over the hydrated idea, memory and discussion, plus at most one reshape retry, then the gates.
+  The plan is labelled `quick · unaudited`.
+- **Audited** (`⌁⌁ audited build plan`, the [`ready-to-build` workflow](./workflows.md#ready-to-build))
+  — five harvesters, one audit, then the same `build-prompt` step as the planner, then the gates.
+
+Both depths persist through one `build_plan::finish`:
+1. parse the answer (`plan::parse`; derived fields and `⟨…⟩` markers in it are ignored, and a
+   model-written `T0` is renumbered);
+2. run the deterministic gates G1–G14 against the idea statement and the discussion, minus earlier
+   build-plan turns. The gates make no model call and run no command;
+3. write `artifacts/<stamp>-build-plan.md` (`kind: build_plan`), with the mode label, model, time,
+   sources, audit tally and gate tally in its header;
+4. append a pointer turn: the artifact link, the mode label, the gate tally and the open questions.
+   The plan body never enters `conversation.md`.
+
+An answer with neither a goal nor a task is `PlanUnusable`, and nothing is persisted.
+
+The template (`src/concepts/skills/build-prompt.md`) asks for one field per line and a backtick on
+every path and command. It also carries a leaf rule: a task title is one commit subject with no
+"and", and a task is one diff under one top-level directory with at most 3 non-test files, at most
+8 tasks in all. The model never writes `wave`, `score` or `model`; G14 derives them. The artifact
+page derives a `PROMPT.md` run protocol and an `/attack`-style `plan.md` from the stored plan
+([09-web-ui](../09-web-ui.md)).
+
 ## Distinction from adjacent concepts
 
 | Concept | What it is | Relation to skills |
@@ -240,7 +279,8 @@ also being used as ordinary swarm angles.
 - **Spine coverage and the chat skill book:** `concepts::coverage`.
 - **Skill book page:** `web::routes::skills`.
 - **Context hydration:** `ai::budget`.
-- **Output persistence:** `vault::store` (append to `conversation.md`).
+- **Output persistence:** `vault::store` (append to `conversation.md`); a `build_plan` skill
+  persists through `concepts::build_plan::finish` (artifact plus pointer turn).
 
 ## Related
 

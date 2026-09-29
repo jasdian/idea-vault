@@ -156,7 +156,7 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Compacted rolling summary | `compacted.md` | *(none — derived sidecar, never indexed; ADR-0012)* |
 | Memory fact (frontmatter) | `memory/<fact>.md` | `memory_facts` |
 | Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact, `ref` = the fact's frontmatter slug — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
-| Knowledge-extraction artifact (finding or synthesis) or quarantined store-time facts | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
+| Knowledge-extraction artifact (finding or synthesis), quarantined store-time facts, or a gated build plan (`<run-stamp>-build-plan.md`, `kind: build_plan`, [ADR-0030](./adr/0030-gated-build-plan.md)) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
 | `[[slug]]` links | inside the idea body and memory facts only — **not** mined from conversation or artifact bodies | `backlinks` |
 | `[[idea#fact]]` refs (plus bare `[[x]]` / `links:` candidates inside a fact) | idea body and `memory/<fact>.md` | `fact_links` (`explicit = 1` for `[[idea#fact]]`; an explicit ref to another idea also adds a `backlinks` row for `idea`) |

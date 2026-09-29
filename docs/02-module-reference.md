@@ -74,8 +74,10 @@ flowchart TB
             C_KNOW["knowledge.rs — extraction: fan-out lenses + persist artifacts (D30, ADR-0015)"]
             C_AUDIT["audit.rs — factored audit: findings, Auditor call, parse, appendix (ADR-0023)"]
             C_COVER["coverage.rs — spine coverage + next-move + chat skill book (docs/06-concepts/skills.md)"]
-            C_PLAN["build_plan/plan.rs — BuildPlan: tolerant parse + canonical render of the capstone's plan (docs/adr/0030)"]
-            C_GATES["build_plan/gates/ — mod.rs, claims.rs, sources.rs, tasks.rs: deterministic gates G1–G12, no model call (docs/adr/0030)"]
+            C_PLAN["build_plan/plan.rs — BuildPlan: tolerant parse + canonical render of the capstone's plan,\nPROMPT.md and plan.md projections (docs/adr/0030)"]
+            C_GATES["build_plan/gates/ — mod.rs (runs G1–G14 in order), claims.rs, sources.rs, tasks.rs: deterministic gates G1–G12, no model call (docs/adr/0030)"]
+            C_LEAF["build_plan/gates/leaf.rs — G13 leaf gate: markers and tally only, never a demotion (docs/adr/0030)"]
+            C_TREE["build_plan/gates/tree.rs — G14 task-graph lint, premise wiring, derived score/model/wave (docs/adr/0030)"]
             C_FINISH["build_plan/finish.rs — finish: gate, write the build-plan artifact, append the pointer turn (docs/adr/0030)"]
         end
 

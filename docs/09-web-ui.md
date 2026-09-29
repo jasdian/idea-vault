@@ -241,7 +241,7 @@ templates/
                          #   when the index or its lock fails (web::templates::RelatedPanel)
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
   _settings.html          # partial — the settings form (re-rendered after a save)
-  artifact.html           # extends base — one .md artifact rendered as a full page (R19)
+  artifact.html           # extends base — one .md artifact rendered as a full page (R19); a build plan adds the "Use it" box (PROMPT.md + plan.md copy blocks)
   _artifacts.html         # partial — the artifacts panel (re-rendered after an artifact delete)
   artifact_export.html    # standalone (no base) — the opt-in .html knowledge report, written to
                           #   disk by R18, not served directly by any route
@@ -340,6 +340,25 @@ base.html`.
   block anything; they read like the skill book's own guidance. The move chips themselves render
   from every visible, non-capstone skill, with a tooltip built from its description plus
   `use_when`, and the caption under them links to `/skills`.
+- **The capstone row — paired build chips:** beside `compact now` and `extract knowledge`, the
+  capstone row pairs the two build-plan depths ([ADR-0030](./adr/0030-gated-build-plan.md)):
+  `⌁ quick build prompt` posts R6 for `build-prompt` (one model call, plus at most one reshape
+  retry, unaudited) and `⌁⌁ audited build plan` posts R22 for `ready-to-build` (about seven calls: five harvesters, the
+  audit and the planner; its tooltip notes when the Settings audit toggle is off and the plan will
+  be marked audit skipped). `ready-to-build` is therefore left out of the generic workflow chips.
+  Both chips render disabled while any job runs for the idea and use the same thinking indicator.
+  Either run lands a `build_plan` artifact plus a pointer turn, never the plan body. A plan that
+  cannot be used — an answer with neither a goal nor a task (`PlanUnusable`) or an empty harvest
+  (`NothingHarvested`) — persists nothing. `WebError` maps both to `422 Unprocessable Entity`, but
+  that applies only to a synchronous caller: the chips run background jobs, so the owner sees the
+  message as the job's error on the next `/pending` poll.
+- **The artifact page's "Use it" box:** R19 on a `build_plan` artifact renders a "Use it" box
+  below the plan, with two copy blocks derived from the stored plan when the page loads and never
+  stored: `PROMPT.md` (a run protocol for a coding agent: what ran, trust line, the fixed "How to
+  run this" steps, waves, pins, bootstrap checks, one leaf brief per task, STOP lines) and
+  `plan.md` (an `/attack --loop` table whose task rows carry code-derived `wave`, `score` and
+  `model` columns; only when Verify-first premises exist, a `T0` bootstrap row comes first, with
+  fixed `0 | 00000 | haiku` cells). Both are escaped like any template text.
 - **Store's finish path — poll widens to the stored view:** because only the store job can leave an
   idea `Stored` (every other job route guards on the discussion states), the shared poll handler
   (`web::routes::ideas::respond_discussion_or_stored`, serving both R9b and cancel) checks the
