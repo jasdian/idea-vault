@@ -799,7 +799,9 @@ fn reserve_bootstrap_id(plan: &mut BuildPlan) {
 /// markers in [`Item::markers`]; the two italic header lines and any `> note` lines before
 /// `## Goal` are dropped. Never call it on a model answer.
 pub fn parse_artifact(body: &str) -> Result<BuildPlan, Unusable> {
-    parse_inner(body, true)
+    let mut plan = parse_inner(body, true)?;
+    reserve_bootstrap_id(&mut plan);
+    Ok(plan)
 }
 
 fn parse_inner(answer: &str, trusted: bool) -> Result<BuildPlan, Unusable> {
@@ -1101,17 +1103,17 @@ fn trust_line(h: &RunHeader) -> String {
 
 /// The fixed run protocol every `PROMPT.md` carries, whatever the model wrote.
 const RUN_PROTOCOL: &str = "## How to run this
-1. Before any edit, create one entry in your own task tracker (Claude Code task list / todo list) per T-row plus T0 (the Bootstrap checks), grouped by wave. Mark an entry in progress when you start it and completed only when its accept passed as stated (count included); leave a blocked or [?] entry open with the reason. plan.md (or, without one, this file's Plan) stays the source of truth.
-2. Run every Bootstrap check first; a failing P# stops the tasks that depend on it.
+1. Before any edit, create one entry in your own task tracker (Claude Code task list / todo list) per T-row, plus T0 when there are Bootstrap checks, grouped by wave. Mark an entry in progress when you start it and completed only when its accept passed as stated (count included); leave a blocked or [?] entry open with the reason. plan.md (or, without one, this file's Plan) stays the source of truth.
+2. Run every Bootstrap check first (T0); a failing P# stops only the tasks whose premises list it: mark each [?] with the reason and continue with the rest.
 3. Never start a [?] task; ask the owner the listed Q# instead.
 4. Foil conclusions are hypotheses: confirm one before building on it.
-5. Edit only the paths a task's files: line names, never a Fence path. Needing any other file means stop and report.
+5. Edit only the paths a task's files: line (touches in plan.md) names, never a Fence path. Needing any other file means stop and report.
 6. Build in wave order, one commit per task, with the commit subject equal to the task title.
-7. Parallel waves: run T0 first; it is read-only and makes no commit. Tasks in the same wave touch disjoint files and do not depend on each other, so they MAY run in parallel, each in its own isolated worktree or subagent. A task that needs a file outside its files: line stops and reports, because it would break disjointness. At each wave boundary, integrate the finished tasks, re-run every finished task's accept and the project's full gate/test command, and only then start the next wave. A failed task blocks only its dependents; its wave siblings finish.
+7. Parallel waves: run T0 first when there is one; it is read-only and makes no commit. Tasks in the same wave touch disjoint files and do not depend on each other, so they MAY run in parallel, each in its own isolated worktree or subagent. A task that needs a file outside its files: line stops and reports, because it would break disjointness. At each wave boundary, integrate the finished tasks by merging or cherry-picking each task's commit onto the main line (allowed), re-run every finished task's accept and the project's full gate/test command, and only then start the next wave. A failed task blocks only its dependents; its wave siblings finish.
 8. When a task has red-first, run it before the edit and confirm the stated failure. Take the baseline by copying files to a scratch directory, never with git stash, reset or checkout.
 9. A task passes when its acceptance exits as stated AND the test count matches.
 10. Stop after 3 failed attempts at a task and report it.
-11. Never run destructive or git-history commands.
+11. Never run destructive commands or rewrite history (reset, rebase, force-push, stash).
 12. End each task's report with: files / accept exit=<code> <counts> / red-first / deviations.
 ";
 
@@ -1335,16 +1337,17 @@ fn cell_or_dash(text: &str) -> String {
 /// gate-derived `wave`, `score` and `model`, its `touches` and `accept`. A `T0` bootstrap row
 /// whose accept is the joined Verify-first checks comes first, and every task relying on a
 /// premise depends on it and names its premises in the Task cell, so a failed `P#` blocks only
-/// the tasks that cite it; a premise without a check makes the `T0` row `[?]`. `Depends` lists task ids only; question and free-text dependencies go
-/// to the Task cell, as does the reason of a `[?]` row a loop must never auto-select. An empty
-/// `## Log` closes it.
+/// the tasks that cite it. A task citing a premise without a check is `[?]` and carries no
+/// wave until the owner confirms it. `Depends` lists task ids only; question and free-text
+/// dependencies go to the Task cell, as does the reason of a `[?]` row a loop must never
+/// auto-select. An empty `## Log` closes it.
 pub fn render_attack_plan(plan: &BuildPlan) -> String {
     let goal = cut(
         plan.goal.lines().next().unwrap_or("").trim(),
         GOAL_FIRST_CHARS,
     );
     let mut out = format!(
-        "Goal: {goal}\nRules: PROMPT.md (PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\n"
+        "Goal: {goal}\nRules: PROMPT.md (How to run this, PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\n"
     );
     let fence: Vec<&str> = plan.fence.iter().map(|f| f.text.as_str()).collect();
     if fence.is_empty() {
@@ -1360,13 +1363,13 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
     );
     let bootstrap = !plan.verify.is_empty();
     let premise_ids: Vec<&str> = plan.verify.iter().map(|p| p.id.as_str()).collect();
+    let unchecked: Vec<&str> = plan
+        .verify
+        .iter()
+        .filter(|p| p.field("check").is_none())
+        .map(|p| p.id.as_str())
+        .collect();
     if bootstrap {
-        let unchecked: Vec<String> = plan
-            .verify
-            .iter()
-            .filter(|p| p.field("check").is_none())
-            .map(|p| format!("{} has no check", p.id))
-            .collect();
         let checks: Vec<String> = plan
             .verify
             .iter()
@@ -1375,22 +1378,13 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
                 None => format!("{}: no check, confirm by hand: {}", p.id, p.text),
             })
             .collect();
-        let mut task = format!(
-            "Run the bootstrap checks {} (read-only, no commit; a failed P# blocks only the tasks whose premises list it)",
+        let task = format!(
+            "Run the bootstrap checks {} (read-only, no commit); mark T0 [x] once every check has run, log each failed P# and mark [?] every task whose premises list it",
             premise_ids.join(", ")
         );
-        if !unchecked.is_empty() {
-            task.push_str(&format!(" — reason: {}", unchecked.join("; ")));
-        }
         out.push_str(&format!(
-            "| {} | {BOOTSTRAP_ID} | {} | — | 0 | {} | haiku | none (read-only) | {} |\n",
-            if unchecked.is_empty() { "[ ]" } else { "[?]" },
+            "| [ ] | {BOOTSTRAP_ID} | {} | — | 0 | 00000 | haiku | none (read-only) | {} |\n",
             table_cell(&task),
-            if unchecked.is_empty() {
-                "00000"
-            } else {
-                "00100"
-            },
             table_cell(&checks.join("; ")),
         ));
     }
@@ -1417,6 +1411,10 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
         if !after.is_empty() {
             task.push_str(&format!(" (after: {})", after.join("; ")));
         }
+        let held: Vec<&String> = premises
+            .iter()
+            .filter(|p| unchecked.contains(&p.as_str()))
+            .collect();
         if t.needs_owner {
             let reason = if t.markers.is_empty() {
                 "owner task".to_string()
@@ -1424,14 +1422,29 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
                 t.markers.join("; ")
             };
             task.push_str(&format!(" — reason: {reason}"));
+        } else if !held.is_empty() {
+            let ids: Vec<&str> = held.iter().map(|p| p.as_str()).collect();
+            task.push_str(&format!(
+                " — reason: {} no check; confirm it by hand, then change this row to [ ]",
+                if ids.len() == 1 {
+                    format!("{} has", ids[0])
+                } else {
+                    format!("{} have", ids.join(", "))
+                }
+            ));
         }
+        let owner = t.needs_owner || !held.is_empty();
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            if t.needs_owner { "[?]" } else { "[ ]" },
+            if owner { "[?]" } else { "[ ]" },
             table_cell(&t.id),
             table_cell(&task),
             cell_or_dash(&depends.join(", ")),
-            cell_or_dash(t.field("wave").unwrap_or("")),
+            cell_or_dash(if owner {
+                ""
+            } else {
+                t.field("wave").unwrap_or("")
+            }),
             cell_or_dash(t.field("score").unwrap_or("")),
             cell_or_dash(t.field("model").unwrap_or("")),
             cell_or_dash(&t.list("touches").join(", ")),
@@ -2296,7 +2309,7 @@ Run the cheapest disproof before any Rust exists.
         assert!(first.starts_with("1. "), "{prompt}");
         let mut from = 0;
         for phrase in [
-            "create one entry in your own task tracker (Claude Code task list / todo list) per T-row plus T0",
+            "create one entry in your own task tracker (Claude Code task list / todo list) per T-row, plus T0 when there are Bootstrap checks,",
             "grouped by wave",
             "in progress when you start it",
             "completed only when its accept passed as stated (count included)",
@@ -2331,7 +2344,7 @@ Run the cheapest disproof before any Rust exists.
             "MAY run in parallel, each in its own isolated worktree or subagent",
             "A task that needs a file outside its files: line stops and reports",
             "it would break disjointness",
-            "At each wave boundary, integrate the finished tasks",
+            "At each wave boundary, integrate the finished tasks by merging or cherry-picking each task's commit onto the main line (allowed)",
             "re-run every finished task's accept and the project's full gate/test command",
             "only then start the next wave",
             "A failed task blocks only its dependents; its wave siblings finish",
@@ -2355,15 +2368,15 @@ Run the cheapest disproof before any Rust exists.
         let at = prompt.find("\n## How to run this\n").expect("the protocol");
         assert!(at < prompt.find("## PINNED").unwrap(), "{prompt}");
         for rule in [
-            "Run every Bootstrap check first; a failing P# stops the tasks that depend on it.",
+            "Run every Bootstrap check first (T0); a failing P# stops only the tasks whose premises list it: mark each [?] with the reason and continue with the rest.",
             "Never start a [?] task; ask the owner the listed Q# instead.",
             "Foil conclusions are hypotheses",
-            "Edit only the paths a task's files: line names, never a Fence path",
+            "Edit only the paths a task's files: line (touches in plan.md) names, never a Fence path",
             "Build in wave order, one commit per task, with the commit subject equal to the task title.",
             "never with git stash, reset or checkout",
             "A task passes when its acceptance exits as stated AND the test count matches.",
             "Stop after 3 failed attempts",
-            "Never run destructive or git-history commands",
+            "Never run destructive commands or rewrite history (reset, rebase, force-push, stash)",
             "files / accept exit=<code> <counts> / red-first / deviations",
         ] {
             assert!(prompt.contains(rule), "{rule}\n{prompt}");
@@ -2477,7 +2490,7 @@ Run the cheapest disproof before any Rust exists.
         let rows = rows(&out);
         assert_eq!(
             rows[0],
-            "| [ ] | T0 | Run the bootstrap checks P1 (read-only, no commit; a failed P# blocks only the tasks whose premises list it) | — | 0 | 00000 | haiku | none (read-only) | P1: `sed -n 385p risk/src/calculator.rs \\| grep -nF calculate_regime_factor` |",
+            "| [ ] | T0 | Run the bootstrap checks P1 (read-only, no commit); mark T0 [x] once every check has run, log each failed P# and mark [?] every task whose premises list it | — | 0 | 00000 | haiku | none (read-only) | P1: `sed -n 385p risk/src/calculator.rs \\| grep -nF calculate_regime_factor` |",
             "{out}"
         );
         assert_eq!(cells(rows[2])[3], "T0, T1", "{out}");
@@ -2516,23 +2529,79 @@ Run the cheapest disproof before any Rust exists.
     }
 
     #[test]
-    fn attack_plan_premise_without_a_check_makes_the_bootstrap_row_owners() {
+    fn attack_plan_premise_without_a_check_holds_only_the_tasks_citing_it() {
         let mut plan = gated_plan();
         plan.verify.push(Item::new("P2", "The broker allows it"));
+        plan.tasks.push(Item {
+            fields: [
+                ("depends".to_string(), "P2".to_string()),
+                ("wave".to_string(), "1".to_string()),
+            ]
+            .into(),
+            ..Item::new("T3", "Place the order")
+        });
         let out = render_attack_plan(&plan);
-        let t0 = rows(&out)[0];
-        let c = cells(t0);
-        assert_eq!(c[0], "[?]", "{out}");
-        assert_eq!(c[1], "T0", "{out}");
-        assert!(c[2].ends_with(" — reason: P2 has no check"), "{out}");
-        assert_eq!(c[5], "00100", "{out}");
-        let checked = render_attack_plan(&gated_plan());
-        let c = cells(rows(&checked)[0]);
-        assert_eq!(
-            (c[0].as_str(), c[5].as_str()),
-            ("[ ]", "00000"),
-            "{checked}"
+        let c = cells(rows(&out)[0]);
+        assert_eq!((c[0].as_str(), c[1].as_str()), ("[ ]", "T0"), "{out}");
+        assert_eq!(c[5], "00000", "{out}");
+        assert!(
+            c[8].contains("P2: no check, confirm by hand: The broker allows it"),
+            "{out}"
         );
+        let t3 = cells(
+            rows(&out)
+                .into_iter()
+                .find(|r| r.contains("| T3 |"))
+                .unwrap(),
+        );
+        assert_eq!(t3[0], "[?]", "{out}");
+        assert!(
+            t3[2].ends_with(
+                " (premises: P2) — reason: P2 has no check; confirm it by hand, then change this row to [ ]"
+            ),
+            "{out}"
+        );
+        assert_eq!(t3[4], "—", "{out}");
+        let t2 = cells(
+            rows(&out)
+                .into_iter()
+                .find(|r| r.contains("| T2 |"))
+                .unwrap(),
+        );
+        assert_eq!((t2[0].as_str(), t2[4].as_str()), ("[ ]", "1"), "{out}");
+    }
+
+    #[test]
+    fn attack_plan_bootstrap_row_states_how_a_partial_failure_resolves() {
+        let out = render_attack_plan(&gated_plan());
+        let task = &cells(rows(&out)[0])[2];
+        let mut from = 0;
+        for phrase in [
+            "Run the bootstrap checks P1 (read-only, no commit)",
+            "mark T0 [x] once every check has run",
+            "log each failed P#",
+            "mark [?] every task whose premises list it",
+        ] {
+            let at = task[from..]
+                .find(phrase)
+                .unwrap_or_else(|| panic!("{phrase} missing or out of order in {task}"));
+            from += at + phrase.len();
+        }
+        assert!(
+            out.contains("\nRules: PROMPT.md (How to run this, PINNED, Fence)\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn attack_plan_legacy_artifact_with_a_model_t0_keeps_one_bootstrap_row() {
+        let plan = parse_artifact(
+            "_gates: x_\n\n## Goal\nShip.\n## Verify first\n- P1: `a.rs` exists\n  check: `test -f a.rs` → exit 0\n## Plan\n- T0: Scaffold the crate\n  touches: a.rs\n- T1: Build on it\n  depends: T0, P1\n  touches: b.rs\n",
+        )
+        .unwrap();
+        let out = render_attack_plan(&plan);
+        assert_eq!(out.matches("| T0 |").count(), 1, "{out}");
+        assert_eq!(cells(rows(&out)[2])[3], "T0, T2", "{out}");
     }
 
     #[test]
@@ -2561,7 +2630,7 @@ Run the cheapest disproof before any Rust exists.
         let header = &out[..table];
         for line in [
             "Goal: Run the cheapest disproof before any Rust exists.\n",
-            "Rules: PROMPT.md (PINNED, Fence)\n",
+            "Rules: PROMPT.md (How to run this, PINNED, Fence)\n",
             "Selection rule: the topmost [ ] whose Depends are all [x]; never [?]\n",
             "Fence: `src/domain/links.rs`\n",
             "STOP if The backtest prints KILL → stop and report; checked by T2; blocks T3\n",

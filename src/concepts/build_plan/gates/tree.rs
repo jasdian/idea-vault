@@ -245,7 +245,8 @@ fn file_level(path: &str) -> bool {
 }
 
 /// Whether a word reads as a path: it holds a `/`, or it is `stem.ext` whose extension carries a
-/// letter, so decimals and versions (`0.7`, `2.0`, `v1.2`) are not paths.
+/// letter and, when the stem has none, starts with one, so decimals, versions and unit-suffixed
+/// numbers (`0.7`, `v1.2`, `1.5x`, `2.5GB`) are not paths.
 fn path_like(word: &str) -> bool {
     !word.starts_with('-')
         && !word.contains("://")
@@ -255,6 +256,8 @@ fn path_like(word: &str) -> bool {
                     && (1..=5).contains(&ext.len())
                     && ext.chars().all(|c| c.is_ascii_alphanumeric())
                     && ext.chars().any(|c| c.is_ascii_alphabetic())
+                    && (stem.chars().any(|c| c.is_ascii_alphabetic())
+                        || ext.starts_with(|c: char| c.is_ascii_alphabetic()))
             }))
 }
 
@@ -916,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_premise_sharing_only_a_decimal_or_version_is_not_wired() {
-        for number in ["0.7", "2.0", "v1.2"] {
+        for number in ["0.7", "2.0", "v1.2", "1.5x", "2.5GB"] {
             let mut p = plan(vec![task("T1", &[("touches", "src/a.rs")])]);
             p.tasks[0].text = format!("Default the temperature to `{number}`");
             p.verify.push(premise(

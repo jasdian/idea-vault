@@ -166,7 +166,7 @@ async fn artifact_page_attack_plan_block_opens_with_the_escaped_bootstrap_row() 
     assert_eq!(status, StatusCode::OK);
     let blocks = copy_blocks(&body);
     assert_eq!(blocks.len(), 2, "{body}");
-    let t0 = "| [ ] | T0 | Run the bootstrap checks P1 (read-only, no commit; a failed P# blocks only the tasks whose premises list it) | — | 0 | 00000 | haiku | none (read-only) | P1: `grep -c &#60;main&#62; src/a.rs \\| grep -q 1` → exit 0 |";
+    let t0 = "| [ ] | T0 | Run the bootstrap checks P1 (read-only, no commit); mark T0 [x] once every check has run, log each failed P# and mark [?] every task whose premises list it | — | 0 | 00000 | haiku | none (read-only) | P1: `grep -c &#60;main&#62; src/a.rs \\| grep -q 1` → exit 0 |";
     assert!(blocks[1].contains(t0), "{}", blocks[1]);
     assert!(
         blocks[1].contains(
