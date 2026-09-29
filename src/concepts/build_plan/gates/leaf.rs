@@ -220,7 +220,7 @@ fn two_subjects(subject: &str) -> bool {
 }
 
 /// L2: the distinct top-level directories of `touches`, test trees and repo-root files aside.
-fn roots(touches: &[String]) -> Vec<String> {
+pub(super) fn roots(touches: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for path in touches.iter().filter(|p| !is_test_path(p)) {
         let path = path.trim_start_matches("./").trim_start_matches('/');
@@ -236,7 +236,7 @@ fn roots(touches: &[String]) -> Vec<String> {
     out
 }
 
-fn is_test_path(path: &str) -> bool {
+pub(super) fn is_test_path(path: &str) -> bool {
     let path = path.to_lowercase();
     let name = path.rsplit('/').next().unwrap_or_default();
     path.split('/')

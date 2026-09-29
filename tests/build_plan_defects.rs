@@ -768,7 +768,7 @@ fn accept_repair_does_not_launder_a_destructive_command() {
     assert!(!markers(task).contains("accept repaired"));
 }
 
-const GATE_SOURCES: [(&str, &str); 6] = [
+const GATE_SOURCES: [(&str, &str); 7] = [
     (
         "build_plan/plan.rs",
         include_str!("../src/concepts/build_plan/plan.rs"),
@@ -792,6 +792,10 @@ const GATE_SOURCES: [(&str, &str); 6] = [
     (
         "gates/leaf.rs",
         include_str!("../src/concepts/build_plan/gates/leaf.rs"),
+    ),
+    (
+        "gates/tree.rs",
+        include_str!("../src/concepts/build_plan/gates/tree.rs"),
     ),
 ];
 
