@@ -533,6 +533,60 @@ async fn quick_plan_with_an_unusable_answer_persists_nothing() {
     assert!(store::read_artifacts(dir.path(), SLUG).unwrap().is_empty());
 }
 
+fn without_section(answer: &str, heading: &str) -> String {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for line in answer.lines() {
+        if line.starts_with("## ") {
+            skipping = line == heading;
+        }
+        if !skipping {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+#[tokio::test]
+async fn retry_plan_missing_kill_criteria_gets_no_retry() {
+    let answer = without_section(PLANNER_ANSWER, "## Kill criteria");
+    let (dir, mock, result) = quick_plan(&[&answer, "a retry must not happen"]).await;
+    result.unwrap();
+    assert_eq!(
+        mock.chat_bodies().len(),
+        1,
+        "an optional section missing is not a contract violation"
+    );
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    assert!(
+        plans[0].body.contains("## Kill criteria"),
+        "{}",
+        plans[0].body
+    );
+}
+
+#[tokio::test]
+async fn retry_plan_keeps_a_usable_first_answer_over_an_off_grammar_retry() {
+    let first = without_section(PLANNER_ANSWER, "## Settled");
+    let (dir, mock, result) = quick_plan(&[&first, "Sorry, I cannot format that."]).await;
+    result.unwrap();
+    assert_eq!(
+        mock.chat_bodies().len(),
+        2,
+        "a missing required section retries once"
+    );
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    assert!(
+        plans[0]
+            .body
+            .contains("T1: Write the spec with a dated kill criterion"),
+        "{}",
+        plans[0].body
+    );
+}
+
 const REFUTED_CLAIM: &str = "Call three agencies next week";
 
 async fn audited_plan() -> (

@@ -422,20 +422,29 @@ pub(crate) async fn ask_on_contract(
     progress(&format!("{label} · reshaping the answer"));
     tracing::info!(label, %violation, "contract violated; retrying once");
     let retried = ask(format!("{prompt}{}", contract::retry_note(&violation))).await;
-    match retried.as_deref().map(|r| contract::validate(contract, r)) {
-        Ok(Ok(repaired)) => Ok(repaired),
-        outcome => {
-            tracing::warn!(
-                label,
-                ?outcome,
-                "retry did not produce an on-contract answer; keeping the best one"
-            );
-            Ok(match retried {
-                Ok(second) if !second.trim().is_empty() => second.trim().to_string(),
-                _ => first.trim().to_string(),
-            })
-        }
+    let plan_first_wins = |second: &str| {
+        contract == OutputContract::BuildPlan
+            && contract::build_plan_tasks(&first) > contract::build_plan_tasks(second)
+    };
+    let outcome = retried.as_deref().map(|r| contract::validate(contract, r));
+    if let Ok(Ok(repaired)) = outcome {
+        return Ok(if plan_first_wins(&repaired) {
+            first.trim().to_string()
+        } else {
+            repaired
+        });
     }
+    tracing::warn!(
+        label,
+        ?outcome,
+        "retry did not produce an on-contract answer; keeping the best one"
+    );
+    Ok(match retried {
+        Ok(second) if !second.trim().is_empty() && !plan_first_wins(&second) => {
+            second.trim().to_string()
+        }
+        _ => first.trim().to_string(),
+    })
     // permit released on return — before any vault write, which needs no AI slot
 }
 

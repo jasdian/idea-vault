@@ -17,6 +17,8 @@ pub enum Violation {
     NoFencedBlock,
     /// A sectioned answer lacked these `## ` headings (canonical spelling, in contract order).
     MissingSections(Vec<String>),
+    /// A build plan carried its headings but no goal or no task under `## Plan`.
+    NoUsablePlan,
 }
 
 impl std::fmt::Display for Violation {
@@ -37,6 +39,9 @@ impl std::fmt::Display for Violation {
                 "the answer must contain every section heading, and these were missing: {} \
                  (write each as its own `## ` heading, with `- none` under it when it is empty)",
                 missing.join(", ")
+            ),
+            Violation::NoUsablePlan => f.write_str(
+                "the plan needs a goal sentence under `## Goal` and at least one task under `## Plan`",
             ),
         }
     }
@@ -113,6 +118,10 @@ pub const BUILD_PLAN_SECTIONS: &[&str] = &[
     "## Plan",
     "## Kill criteria",
 ];
+
+/// The sections of [`BUILD_PLAN_SECTIONS`] a build-plan answer is retried for. `## Verify first`
+/// and `## Kill criteria` may be absent: the plan parser records and the finish step flags them.
+pub const BUILD_PLAN_REQUIRED: &[&str] = &["## Goal", "## Settled", "## Open questions", "## Plan"];
 
 /// How a line names a build-plan section.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -233,6 +242,41 @@ pub fn repair_build_plan(text: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
+/// The number of tasks a build-plan answer carries under `## Plan`, or 0 when it has no goal
+/// text — the measure of how usable an answer is. `- none` placeholders do not count.
+pub fn build_plan_tasks(raw: &str) -> usize {
+    let repaired = repair_build_plan(raw.trim());
+    let mut section = "";
+    let mut in_fence = false;
+    let mut goal = false;
+    let mut tasks = 0;
+    for line in repaired.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        } else if !in_fence && line.starts_with("## ") {
+            section = line;
+            continue;
+        }
+        match section {
+            "## Goal" if !line.trim().is_empty() && !line.trim_start().starts_with('_') => {
+                goal = true;
+            }
+            "## Plan" if !in_fence && !line.starts_with([' ', '\t']) && is_list_item(line) => {
+                let body = line.trim().trim_start_matches(['-', '*', '+']).trim();
+                if !body.eq_ignore_ascii_case("none") {
+                    tasks += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if goal {
+        tasks
+    } else {
+        0
+    }
+}
+
 /// Check `raw` against `contract`, returning the repaired answer (chatter stripped, shape
 /// normalized) or why it cannot be repaired. `BulletsOrEmpty` accepts an empty answer.
 pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation> {
@@ -276,15 +320,17 @@ pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation
                 return Err(Violation::Empty);
             }
             let plan = repair_build_plan(text);
-            let missing: Vec<String> = BUILD_PLAN_SECTIONS
+            let missing: Vec<String> = BUILD_PLAN_REQUIRED
                 .iter()
                 .filter(|h| !plan.lines().any(|l| l == **h))
                 .map(|h| (*h).to_string())
                 .collect();
-            if missing.is_empty() {
-                Ok(plan)
-            } else {
+            if !missing.is_empty() {
                 Err(Violation::MissingSections(missing))
+            } else if build_plan_tasks(&plan) == 0 {
+                Err(Violation::NoUsablePlan)
+            } else {
+                Ok(plan)
             }
         }
     }
@@ -495,7 +541,7 @@ mod tests {
 
     #[test]
     fn build_plan_rewrites_only_section_headings_outside_fences() {
-        let raw = "## Goal\nx\n## Settled\n- a\n## Verify first\n- b\n## Open questions\n- c\n## Plan\n**Tasks**\n```md\n## Plan\n```\n## Kill criteria\n- d";
+        let raw = "## Goal\nx\n## Settled\n- a\n## Verify first\n- b\n## Open questions\n- c\n## Plan\n**Tasks**\n- T1: x\n```md\n## Plan\n```\n## Kill criteria\n- d";
         let out = validate(OutputContract::BuildPlan, raw).unwrap();
         assert_eq!(
             out, raw,
@@ -523,10 +569,10 @@ mod tests {
 
     #[test]
     fn build_plan_does_not_invent_a_section_from_a_body_label() {
-        let raw = "## Goal\nx\n## Settled\n- a\n## Open questions\n- c\n## Plan\n- T1\n  **Verify first**\n## Kill criteria\n- none";
+        let raw = "## Goal\nx\n## Settled\n- a\n## Plan\n- T1\n  **Open questions**\n## Kill criteria\n- none";
         assert_eq!(
             validate(OutputContract::BuildPlan, raw),
-            Err(Violation::MissingSections(vec!["## Verify first".into()]))
+            Err(Violation::MissingSections(vec!["## Open questions".into()]))
         );
     }
 
@@ -537,9 +583,7 @@ mod tests {
             validate(OutputContract::BuildPlan, raw),
             Err(Violation::MissingSections(vec![
                 "## Settled".into(),
-                "## Verify first".into(),
                 "## Open questions".into(),
-                "## Kill criteria".into(),
             ]))
         );
         assert_eq!(
@@ -548,6 +592,33 @@ mod tests {
         );
         let note = retry_note(&Violation::MissingSections(vec!["## Plan".into()]));
         assert!(note.contains("## Plan"), "{note}");
+    }
+
+    #[test]
+    fn build_plan_accepts_a_plan_missing_only_optional_sections() {
+        let raw = "## Goal\nShip it.\n## Settled\n- S1: x\n## Open questions\n- none\n## Plan\n- T1: do it";
+        assert_eq!(validate(OutputContract::BuildPlan, raw).unwrap(), raw);
+    }
+
+    #[test]
+    fn build_plan_with_every_heading_but_no_task_or_goal_is_unusable() {
+        let no_task = "## Goal\nShip it.\n## Settled\n- a\n## Open questions\n- c\n## Plan\n- none";
+        assert_eq!(
+            validate(OutputContract::BuildPlan, no_task),
+            Err(Violation::NoUsablePlan)
+        );
+        let no_goal = "## Goal\n\n## Settled\n- a\n## Open questions\n- c\n## Plan\n- T1: x";
+        assert_eq!(
+            validate(OutputContract::BuildPlan, no_goal),
+            Err(Violation::NoUsablePlan)
+        );
+    }
+
+    #[test]
+    fn build_plan_tasks_counts_top_level_items_under_plan_only() {
+        let raw = "## Goal\nx\n## Settled\n- a\n## Plan\n- [ ] T1: a\n  accept: `x`\n2. T2: b\n```sh\n- not a task\n```\n## Kill criteria\n- k";
+        assert_eq!(build_plan_tasks(raw), 2);
+        assert_eq!(build_plan_tasks("prose only"), 0);
     }
 
     #[test]
