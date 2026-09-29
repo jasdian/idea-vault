@@ -224,7 +224,9 @@ Key obligations:
   `related_allowance` = min(leftover, min(max/10, 2048)) bytes (`RELATED_CAP_BYTES`), so the own
   context is byte-identical with or without it and a full own context gets no block. Audit,
   synthesis and knowledge extraction never receive it
-  ([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
+  ([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)). The block is the
+  same on every turn of an idea: a per-turn, query-driven fact section was pre-registered and
+  killed ([ADR-0031](./adr/0031-query-driven-fact-retrieval-killed.md)).
 
 Skills (`POST /idea/:slug/skill/:name`) and swarm (`POST /idea/:slug/swarm`) use the identical
 claim → spawn → poll shape; see [06-concepts/skills](./06-concepts/skills.md) D18 and

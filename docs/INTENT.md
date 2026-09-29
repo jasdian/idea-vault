@@ -1,3 +1,20 @@
+# Intent — query-driven fact retrieval with snippets (experiment first)
+
+"add query-driven fact retrieval with snippets alongside the current graph, not instead of it,
+and skip PageRank for now … experiment that, yes." The Google pattern: the latest turn is the
+query, other ideas' facts are the documents, bm25 ranks them and a snippet shows the passage.
+
+## Acceptance criteria
+
+- A pre-registered experiment, frozen before any turn-level run, decides whether it ships; its
+  thresholds are not re-tuned after the results.
+- If it passes, the section is pushed beside the ADR-0027 graph block inside the same leftover
+  budget. If it fails, nothing reaches a prompt and the retriever stays an offline instrument that
+  no model-facing tool and no module outside `index` may reference.
+- No PageRank, no new store, no model call.
+- ADR-0031 records the verdict with its numbers.
+- Every commit ships through this gate: `bash scripts/gate.sh` green.
+
 # Intent — per-role call profiles (role tuning)
 
 A living per-gated-change file (td-bot convention): rewritten before each gated change to state,
