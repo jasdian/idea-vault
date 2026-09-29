@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod audit;
+pub mod build_plan;
 pub mod coverage;
 pub mod knowledge;
 pub mod skills;

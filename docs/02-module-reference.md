@@ -74,6 +74,7 @@ flowchart TB
             C_KNOW["knowledge.rs — extraction: fan-out lenses + persist artifacts (D30, ADR-0015)"]
             C_AUDIT["audit.rs — factored audit: findings, Auditor call, parse, appendix (ADR-0023)"]
             C_COVER["coverage.rs — spine coverage + next-move + chat skill book (docs/06-concepts/skills.md)"]
+            C_PLAN["build_plan/plan.rs — BuildPlan: tolerant parse + canonical render of the capstone's plan (docs/adr/0029)"]
         end
 
         subgraph web["web/ (HTTP surface)"]

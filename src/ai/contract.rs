@@ -185,7 +185,7 @@ fn build_plan_headings(lines: &[&str]) -> Vec<(usize, &'static str)> {
 /// in a fence that opens right before its first section, drop the preamble before that section
 /// and a trailing prose sign-off paragraph after the last one, and rewrite each section heading
 /// to its canonical spelling.
-fn build_plan(text: &str) -> String {
+pub fn repair_build_plan(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if let Some(first) = lines.iter().position(|l| build_plan_heading(l).is_some()) {
         let opener = lines[..first]
@@ -193,7 +193,7 @@ fn build_plan(text: &str) -> String {
             .rposition(|l| !l.trim().is_empty())
             .filter(|o| is_opening_fence(lines[*o]));
         if let Some(inner) = opener.and_then(|o| fenced_inner(&lines[o..].join("\n"))) {
-            return build_plan(&inner);
+            return repair_build_plan(&inner);
         }
     }
     let headings = build_plan_headings(&lines);
@@ -275,7 +275,7 @@ pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation
             if text.is_empty() {
                 return Err(Violation::Empty);
             }
-            let plan = build_plan(text);
+            let plan = repair_build_plan(text);
             let missing: Vec<String> = BUILD_PLAN_SECTIONS
                 .iter()
                 .filter(|h| !plan.lines().any(|l| l == **h))
