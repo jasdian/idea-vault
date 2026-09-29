@@ -928,6 +928,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "serde_urlencoded",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
