@@ -26,7 +26,7 @@ Q1: a question only the owner can answer, including any unsettled approach.
 Optional. Paths that must not be touched.
 ## Plan
 - [ ] T1: one commit subject
-depends: T# or none
+depends: T#, P# or none (list every P# the task relies on)
 touches: paths, a new file as `src/x.rs (new)`
 accept: `one command` → pass condition, with a passed count when tests are named
 ## Kill criteria

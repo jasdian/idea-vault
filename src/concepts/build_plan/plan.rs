@@ -1347,7 +1347,7 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
         GOAL_FIRST_CHARS,
     );
     let mut out = format!(
-        "Goal: {goal}\nRules: PROMPT.md (How to run this, PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\n"
+        "Goal: {goal}\nRules: PROMPT.md (How to run this, PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\nCommands: a `\\|` inside a cell is the table escape for `|`; run the command with a plain `|` (PROMPT.md has every command unescaped)\n"
     );
     let fence: Vec<&str> = plan.fence.iter().map(|f| f.text.as_str()).collect();
     if fence.is_empty() {
@@ -1637,6 +1637,26 @@ Run the cheapest disproof before any Rust exists.
         let kill = plan.kills.first().expect("the template's kill row");
         assert_eq!(kill.field("checked by"), Some("T1"), "{block}");
         assert_eq!(kill.field("gates"), Some("T1"), "{block}");
+    }
+
+    #[test]
+    fn template_depends_asks_for_the_premises_a_task_relies_on() {
+        let instructions = template_body().split("\nExample:\n").next().unwrap();
+        let line = instructions
+            .lines()
+            .find(|l| l.starts_with("depends:"))
+            .expect("the Plan depends line");
+        assert!(line.contains("P#"), "{line}");
+        let depends = line
+            .trim_start_matches("depends:")
+            .replace("T#", "T1")
+            .replace("P#", "P1");
+        let plan = parse(&format!(
+            "## Goal\nShip.\n## Verify first\n- P1: `a.rs` exists\n  check: `test -f a.rs` → exit 0\n## Plan\n- T1: Build it\n  touches: a.rs\n  accept: `true` → exit 0\n- T2: Use it\n  depends: {}\n  touches: b.rs\n  accept: `true` → exit 0\n",
+            depends.split(" or ").next().unwrap_or("").trim()
+        ))
+        .unwrap();
+        assert_eq!(plan.tasks[1].depends_premises(), ["P1"], "{line}");
     }
 
     #[test]
@@ -2644,6 +2664,23 @@ Run the cheapest disproof before any Rust exists.
         assert!(cells(rows[1])[2].starts_with("Scaffold the crate"), "{out}");
         assert_eq!(cells(rows[2])[3], "T0, T2", "{out}");
         assert_eq!(plan.kills[0].field("gates"), Some("T2"));
+    }
+
+    #[test]
+    fn attack_plan_header_says_how_to_run_an_escaped_pipe() {
+        let plan = parse(
+            "## Goal\nShip.\n## Plan\n- T1: Count the states\n  touches: a.md\n  accept: `grep -cE \"Paid|Held\" a.md` → 2\n",
+        )
+        .unwrap();
+        let out = render_attack_plan(&plan);
+        let table = out.find("\n| [ ] | T |").unwrap();
+        assert!(
+            out[..table].contains(
+                "\nCommands: a `\\|` inside a cell is the table escape for `|`; run the command with a plain `|` (PROMPT.md has every command unescaped)\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("`grep -cE \"Paid\\|Held\" a.md`"), "{out}");
     }
 
     #[test]
