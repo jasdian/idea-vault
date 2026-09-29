@@ -123,36 +123,59 @@ async fn artifact_page_for_other_kinds_has_no_copy_blocks() {
     );
 }
 
+fn copy_script(body: &str) -> &str {
+    let start = body
+        .find("function addCopyButtons()")
+        .expect("the copy script");
+    let rest = &body[start..];
+    let end = rest
+        .find("document.addEventListener(\"DOMContentLoaded\", addCopyButtons)")
+        .expect("the end of the copy script");
+    &rest[..end]
+}
+
 #[tokio::test]
-async fn copy_label_script_excludes_the_button() {
+async fn copy_label_handler_reads_a_button_free_clone() {
     let (state, vault) = test_state();
     let uri = seed(&vault, ArtifactKind::BuildPlan, PLAN_BODY);
     let (status, body) = get(state, &uri).await;
     assert_eq!(status, StatusCode::OK);
+    let script = copy_script(&body);
+    let click = script
+        .find(r#"addEventListener("click""#)
+        .expect("a click handler");
+    let handler = &script[click..];
+    let handler = &handler[..handler.find(".then(").expect("the clipboard write")];
+    let pos = |needle: &str| {
+        handler
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from {handler}"))
+    };
+    let cloned = pos("pre.cloneNode(true)");
+    let stripped = pos(r#"clone.querySelectorAll(".copy-btn")"#);
+    let removed = pos(".remove()");
+    let written = pos("writeText(clone.textContent");
     assert!(
-        body.contains("pre.cloneNode(true)")
-            && body.contains(r#"querySelectorAll(".copy-btn")"#)
-            && body.contains("clone.textContent"),
-        "copy handler must read a button-free clone"
+        cloned < stripped && stripped < removed && removed < written,
+        "clone, strip, then write: {handler}"
     );
     assert!(
-        !body.contains("writeText(pre.innerText)"),
-        "copy handler still reads pre.innerText with the button inside"
+        !script.contains("innerText"),
+        "no copy path may read the live pre: {script}"
+    );
+    assert!(
+        script.matches("writeText(").count() == 1,
+        "one clipboard write, from the clone: {script}"
     );
 }
 
 #[tokio::test]
-async fn copy_label_blocks_still_marked_copyable() {
+async fn copy_label_selector_covers_transcript_and_copyable_blocks() {
     let (state, vault) = test_state();
     let uri = seed(&vault, ArtifactKind::BuildPlan, PLAN_BODY);
     let (_, body) = get(state, &uri).await;
-    assert_eq!(
-        body.matches(r#"<pre class="copyable">"#).count(),
-        2,
-        "{body}"
-    );
     assert!(
-        body.contains("pre.copyable"),
-        "copy script must still target pre.copyable"
+        copy_script(&body).contains(r#"querySelectorAll(".turn__body pre, pre.copyable")"#),
+        "the selector must still reach pre.copyable"
     );
 }
