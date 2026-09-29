@@ -118,7 +118,9 @@
           btn.className = "copy-btn";
           btn.textContent = "copy";
           btn.addEventListener("click", function () {
-            navigator.clipboard.writeText(pre.innerText).then(function () {
+            var clone = pre.cloneNode(true);
+            clone.querySelectorAll(".copy-btn").forEach(function (b) { b.remove(); });
+            navigator.clipboard.writeText(clone.textContent).then(function () {
               btn.textContent = "copied";
               setTimeout(function () { btn.textContent = "copy"; }, 1500);
             });

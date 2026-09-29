@@ -122,3 +122,37 @@ async fn artifact_page_for_other_kinds_has_no_copy_blocks() {
         "{body}"
     );
 }
+
+#[tokio::test]
+async fn copy_label_script_excludes_the_button() {
+    let (state, vault) = test_state();
+    let uri = seed(&vault, ArtifactKind::BuildPlan, PLAN_BODY);
+    let (status, body) = get(state, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("pre.cloneNode(true)")
+            && body.contains(r#"querySelectorAll(".copy-btn")"#)
+            && body.contains("clone.textContent"),
+        "copy handler must read a button-free clone"
+    );
+    assert!(
+        !body.contains("writeText(pre.innerText)"),
+        "copy handler still reads pre.innerText with the button inside"
+    );
+}
+
+#[tokio::test]
+async fn copy_label_blocks_still_marked_copyable() {
+    let (state, vault) = test_state();
+    let uri = seed(&vault, ArtifactKind::BuildPlan, PLAN_BODY);
+    let (_, body) = get(state, &uri).await;
+    assert_eq!(
+        body.matches(r#"<pre class="copyable">"#).count(),
+        2,
+        "{body}"
+    );
+    assert!(
+        body.contains("pre.copyable"),
+        "copy script must still target pre.copyable"
+    );
+}
