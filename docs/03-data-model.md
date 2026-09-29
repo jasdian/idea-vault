@@ -162,7 +162,7 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | `[[idea#fact]]` refs (plus bare `[[x]]` / `links:` candidates inside a fact) | idea body and `memory/<fact>.md` | `fact_links` (`explicit = 1` for `[[idea#fact]]`; an explicit ref to another idea also adds a `backlinks` row for `idea`) |
 | Link edge | resolved `backlinks` + resolved cross-idea `fact_links` | `edges` (`type = 'link'`, weight 1.0) |
 | Tag edge | `idea.md` frontmatter `tags:` (exact names) | `edges` (`type = 'tag'`): a tag on `df` of `N` ideas weighs `0.3·ln(N/df)/ln(N)`, summed per pair, capped at 1.0 |
-| Lexical edge | title, tags, idea body and memory rows of `search_fts` | `edges` (`type = 'lexical'`): top 3 per idea, at least 2 shared terms after the idf-0 guard and the linked-pair slug-word guard, weight at most 0.19 |
+| Lexical edge | title, tags, idea body and memory rows of `search_fts` | `edges` (`type = 'lexical'`): top 2 per idea, at least 3 shared terms after the idf-0 guard and the linked-pair slug-word guard, weight at most 0.19 |
 | Timestamps | frontmatter `created:`/`updated:` | `ideas.created_at`/`updated_at` |
 
 All strings funneled into `search_fts` are passed through a `sanitized()` helper (`index::reindex`)
@@ -326,7 +326,7 @@ erDiagram
 > nullable for the same reason, but only an explicit `[[idea#fact]]` may stay dangling; an
 > unresolved bare candidate is dropped.
 
-**Schema stamp.** `schema::SCHEMA_VERSION` (currently **6**) is written into `PRAGMA user_version`
+**Schema stamp.** `schema::SCHEMA_VERSION` (currently **7**) is written into `PRAGMA user_version`
 by a completed reindex. An index stamped with another value was built by a different binary, so
 `reindex::check_drift` reports drift and `reindex` drops and recreates every derived table before
 rebuilding ([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)). The derived

@@ -541,8 +541,8 @@ fn derive_tag_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
     Ok(())
 }
 
-const LEXICAL_EDGE_TOP_K: usize = 3;
-const LEXICAL_EDGE_MIN_SHARED: usize = 2;
+const LEXICAL_EDGE_TOP_K: usize = 2;
+const LEXICAL_EDGE_MIN_SHARED: usize = 3;
 const LEXICAL_EDGE_WEIGHT: f64 = 0.19;
 const LEXICAL_EDGE_MAX_TERMS: usize = 5;
 
@@ -2154,12 +2154,12 @@ mod tests {
         write_linked_ideas(
             vault,
             &[
-                ("hub", "Wombat quasar hubonly."),
-                ("n1", "Wombat quasar kelp fjord brine."),
-                ("n2", "Wombat quasar kelp fjord brine."),
-                ("n3", "Wombat quasar kelp fjord brine."),
-                ("n4", "Wombat quasar kelp fjord brine."),
-                ("n5", "Wombat quasar kelp fjord brine."),
+                ("hub", "Wombat quasar tundra hubonly."),
+                ("n1", "Wombat quasar tundra kelp fjord brine."),
+                ("n2", "Wombat quasar tundra kelp fjord brine."),
+                ("n3", "Wombat quasar tundra kelp fjord brine."),
+                ("n4", "Wombat quasar tundra kelp fjord brine."),
+                ("n5", "Wombat quasar tundra kelp fjord brine."),
                 ("f1", "Solitary tangerine."),
                 ("f2", "Distant glacier."),
             ],
@@ -2167,13 +2167,13 @@ mod tests {
     }
 
     #[test]
-    fn lexical_edge_joins_two_ideas_sharing_two_rare_words() {
+    fn lexical_edge_joins_two_ideas_sharing_three_rare_words() {
         let tmp = tempfile::tempdir().unwrap();
         write_linked_ideas(
             tmp.path(),
             &[
-                ("north", "Quokka lantern zephyr common filler."),
-                ("south", "Quokka lantern marmot common filler."),
+                ("north", "Quokka lantern fjord zephyr common filler."),
+                ("south", "Quokka lantern fjord marmot common filler."),
                 ("east", "Common filler only here."),
             ],
         );
@@ -2188,17 +2188,17 @@ mod tests {
             *weight, LEXICAL_EDGE_WEIGHT,
             "each side is the other's top hit"
         );
-        assert_eq!(detail, "lantern, quokka");
+        assert_eq!(detail, "fjord, lantern, quokka");
     }
 
     #[test]
-    fn lexical_edge_needs_two_shared_terms() {
+    fn lexical_edge_needs_three_shared_terms() {
         let tmp = tempfile::tempdir().unwrap();
         write_linked_ideas(
             tmp.path(),
             &[
-                ("north", "Quokka zephyr common filler."),
-                ("south", "Quokka marmot common filler."),
+                ("north", "Quokka lantern zephyr common filler."),
+                ("south", "Quokka lantern marmot common filler."),
                 ("east", "Common filler here."),
             ],
         );
@@ -2218,7 +2218,7 @@ mod tests {
     }
 
     #[test]
-    fn lexical_edge_caps_each_idea_at_three_outgoing_candidates() {
+    fn lexical_edge_caps_each_idea_at_two_outgoing_candidates() {
         let tmp = tempfile::tempdir().unwrap();
         write_hub_vault(tmp.path());
         let mut conn = mem_conn();
@@ -2249,19 +2249,13 @@ mod tests {
                     "hub".into(),
                     "n1".into(),
                     LEXICAL_EDGE_WEIGHT,
-                    "quasar, wombat".into()
+                    "quasar, tundra, wombat".into()
                 ),
                 (
                     "hub".into(),
                     "n2".into(),
                     LEXICAL_EDGE_WEIGHT,
-                    "quasar, wombat".into()
-                ),
-                (
-                    "hub".into(),
-                    "n3".into(),
-                    LEXICAL_EDGE_WEIGHT,
-                    "quasar, wombat".into()
+                    "quasar, tundra, wombat".into()
                 ),
             ]
         );
@@ -2314,8 +2308,11 @@ mod tests {
         write_linked_ideas(
             tmp.path(),
             &[
-                ("north", "Builds on [[south]] with quokka lantern zephyr."),
-                ("south", "North quokka lantern marmot."),
+                (
+                    "north",
+                    "Builds on [[south]] with quokka lantern fjord zephyr.",
+                ),
+                ("south", "North quokka lantern fjord marmot."),
                 ("east", "Unrelated glacier."),
             ],
         );
@@ -2331,7 +2328,7 @@ mod tests {
             [(
                 "south",
                 1,
-                vec!["lexical: lantern, quokka; link: north → south".to_string()]
+                vec!["lexical: fjord, lantern, quokka; link: north → south".to_string()]
             )]
         );
         let of_south = queries::related_ideas(&conn, "south", 10).unwrap();
@@ -2345,8 +2342,8 @@ mod tests {
     fn lexical_edge_ignores_a_word_every_title_carries() {
         let tmp = tempfile::tempdir().unwrap();
         for (slug, title, body) in [
-            ("north", "Project north", "Quokka zephyr filler."),
-            ("south", "Project south", "Quokka marmot filler."),
+            ("north", "Project north", "Quokka lantern zephyr filler."),
+            ("south", "Project south", "Quokka lantern marmot filler."),
             ("east", "Project east", "Filler here."),
         ] {
             store::write_idea(
@@ -2376,8 +2373,8 @@ mod tests {
         write_linked_ideas(
             tmp.path(),
             &[
-                ("north", "Builds on [[south]] with quokka."),
-                ("south", "Quokka marmot."),
+                ("north", "Builds on [[south]] with quokka lantern."),
+                ("south", "Quokka lantern marmot."),
                 ("east", "Unrelated glacier."),
             ],
         );
@@ -2401,8 +2398,16 @@ mod tests {
     fn lexical_edge_counts_shared_title_words_of_unlinked_ideas() {
         let tmp = tempfile::tempdir().unwrap();
         for (slug, title, body) in [
-            ("solar-kiln-quokka", "Solar Kiln Quokka", "Pottery wheel."),
-            ("solar-kiln-marmot", "Solar Kiln Marmot", "Brick oven."),
+            (
+                "solar-kiln-ceramic-quokka",
+                "Solar Kiln Ceramic Quokka",
+                "Pottery wheel.",
+            ),
+            (
+                "solar-kiln-ceramic-marmot",
+                "Solar Kiln Ceramic Marmot",
+                "Brick oven.",
+            ),
             ("glacier-harbor", "Glacier Harbor", "Unrelated tide."),
         ] {
             store::write_idea(
@@ -2418,10 +2423,10 @@ mod tests {
         assert_eq!(
             lexical_edge_rows(&conn),
             vec![(
-                "solar-kiln-marmot".to_string(),
-                "solar-kiln-quokka".to_string(),
+                "solar-kiln-ceramic-marmot".to_string(),
+                "solar-kiln-ceramic-quokka".to_string(),
                 LEXICAL_EDGE_WEIGHT,
-                "kiln, solar".to_string()
+                "ceramic, kiln, solar".to_string()
             )]
         );
     }
@@ -2432,9 +2437,9 @@ mod tests {
         write_linked_ideas(
             tmp.path(),
             &[
-                ("north", "Quokka lantern zephyr."),
-                ("middle", "Quokka lantern marmot fjord."),
-                ("south", "Marmot fjord glacier."),
+                ("north", "Quokka lantern fjord zephyr."),
+                ("middle", "Quokka lantern fjord marmot tundra kelp."),
+                ("south", "Marmot tundra kelp glacier."),
                 ("east", "Unrelated tide pool."),
             ],
         );

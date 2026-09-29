@@ -18,8 +18,9 @@ use super::IndexError;
 ///
 /// 0 = unstamped (binaries before the stamp), 2 = `fact_links` + `edges`, 3 = tag edges,
 /// 4 = `search_fts.ref` (fact slug of `memory` rows, artifact slug of `artifact` rows),
-/// 5 = lexical word-overlap edges, 6 = lexical edge bm25 over the eligible rows only.
-pub const SCHEMA_VERSION: i64 = 6;
+/// 5 = lexical word-overlap edges, 6 = lexical edge bm25 over the eligible rows only,
+/// 7 = lexical edges keep the top 2 hits per idea and need 3 shared terms.
+pub const SCHEMA_VERSION: i64 = 7;
 
 const DERIVED_TABLES: [&str; 8] = [
     "edges",
