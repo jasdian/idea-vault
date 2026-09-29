@@ -92,7 +92,7 @@ async fn artifact_page_offers_prompt_and_attack_plan_copy_blocks() {
     assert!(body.contains("Use it") && body.contains("PROMPT.md") && body.contains("@plan.md"));
     assert!(body.contains("# Build: Ship the parser."), "{body}");
     assert!(body.contains("## PINNED — the owner said it"));
-    assert!(body.contains("| [ ] | T | Task | Depends | score | model | accept |"));
+    assert!(body.contains("| [ ] | T | Task | Depends | wave | score | model | touches | accept |"));
     assert!(body.contains("## Do not build on"));
     assert!(body.contains("reason: quote not in the discussion"));
 }
@@ -121,6 +121,54 @@ async fn artifact_page_prompt_block_carries_the_run_protocol_and_trust_line() {
         "{}",
         blocks[0]
     );
+}
+
+const PREMISE_BODY: &str = "# Build plan — Movable
+_quick · unaudited · m · 2026-09-28 21:40 · 0 capstone turn(s) excluded from evidence · consulted: none · sources: none · audit: none_
+_gates: premises 1 · tasks 1_
+
+## Goal
+Ship the parser.
+
+## Settled
+- none
+
+## Verify first
+- P1: The parser has a main entry
+  check: `grep -c <main> src/a.rs | grep -q 1` → exit 0
+
+## Open questions
+- none
+
+## Plan
+- [ ] T1: Write the parser
+  depends: P1
+  touches: src/a.rs
+  accept: `cargo test` → exit 0
+  model: sonnet
+  score: 00000
+  wave: 1
+
+## Kill criteria
+- none
+";
+
+#[tokio::test]
+async fn artifact_page_attack_plan_block_opens_with_the_escaped_bootstrap_row() {
+    let (state, vault) = test_state();
+    let uri = seed(&vault, ArtifactKind::BuildPlan, PREMISE_BODY);
+    let (status, body) = get(state, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    let blocks = copy_blocks(&body);
+    assert_eq!(blocks.len(), 2, "{body}");
+    let t0 = "| [ ] | T0 | Run the bootstrap checks P1 | — | 0 | 00000 | haiku | none (read-only) | P1: `grep -c &#60;main&#62; src/a.rs \\| grep -q 1` → exit 0 |";
+    assert!(blocks[1].contains(t0), "{}", blocks[1]);
+    assert!(
+        blocks[1].contains("| [ ] | T1 | Write the parser | T0 | 1 | 00000 | sonnet | src/a.rs |"),
+        "{}",
+        blocks[1]
+    );
+    assert!(!blocks[1].contains("<main>"), "{}", blocks[1]);
 }
 
 #[tokio::test]

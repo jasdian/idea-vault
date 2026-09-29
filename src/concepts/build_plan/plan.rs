@@ -1107,7 +1107,13 @@ fn push_brief(out: &mut String, plan: &BuildPlan, t: &Item) {
 
 /// A kill criterion as `STOP if …; checked by T#; blocks T#`, then its gate markers.
 fn push_kill(out: &mut String, k: &Item) {
-    let mut line = format!("- {}: STOP if {}", k.id, k.text);
+    out.push_str(&format!("- {}: {}\n", k.id, stop_line(k)));
+    push_notes(out, k);
+}
+
+/// `STOP if <criterion>; checked by T#; blocks T#`, leaving out a part the item lacks.
+fn stop_line(k: &Item) -> String {
+    let mut line = format!("STOP if {}", k.text);
     if let Some(by) = k.field("checked by") {
         line.push_str(&format!("; checked by {by}"));
     }
@@ -1115,9 +1121,7 @@ fn push_kill(out: &mut String, k: &Item) {
     if !blocks.is_empty() {
         line.push_str(&format!("; blocks {}", blocks.join(", ")));
     }
-    out.push_str(&line);
-    out.push('\n');
-    push_notes(out, k);
+    line
 }
 
 /// The most characters of the goal's first line that the `PROMPT.md` title carries.
@@ -1214,22 +1218,97 @@ fn table_cell(text: &str) -> String {
         .replace('|', "\\|")
 }
 
-/// Project a plan to an `/attack`-style `@plan.md`: one table row per task with `score` and
-/// `model` left as `?`, `[?]` marking owner tasks a loop must never auto-select, and an empty
-/// `## Log`.
+/// The id of the `@plan.md` row that runs every Verify-first check before any task.
+const BOOTSTRAP_ID: &str = "T0";
+
+/// A table cell's text, or `—` when it is empty.
+fn cell_or_dash(text: &str) -> String {
+    let cell = table_cell(text);
+    if cell.is_empty() {
+        "—".to_string()
+    } else {
+        cell
+    }
+}
+
+/// Project a plan to an `/attack`-style `@plan.md`: header lines (goal, rules, selection rule,
+/// fence paths, one STOP line per kill criterion), then one table row per task with the
+/// gate-derived `wave`, `score` and `model`, its `touches` and `accept`. A `T0` bootstrap row
+/// whose accept is the joined Verify-first checks comes first, and every task relying on a
+/// premise depends on it. `Depends` lists task ids only; question and free-text dependencies go
+/// to the Task cell, as does the reason of a `[?]` row a loop must never auto-select. An empty
+/// `## Log` closes it.
 pub fn render_attack_plan(plan: &BuildPlan) -> String {
-    let mut out = String::from(
-        "| [ ] | T | Task | Depends | score | model | accept |\n|---|---|---|---|---|---|---|\n",
+    let goal = cut(
+        plan.goal.lines().next().unwrap_or("").trim(),
+        GOAL_FIRST_CHARS,
     );
-    for t in &plan.tasks {
-        let depends = t.list("depends").join(", ");
+    let mut out = format!(
+        "Goal: {goal}\nRules: PROMPT.md (PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\n"
+    );
+    let fence: Vec<&str> = plan.fence.iter().map(|f| f.text.as_str()).collect();
+    if fence.is_empty() {
+        out.push_str("Fence: none\n");
+    } else {
+        out.push_str(&format!("Fence: {}\n", fence.join("; ")));
+    }
+    for k in &plan.kills {
+        out.push_str(&format!("{}\n", stop_line(k)));
+    }
+    out.push_str(
+        "\n| [ ] | T | Task | Depends | wave | score | model | touches | accept |\n|---|---|---|---|---|---|---|---|---|\n",
+    );
+    let bootstrap = !plan.verify.is_empty();
+    if bootstrap {
+        let ids: Vec<&str> = plan.verify.iter().map(|p| p.id.as_str()).collect();
+        let checks: Vec<String> = plan
+            .verify
+            .iter()
+            .map(|p| match p.field("check") {
+                Some(c) => format!("{}: {c}", p.id),
+                None => format!("{}: no check, confirm by hand: {}", p.id, p.text),
+            })
+            .collect();
         out.push_str(&format!(
-            "| {} | {} | {} | {} | ? | ? | {} |\n",
+            "| [ ] | {BOOTSTRAP_ID} | Run the bootstrap checks {} | — | 0 | 00000 | haiku | none (read-only) | {} |\n",
+            table_cell(&ids.join(", ")),
+            table_cell(&checks.join("; ")),
+        ));
+    }
+    for t in &plan.tasks {
+        let mut depends = t.depends_tasks();
+        if bootstrap && !t.depends_premises().is_empty() {
+            depends.insert(0, BOOTSTRAP_ID.to_string());
+        }
+        let mut after: Vec<String> = t
+            .depends_questions()
+            .into_iter()
+            .map(|q| format!("{q} answered"))
+            .collect();
+        after.extend(t.depends_free());
+        let mut task = t.text.clone();
+        if !after.is_empty() {
+            task.push_str(&format!(" (after: {})", after.join("; ")));
+        }
+        if t.needs_owner {
+            let reason = if t.markers.is_empty() {
+                "owner task".to_string()
+            } else {
+                t.markers.join("; ")
+            };
+            task.push_str(&format!(" — reason: {reason}"));
+        }
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             if t.needs_owner { "[?]" } else { "[ ]" },
             table_cell(&t.id),
-            table_cell(&t.text),
-            table_cell(&depends),
-            table_cell(t.field("accept").unwrap_or("")),
+            table_cell(&task),
+            cell_or_dash(&depends.join(", ")),
+            cell_or_dash(t.field("wave").unwrap_or("")),
+            cell_or_dash(t.field("score").unwrap_or("")),
+            cell_or_dash(t.field("model").unwrap_or("")),
+            cell_or_dash(&t.list("touches").join(", ")),
+            cell_or_dash(t.field("accept").unwrap_or("")),
         ));
     }
     out.push_str("\n## Log\n");
@@ -1633,19 +1712,24 @@ Run the cheapest disproof before any Rust exists.
     }
 
     #[test]
-    fn projection_attack_plan_marks_owner_tasks_and_leaves_score_unset() {
+    fn projection_attack_plan_marks_owner_tasks_and_escapes_pipes() {
         let mut plan = parse(PLAN).unwrap();
         plan.tasks[1]
             .fields
             .insert("accept".into(), "`a | b` → ok".into());
         let out = render_attack_plan(&plan);
-        assert!(out.starts_with("| [ ] | T | Task | Depends | score | model | accept |\n"));
         assert!(
-            out.contains("| [?] | T1 | Write SPEC.md with a dated kill criterion |  | ? | ? |  |"),
+            out.contains(
+                "\n| [ ] | T | Task | Depends | wave | score | model | touches | accept |\n"
+            ),
             "{out}"
         );
         assert!(
-            out.contains("| [ ] | T2 | Backtest SPEC.md at a pessimistic spread | T1 | ? | ? | `a \\| b` → ok |"),
+            out.contains("| [?] | T1 | Write SPEC.md with a dated kill criterion — reason: owner task | — | — | — | — | — | — |"),
+            "{out}"
+        );
+        assert!(
+            out.contains("| [ ] | T2 | Backtest SPEC.md at a pessimistic spread | T1 | — | — | — | backtest/ | `a \\| b` → ok |"),
             "{out}"
         );
         assert!(out.ends_with("\n## Log\n"));
@@ -2121,5 +2205,75 @@ Run the cheapest disproof before any Rust exists.
             "{prompt}"
         );
         assert!(prompt.find("Waves:").unwrap() < prompt.find("## PINNED").unwrap());
+    }
+
+    fn gated_plan() -> BuildPlan {
+        let mut plan = leaf_plan();
+        plan.tasks[0]
+            .markers
+            .push("needs you: pick a spread".into());
+        plan.fence.push(Item::new("F1", "`src/domain/links.rs`"));
+        plan
+    }
+
+    fn rows(out: &str) -> Vec<&str> {
+        out.lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| [ ] | T | Task"))
+            .collect()
+    }
+
+    #[test]
+    fn attack_plan_derived_cells_are_never_unset() {
+        let out = render_attack_plan(&gated_plan());
+        assert!(
+            out.contains("\n| [ ] | T | Task | Depends | wave | score | model | touches | accept |\n|---|---|---|---|---|---|---|---|---|\n"),
+            "{out}"
+        );
+        for row in rows(&out) {
+            let cells = cells(row);
+            assert_eq!(cells.len(), 9, "{row}");
+            assert!(cells.iter().all(|c| c != "?" && !c.is_empty()), "{row}");
+        }
+        assert!(
+            out.contains("| [ ] | T2 | Backtest SPEC.md at a pessimistic spread (after: Q1 answered; the price list) | T0, T1 | 1 | 01000 | sonnet | backtest/ | `python backtest/run.py --spec SPEC.md` → last line is KILL or SURVIVES |\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("| [?] | T1 | Write SPEC.md with a dated kill criterion — reason: needs you: pick a spread | — | — | 10100 | opus | — | — |\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn attack_plan_bootstrap_row_comes_first_and_orders_premise_tasks() {
+        let out = render_attack_plan(&gated_plan());
+        let rows = rows(&out);
+        assert_eq!(
+            rows[0],
+            "| [ ] | T0 | Run the bootstrap checks P1 | — | 0 | 00000 | haiku | none (read-only) | P1: `sed -n 385p risk/src/calculator.rs \\| grep -nF calculate_regime_factor` |",
+            "{out}"
+        );
+        assert_eq!(cells(rows[2])[3], "T0, T1", "{out}");
+        assert_eq!(cells(rows[1])[3], "—", "{out}");
+        let none = render_attack_plan(&parse("## Goal\nShip.\n## Plan\n- T1: x\n").unwrap());
+        assert!(!none.contains("| T0 |"), "{none}");
+    }
+
+    #[test]
+    fn attack_plan_header_names_rules_fence_and_stop_lines() {
+        let out = render_attack_plan(&gated_plan());
+        let table = out.find("\n| [ ] | T |").unwrap();
+        let header = &out[..table];
+        for line in [
+            "Goal: Run the cheapest disproof before any Rust exists.\n",
+            "Rules: PROMPT.md (PINNED, Fence)\n",
+            "Selection rule: the topmost [ ] whose Depends are all [x]; never [?]\n",
+            "Fence: `src/domain/links.rs`\n",
+            "STOP if The backtest prints KILL → stop and report; checked by T2; blocks T3\n",
+        ] {
+            assert!(header.contains(line), "{line}\n{out}");
+        }
+        let bare = render_attack_plan(&parse("## Goal\nShip.\n## Plan\n- T1: x\n").unwrap());
+        assert!(bare.contains("Fence: none\n"), "{bare}");
     }
 }
