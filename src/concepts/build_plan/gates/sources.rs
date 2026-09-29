@@ -78,7 +78,7 @@ impl<'a> Ctx<'a> {
             .chain(&plan.fence)
             .flat_map(|i| tokens(&claim_text(i)));
         let planned = plan.tasks.iter().flat_map(|t| tokens(&t.text));
-        let mut wanted: Vec<String> = gated.chain(planned).collect();
+        let mut wanted: Vec<String> = gated.chain(planned).flat_map(|t| forms(&t)).collect();
         wanted.sort();
         wanted.dedup();
         let scan = inputs.probe.find_tokens(&wanted);
@@ -306,6 +306,19 @@ fn quote(text: &str) -> String {
     format!("'{text}'")
 }
 
+/// The token plus, for a plain plural, its singular: the plan may pluralise a discussed name
+/// (`UPDATEs` for `UPDATE`) without inventing it.
+fn forms(token: &str) -> Vec<String> {
+    let mut out = vec![token.to_string()];
+    let plain = token.chars().all(|c| c.is_alphanumeric() || c == '_');
+    if let Some(stem) = token.strip_suffix('s') {
+        if plain && stem.chars().count() >= 3 && !stem.ends_with(['s', 'S']) {
+            out.push(stem.to_string());
+        }
+    }
+    out
+}
+
 /// Whether the token is in the scanned sources, by content or (for a path) by existence.
 fn known(ctx: &Ctx, token: &str) -> bool {
     ctx.scan.found.contains(token) || (path_like(token) && ctx.probe.has_path(token) == Some(true))
@@ -480,11 +493,12 @@ fn g5(item: &Item, ctx: &Ctx, report: &mut GateReport) -> Option<Verdict> {
     let mut nowhere: Vec<(String, bool)> = Vec::new();
     let mut foil: Vec<String> = Vec::new();
     for t in tokens(&text) {
-        let lower = t.to_lowercase();
-        if known(ctx, &t) || word_in(&ctx.owner_idea, &lower) {
+        let forms = forms(&t);
+        let said = |hay: &str| forms.iter().any(|f| word_in(hay, &f.to_lowercase()));
+        if forms.iter().any(|f| known(ctx, f)) || said(&ctx.owner_idea) {
             continue;
         }
-        if word_in(&ctx.foil, &lower) {
+        if said(&ctx.foil) {
             foil.push(t);
         } else {
             let unknown_path =
@@ -812,6 +826,23 @@ mod tests {
         assert!(markers(item).contains("absence claim: a premise, not a fact"));
         assert_eq!(item.field("check"), Some("`grep -rnF -- 'ACCOUNT_MODE' .`"));
         assert_eq!(report.tally.get("premises"), Some(&1));
+    }
+
+    #[test]
+    fn g5_a_plural_of_a_discussed_token_is_not_invented() {
+        let mut plan = settled("Both `vaults` stay local.");
+        run(&mut plan, &SourceProbe::default());
+        assert!(plan.quarantined.is_empty(), "{:?}", plan.quarantined);
+        assert!(plan.verify.is_empty(), "{:?}", plan.verify);
+        assert_eq!(plan.settled.len(), 1);
+        let mut foil = settled("The `MaxLeverages` cap at one.");
+        run(&mut foil, &SourceProbe::default());
+        assert!(foil.quarantined.is_empty(), "{:?}", foil.quarantined);
+        assert!(
+            markers(&foil.verify[0]).contains("foil-coined"),
+            "{:?}",
+            foil.verify
+        );
     }
 
     #[test]

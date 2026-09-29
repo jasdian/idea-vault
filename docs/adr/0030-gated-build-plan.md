@@ -237,7 +237,7 @@ In order:
 ### After the first live run (2026-09-29)
 
 Both chips were run against a copy of the vault with the claude-code backend on an idea with an
-attached source. Four defects were fixed:
+attached source. Five defects were fixed:
 - **A fence is never removed.** G5 treats a Fence item as a guard, not a claim: an unproven path
   stays fenced with an `unverified fence path: …` marker instead of moving to Quarantined, which
   had left `plan.md` with `Fence: none` over the owner's read-only reference docs.
@@ -251,6 +251,9 @@ attached source. Four defects were fixed:
 - **Tasks cite the premises they rely on.** The template's `depends:` line asks for `P#`, and
   premise wiring also matches record ids (above). In the live run no task depended on any premise,
   so `T0` gated nothing.
+- **A plural is not an invention.** G5 checks a plain `s` plural by its singular too, so a claim
+  about `UPDATEs` where the discussion said `UPDATE` stays settled. The re-run had quarantined a
+  kill row for that one word.
 
 The `plan.md` header also gained the `Commands:` line: copied literally, `grep -cE "A\|B"` counts
 0 where `grep -cE "A|B"` counts 2.
