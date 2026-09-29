@@ -319,8 +319,8 @@ async fn ready_to_build_folds_audited_findings_into_a_fenced_build_prompt() {
     let chain = &bodies[6];
     assert!(chain.contains("BUILD PROMPT"));
     assert!(chain.contains("## Prior stage: findings"));
-    assert!(chain.contains("Ship solo first [CONFIRMED]"));
-    assert!(chain.contains("Call three agencies [REFUTED]"));
+    assert!(chain.contains("[CONFIRMED] Ship solo first"));
+    assert!(chain.contains("[REFUTED] Call three agencies"));
     assert_eq!(
         outcome.synthesis,
         "```markdown\n# Build the agency tool\n```"
@@ -466,4 +466,55 @@ async fn related_block_reaches_workflow_stages_but_not_audit() {
         !audit.contains("RELATED-MARKER"),
         "the audit prompt carries no related block; agent answers here never quote it"
     );
+}
+
+async fn chained_step_body(auditor_reply: &str) -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("- Ship solo first"),
+            tokens("- Agencies pay monthly"),
+            tokens(""),
+            tokens("- risk: churn"),
+            tokens("- Call three agencies"),
+            tokens(auditor_reply),
+            tokens("```markdown\n# Build\n```"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "ready-to-build", true).await;
+    mock.chat_bodies().pop().unwrap()
+}
+
+#[tokio::test]
+async fn chained_findings_carry_the_auditor_reason() {
+    let chain = chained_step_body(
+        "F1: CONFIRMED — settled in the discussion\nF2: CONFIRMED — said\nF3: UNCERTAIN — maybe\nF4: REFUTED — not discussed",
+    )
+    .await;
+    assert!(
+        chain.contains("[CONFIRMED] Ship solo first (")
+            && chain.contains("auditor: settled in the discussion")
+    );
+    assert!(chain.contains("auditor: not discussed"));
+}
+
+#[tokio::test]
+async fn chained_findings_are_unlabelled_when_the_audit_failed() {
+    let chain = chained_step_body("I cannot judge these.").await;
+    assert!(chain.contains("Ship solo first"));
+    assert!(!chain.contains("[UNCERTAIN]") && !chain.contains("[CONFIRMED]"));
+    assert!(chain.contains("audit was unavailable"));
+}
+
+#[tokio::test]
+async fn chained_findings_open_with_the_verdict_guidance() {
+    let chain = chained_step_body(
+        "F1: CONFIRMED — ok\nF2: UNCERTAIN — maybe\nF3: REFUTED — no\nF4: CONFIRMED — ok",
+    )
+    .await;
+    assert!(chain.contains("Build the position on CONFIRMED findings"));
+    assert!(chain.contains("do not build on REFUTED ones"));
 }

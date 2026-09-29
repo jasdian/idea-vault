@@ -151,21 +151,50 @@ pub struct WorkflowOutcome {
     pub audit: Option<AuditReport>,
 }
 
-/// The findings as a carried-forward block for a chained step, verdicts included when audited.
-fn findings_block(findings: &[Finding], report: Option<&AuditReport>) -> String {
+/// The findings as a carried-forward block for a chained step. Audited lines carry the verdict
+/// and the auditor's reason; when the audit failed the verdicts are defaults, so the findings are
+/// listed unlabelled and the block says so.
+fn findings_block(
+    findings: &[Finding],
+    report: Option<&AuditReport>,
+    budget: ContextBudget,
+) -> String {
+    let allowance = audit::finding_allowance(budget, findings.len());
+    let audited = report.filter(|r| !r.failed);
     let lines = findings
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let verdict = report
-                .and_then(|r| r.verdicts.get(i))
-                .map(|v| format!(" [{}]", v.label.as_str()))
-                .unwrap_or_default();
-            format!("- {}{verdict} ({})", f.text, f.provenance())
+            let text = audit::clip(&f.text, allowance);
+            match audited.and_then(|r| r.verdicts.get(i)) {
+                Some(v) if v.reason.trim().is_empty() => {
+                    format!("- [{}] {text} ({})", v.label.as_str(), f.provenance())
+                }
+                Some(v) => format!(
+                    "- [{}] {text} ({}) — auditor: {}",
+                    v.label.as_str(),
+                    f.provenance(),
+                    v.reason.trim()
+                ),
+                None => format!("- {text} ({})", f.provenance()),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!("## Prior stage: findings\n{lines}")
+    let preface = match report {
+        Some(r) if r.failed => {
+            "The audit was unavailable, so these findings carry no verdicts; treat every one as \
+             unchecked."
+                .to_string()
+        }
+        Some(_) => audit::VERDICT_GUIDANCE.to_string(),
+        None => String::new(),
+    };
+    if preface.is_empty() {
+        format!("## Prior stage: findings\n{lines}")
+    } else {
+        format!("## Prior stage: findings\n{preface}\n\n{lines}")
+    }
 }
 
 /// The findings a run's fan-outs produced, judged, deduped and capped — or
@@ -275,7 +304,7 @@ pub async fn run_workflow(
                         findings = gather(&step_results).ok();
                     }
                     if let Some(f) = &findings {
-                        carried.push(findings_block(f, report.as_ref()));
+                        carried.push(findings_block(f, report.as_ref(), budget));
                     }
                 }
                 let task = AgentTask {

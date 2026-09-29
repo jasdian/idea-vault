@@ -30,6 +30,12 @@ const UNIFORM_PASS_PERCENT: usize = 90;
 /// Below this many findings a uniform pass is unremarkable.
 const UNIFORM_PASS_MIN_FINDINGS: usize = 4;
 
+/// How a consumer of audited findings must treat each verdict; shared by the swarm synthesizer
+/// and chained workflow steps.
+pub const VERDICT_GUIDANCE: &str = "Each finding carries an auditor's verdict. Build the position \
+on CONFIRMED findings, present UNCERTAIN ones as open questions, and do not build on REFUTED \
+ones — they are listed separately after your answer.";
+
 const AUDIT_INSTRUCTION: &str = "Below are numbered findings other agents produced about an \
 idea, then the idea itself, its memory, and the discussion so far. Judge each finding ONLY \
 against that material and plain reasoning:\n\

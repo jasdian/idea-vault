@@ -118,11 +118,9 @@ pub(crate) async fn synthesize(
         .collect::<Vec<_>>()
         .join("\n\n");
     let guidance = if report.is_some_and(|r| !r.failed) {
-        "\n\nEach finding carries an auditor's verdict. Build the position on CONFIRMED \
-         findings, present UNCERTAIN ones as open questions, and do not build on REFUTED ones — \
-         they are listed separately after your answer."
+        format!("\n\n{}", audit::VERDICT_GUIDANCE)
     } else {
-        ""
+        String::new()
     };
     let context = format!(
         "## The idea\n{}\n\n## Findings{guidance}\n\n{listed}",
