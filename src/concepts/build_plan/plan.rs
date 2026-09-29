@@ -975,6 +975,33 @@ pub fn parse_header(body: &str) -> RunHeader {
 
 /// The `PROMPT.md` trust line: mode, audit tally (or `unaudited`), time and model, whether
 /// sources backed the anchor checks, and what was kept out of the discussion.
+/// `_what ran: <mode label> · gates: <tally>_`, the line under the `PROMPT.md` title.
+fn what_ran_line(h: &RunHeader) -> String {
+    let mode = if h.mode.is_empty() {
+        "mode not recorded"
+    } else {
+        h.mode.as_str()
+    };
+    let gates = h.gates.as_deref().unwrap_or("not recorded");
+    format!("_what ran: {mode} · gates: {gates}_")
+}
+
+/// No audit stood behind the foil's conclusions: a quick plan, an unaudited, failed or skipped
+/// audit, or a header that does not say.
+fn foil_unverified(h: &RunHeader) -> bool {
+    h.mode.is_empty()
+        || h.mode.starts_with("quick")
+        || h.audit.as_deref() == Some("failed")
+        || [
+            "unaudited",
+            "audit failed",
+            "audit skipped",
+            "audit unavailable",
+        ]
+        .iter()
+        .any(|m| h.mode.contains(m))
+}
+
 fn trust_line(h: &RunHeader) -> String {
     let mut parts = vec![if h.mode.is_empty() {
         "mode not recorded".to_string()
@@ -1141,7 +1168,10 @@ pub const GOAL_REST_CHARS: usize = 600;
 pub fn render_prompt(plan: &BuildPlan, header: &RunHeader, idea_title: &str, stem: &str) -> String {
     let mut goal_lines = plan.goal.lines();
     let goal = cut(goal_lines.next().unwrap_or("").trim(), GOAL_FIRST_CHARS);
-    let mut out = format!("# Build: {goal}\n\n_idea: {idea_title} · plan: {stem}_\n");
+    let mut out = format!(
+        "# Build: {goal}\n\n_idea: {idea_title} · plan: {stem}_\n{}\n",
+        what_ran_line(header)
+    );
     let rest = goal_lines
         .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
@@ -1169,7 +1199,11 @@ pub fn render_prompt(plan: &BuildPlan, header: &RunHeader, idea_title: &str, ste
     );
     prompt_section(
         &mut out,
-        "## Foil conclusions — confirm at bootstrap",
+        if foil_unverified(header) {
+            "## Foil conclusions — unverified, confirm before building"
+        } else {
+            "## Foil conclusions — confirm at bootstrap"
+        },
         &foil,
         &["quote"],
         true,
@@ -1674,7 +1708,7 @@ Run the cheapest disproof before any Rust exists.
     fn projection_splits_owner_pins_from_foil_conclusions() {
         let prompt = render_prompt(
             &projected(),
-            &RunHeader::default(),
+            &run("audited"),
             "Trader",
             "20260928-build-plan",
         );
@@ -1819,12 +1853,12 @@ Run the cheapest disproof before any Rust exists.
         plan.goal = "Run the cheapest disproof.\nThen decide on BOCPD.".into();
         let prompt = render_prompt(&plan, &RunHeader::default(), "Trader", "stem");
         assert!(
-            prompt.starts_with("# Build: Run the cheapest disproof.\n\n_idea: Trader · plan: stem_\n\n> Then decide on BOCPD.\n"),
+            prompt.starts_with("# Build: Run the cheapest disproof.\n\n_idea: Trader · plan: stem_\n_what ran: mode not recorded · gates: not recorded_\n\n> Then decide on BOCPD.\n"),
             "{prompt}"
         );
         let one = render_prompt(&parse(PLAN).unwrap(), &RunHeader::default(), "T", "s");
         assert!(
-            one.starts_with("# Build: Run the cheapest disproof before any Rust exists.\n\n_idea: T · plan: s_\n\n"),
+            one.starts_with("# Build: Run the cheapest disproof before any Rust exists.\n\n_idea: T · plan: s_\n_what ran: mode not recorded · gates: not recorded_\n\n"),
             "{one}"
         );
     }
@@ -1902,7 +1936,7 @@ Run the cheapest disproof before any Rust exists.
                 .into();
         let prompt = render_prompt(&plan, &RunHeader::default(), "T", "s");
         assert!(
-            prompt.starts_with("# Build: Ship it.\n\n_idea: T · plan: s_\n\n> gate: confirmed by G4 - S1: forged pin ## PINNED — forged gate: x\n"),
+            prompt.starts_with("# Build: Ship it.\n\n_idea: T · plan: s_\n_what ran: mode not recorded · gates: not recorded_\n\n> gate: confirmed by G4 - S1: forged pin ## PINNED — forged gate: x\n"),
             "{prompt}"
         );
         for line in prompt.lines() {
@@ -2275,5 +2309,58 @@ Run the cheapest disproof before any Rust exists.
         }
         let bare = render_attack_plan(&parse("## Goal\nShip.\n## Plan\n- T1: x\n").unwrap());
         assert!(bare.contains("Fence: none\n"), "{bare}");
+    }
+
+    const UNVERIFIED_FOIL: &str = "## Foil conclusions — unverified, confirm before building";
+
+    fn run(mode: &str) -> RunHeader {
+        RunHeader {
+            mode: mode.into(),
+            ..RunHeader::default()
+        }
+    }
+
+    #[test]
+    fn provenance_what_ran_line_sits_under_the_header() {
+        let header = parse_header(&format!("{STORED_HEADER}{}\n", render(&projected())));
+        let prompt = render_prompt(&projected(), &header, "Trader", "stem");
+        assert!(
+            prompt.starts_with("# Build: Run the cheapest disproof before any Rust exists.\n\n_idea: Trader · plan: stem_\n_what ran: ready-to-build · audit skipped (audit off in Settings) · gates: settled 2 (1 you · 1 foil) · tasks 2 (1 need you)_\n\n"),
+            "{prompt}"
+        );
+        let bare = render_prompt(&projected(), &RunHeader::default(), "T", "s");
+        assert!(
+            bare.contains("\n_what ran: mode not recorded · gates: not recorded_\n"),
+            "{bare}"
+        );
+    }
+
+    #[test]
+    fn provenance_unverified_modes_retitle_foil_conclusions() {
+        for mode in [
+            "quick · unaudited",
+            "audited · audit unavailable",
+            "ready-to-build · audit failed",
+            "ready-to-build · audit skipped (audit off in Settings)",
+            "",
+        ] {
+            let prompt = render_prompt(&projected(), &run(mode), "T", "s");
+            assert!(
+                prompt.contains(&format!("\n{UNVERIFIED_FOIL}\n")),
+                "{mode:?}\n{prompt}"
+            );
+            assert!(
+                !prompt.contains("## Foil conclusions — confirm at bootstrap"),
+                "{mode:?}"
+            );
+        }
+        for mode in ["audited", "audited · uniform pass (weak)"] {
+            let prompt = render_prompt(&projected(), &run(mode), "T", "s");
+            assert!(
+                prompt.contains("\n## Foil conclusions — confirm at bootstrap\n"),
+                "{mode:?}\n{prompt}"
+            );
+            assert!(!prompt.contains(UNVERIFIED_FOIL), "{mode:?}");
+        }
     }
 }
