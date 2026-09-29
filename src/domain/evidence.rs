@@ -3,8 +3,9 @@
 //! extraction and the build-plan gates (docs/adr/0023, docs/adr/0029).
 
 /// Fold text for quote matching: lowercase, typographic quotes and dashes made plain, markdown
-/// emphasis/quote/heading marks dropped, whitespace collapsed — so a quote the model copied from
-/// rendered-looking text still matches the raw markdown it came from.
+/// emphasis/quote/heading marks and backslash escapes dropped, whitespace collapsed — so a quote
+/// the model copied from rendered-looking text, or wrote with `\"` escapes, still matches the raw
+/// markdown it came from.
 pub fn normalize_for_match(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last_space = true;
@@ -15,7 +16,7 @@ pub fn normalize_for_match(text: &str) -> String {
             '–' | '—' => '-',
             c => c,
         };
-        if matches!(ch, '*' | '_' | '`' | '>' | '#') {
+        if matches!(ch, '*' | '_' | '`' | '>' | '#' | '\\') {
             continue;
         }
         if ch.is_whitespace() {
@@ -78,6 +79,22 @@ pub fn grounded(quote: &str, haystack_normalized: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backslash_escaped_quote_still_grounds() {
+        let hay = normalize_for_match(
+            "## user\nOf 56 stored facts, 6 contain \"cheapest disproof\" in their text.",
+        );
+        assert!(
+            grounded(r#"6 contain \"cheapest disproof\" in their text"#, &hay),
+            "a model-escaped double quote matches the plain quote"
+        );
+        let escaped_hay = normalize_for_match(r"the owner wrote \*not\* \_this\_ one");
+        assert!(
+            grounded("the owner wrote not this one", &escaped_hay),
+            "markdown escapes in the source fold away too"
+        );
+    }
 
     #[test]
     fn grounded_matches_normalized_verbatim_spans_only() {
