@@ -903,18 +903,238 @@ fn cut(text: &str, max: usize) -> String {
     }
 }
 
+/// What a stored plan artifact's code-owned header lines say about the run that made it: the
+/// mode label, model and time, the capstone turns kept out of evidence, the open-questions
+/// artifact consulted, whether reference sources were attached, the audit tally and the gate
+/// tally. A field the header does not carry stays empty.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunHeader {
+    pub mode: String,
+    pub model: String,
+    pub generated: String,
+    pub excluded: Option<String>,
+    pub consulted: Option<String>,
+    pub sources: Option<String>,
+    pub audit: Option<String>,
+    pub gates: Option<String>,
+}
+
+/// `2026-09-29 12:00`-shaped: the header segment that carries the run time.
+fn is_stamp(part: &str) -> bool {
+    let b = part.as_bytes();
+    b.len() >= 10 && b[..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
+}
+
+/// Read the run header of a stored build-plan artifact: the italic `_mode · model · time · …_`
+/// line and the `_gates: …_` line above `## Goal`. The mode label may itself hold ` · `, so the
+/// segments are placed around the time stamp.
+pub fn parse_header(body: &str) -> RunHeader {
+    let mut header = RunHeader::default();
+    let mut run_seen = false;
+    for line in body.lines().take_while(|l| !l.starts_with("## ")) {
+        let Some(inner) = line
+            .trim()
+            .strip_prefix('_')
+            .and_then(|l| l.strip_suffix('_'))
+        else {
+            continue;
+        };
+        if let Some(gates) = inner.strip_prefix("gates: ") {
+            header.gates = Some(gates.trim().to_string());
+            continue;
+        }
+        if run_seen {
+            continue;
+        }
+        run_seen = true;
+        let parts: Vec<&str> = inner.split(" · ").map(str::trim).collect();
+        let stamp = parts.iter().position(|p| is_stamp(p));
+        let mut mode = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let value = |key: &str| part.strip_prefix(key).map(|v| v.trim().to_string());
+            if let Some(v) = value("consulted: ") {
+                header.consulted = Some(v);
+            } else if let Some(v) = value("sources: ") {
+                header.sources = Some(v);
+            } else if let Some(v) = value("audit: ") {
+                header.audit = Some(v);
+            } else if part.contains("excluded from evidence") {
+                header.excluded = Some(part.to_string());
+            } else if Some(i) == stamp {
+                header.generated = part.to_string();
+            } else if stamp.is_some_and(|s| i + 1 == s) {
+                header.model = part.to_string();
+            } else if stamp.is_none_or(|s| i < s) {
+                mode.push(*part);
+            }
+        }
+        header.mode = mode.join(" · ");
+    }
+    header
+}
+
+/// The `PROMPT.md` trust line: mode, audit tally (or `unaudited`), time and model, whether
+/// sources backed the anchor checks, and what was kept out of the discussion.
+fn trust_line(h: &RunHeader) -> String {
+    let mut parts = vec![if h.mode.is_empty() {
+        "mode not recorded".to_string()
+    } else {
+        h.mode.clone()
+    }];
+    match h.audit.as_deref().filter(|a| !is_none(a)) {
+        Some(a) => parts.push(format!("audit: {a}")),
+        None if h.mode.contains("unaudited") => {}
+        None => parts.push("unaudited".into()),
+    }
+    let when = if h.generated.is_empty() {
+        "generated at an unrecorded time".to_string()
+    } else {
+        format!("generated {}", h.generated)
+    };
+    parts.push(if h.model.is_empty() {
+        when
+    } else {
+        format!("{when} by {}", h.model)
+    });
+    parts.push(match h.sources.as_deref().filter(|s| !is_none(s)) {
+        Some(s) => format!("sources: {s}"),
+        None => "no sources: anchors unverified".into(),
+    });
+    parts.push(format!(
+        "discussion: {}; truncation not recorded",
+        h.excluded
+            .as_deref()
+            .unwrap_or("capstone exclusions not recorded")
+    ));
+    format!("_trust: {}_", parts.join(" · "))
+}
+
+/// The fixed run protocol every `PROMPT.md` carries, whatever the model wrote.
+const RUN_PROTOCOL: &str = "## How to run this
+1. Run every Bootstrap check first; a failing P# stops the tasks that depend on it.
+2. Never start a [?] task; ask the owner the listed Q# instead.
+3. Foil conclusions are hypotheses: confirm one before building on it.
+4. Edit only the paths a task's files: line names, never a Fence path. Needing any other file means stop and report.
+5. Build in wave order, one commit per task, with the commit subject equal to the task title.
+6. When a task has red-first, run it before the edit and confirm the stated failure. Take the baseline by copying files to a scratch directory, never with git stash, reset or checkout.
+7. A task passes when its acceptance exits as stated AND the test count matches.
+8. Stop after 3 failed attempts at a task and report it.
+9. Never run destructive or git-history commands.
+10. End each task's report with: files / accept exit=<code> <counts> / red-first / deviations.
+";
+
+/// `Waves: 1 → T2, T3 · 2 → T4 · unscheduled → T1` — a task with no derived wave (an owner
+/// task, a cycle) is unscheduled.
+fn waves_line(plan: &BuildPlan) -> String {
+    let mut waves: BTreeMap<usize, Vec<&str>> = BTreeMap::new();
+    let mut unscheduled = Vec::new();
+    for t in &plan.tasks {
+        match t.field("wave").and_then(|w| w.trim().parse::<usize>().ok()) {
+            Some(w) => waves.entry(w).or_default().push(&t.id),
+            None => unscheduled.push(t.id.as_str()),
+        }
+    }
+    let mut parts: Vec<String> = waves
+        .iter()
+        .map(|(w, ids)| format!("{w} → {}", ids.join(", ")))
+        .collect();
+    if !unscheduled.is_empty() {
+        parts.push(format!("unscheduled → {}", unscheduled.join(", ")));
+    }
+    format!("Waves: {}", parts.join(" · "))
+}
+
+/// One task as a leaf brief: objective, files, what to open first, its dependencies with each
+/// premise's check inlined, acceptance, red-first, stop condition, wave/score/model and every
+/// gate marker.
+fn push_brief(out: &mut String, plan: &BuildPlan, t: &Item) {
+    push_item(out, t, if t.needs_owner { "[?] " } else { "[ ] " });
+    out.push_str(&format!("  objective: {}\n", t.text));
+    let files = t.list("touches");
+    if files.is_empty() {
+        out.push_str("  files: none named — stop and report before editing\n");
+    } else {
+        out.push_str(&format!("  files: {}\n", files.join(", ")));
+    }
+    if let Some(reads) = t.field("reads") {
+        out.push_str(&format!("  open first: {reads}\n"));
+    }
+    let mut depends: Vec<String> = t.depends_tasks();
+    for p in t.depends_premises() {
+        let check = plan
+            .verify
+            .iter()
+            .find(|v| v.id == p)
+            .and_then(|v| v.field("check"));
+        depends.push(match check {
+            Some(c) => format!("{p} (check first: {c})"),
+            None => format!("{p} (confirm first)"),
+        });
+    }
+    depends.extend(
+        t.depends_questions()
+            .into_iter()
+            .map(|q| format!("{q} (ask the owner first)")),
+    );
+    depends.extend(t.depends_free());
+    if depends.is_empty() {
+        out.push_str("  depends: none\n");
+    } else {
+        out.push_str(&format!("  depends: {}\n", depends.join("; ")));
+    }
+    out.push_str(&format!(
+        "  acceptance: {}\n",
+        t.field("accept").unwrap_or("none — ask the owner")
+    ));
+    if let Some(red) = t.field("red") {
+        out.push_str(&format!("  red-first: {red}\n"));
+    }
+    if let Some(stop) = t.field("stop if") {
+        out.push_str(&format!("  stop if: {stop}\n"));
+    }
+    let wave = match t.field("wave") {
+        Some(w) => w.to_string(),
+        None if t.needs_owner => "— (needs the owner)".to_string(),
+        None => "—".to_string(),
+    };
+    out.push_str(&format!(
+        "  wave: {wave} · score: {} · model: {}\n",
+        t.field("score").unwrap_or("—"),
+        t.field("model").unwrap_or("—"),
+    ));
+    push_notes(out, t);
+}
+
+/// A kill criterion as `STOP if …; checked by T#; blocks T#`, then its gate markers.
+fn push_kill(out: &mut String, k: &Item) {
+    let mut line = format!("- {}: STOP if {}", k.id, k.text);
+    if let Some(by) = k.field("checked by") {
+        line.push_str(&format!("; checked by {by}"));
+    }
+    let blocks = k.list("gates");
+    if !blocks.is_empty() {
+        line.push_str(&format!("; blocks {}", blocks.join(", ")));
+    }
+    out.push_str(&line);
+    out.push('\n');
+    push_notes(out, k);
+}
+
 /// The most characters of the goal's first line that the `PROMPT.md` title carries.
 pub const GOAL_FIRST_CHARS: usize = 160;
 
 /// The most characters of the goal beyond its first line that `PROMPT.md` quotes.
 pub const GOAL_REST_CHARS: usize = 600;
 
-/// Project a plan to a `PROMPT.md` any coding agent can follow: owner pins, foil conclusions to
-/// confirm, fence, bootstrap checks, owner questions, tasks, kill criteria and the quarantined
-/// claims not to build on. Every item's gate markers follow it as `gate:` lines; the goal beyond
-/// its first line is kept as one quoted paragraph, cut at [`GOAL_REST_CHARS`] characters, so it
-/// cannot pose as a gate note or an item; the title line is cut at [`GOAL_FIRST_CHARS`]. Empty sections are omitted except the two settled ones.
-pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
+/// Project a plan to a `PROMPT.md` any coding agent can run: the goal, a trust line read from
+/// the artifact's [`RunHeader`], the fixed run protocol and a one-line waves summary, then owner
+/// pins, foil conclusions to confirm, fence, bootstrap checks, owner questions, each task as a
+/// leaf brief, kill criteria as STOP lines and the quarantined claims not to build on. Every
+/// item's gate markers follow it as `gate:` lines; the goal beyond its first line is kept as one
+/// quoted paragraph, cut at [`GOAL_REST_CHARS`] characters, so it cannot pose as a gate note or an
+/// item; the title line is cut at [`GOAL_FIRST_CHARS`]. Empty sections are omitted except the two
+/// settled ones.
+pub fn render_prompt(plan: &BuildPlan, header: &RunHeader, idea_title: &str, stem: &str) -> String {
     let mut goal_lines = plan.goal.lines();
     let goal = cut(goal_lines.next().unwrap_or("").trim(), GOAL_FIRST_CHARS);
     let mut out = format!("# Build: {goal}\n\n_idea: {idea_title} · plan: {stem}_\n");
@@ -925,6 +1145,11 @@ pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
     let rest = cut(&rest, GOAL_REST_CHARS);
     if !rest.is_empty() {
         out.push_str(&format!("\n> {rest}\n"));
+    }
+    out.push_str(&format!("\n{}\n", trust_line(header)));
+    out.push_str(&format!("\n{RUN_PROTOCOL}"));
+    if !plan.tasks.is_empty() {
+        out.push_str(&format!("\n{}\n", waves_line(plan)));
     }
     let (pinned, foil): (Vec<Item>, Vec<Item>) = plan
         .settled
@@ -963,18 +1188,15 @@ pub fn render_prompt(plan: &BuildPlan, idea_title: &str, stem: &str) -> String {
     if !plan.tasks.is_empty() {
         out.push_str("\n## Plan\n");
         for t in &plan.tasks {
-            push_item(&mut out, t, if t.needs_owner { "[?] " } else { "[ ] " });
-            push_fields(&mut out, t, &["depends", "touches", "accept"]);
-            push_notes(&mut out, t);
+            push_brief(&mut out, plan, t);
         }
     }
-    prompt_section(
-        &mut out,
-        "## Kill criteria",
-        &plan.kills,
-        &["checked by", "gates"],
-        false,
-    );
+    if !plan.kills.is_empty() {
+        out.push_str("\n## Kill criteria\n");
+        for k in &plan.kills {
+            push_kill(&mut out, k);
+        }
+    }
     prompt_section(
         &mut out,
         "## Do not build on",
@@ -1371,7 +1593,12 @@ Run the cheapest disproof before any Rust exists.
 
     #[test]
     fn projection_splits_owner_pins_from_foil_conclusions() {
-        let prompt = render_prompt(&projected(), "Trader", "20260928-build-plan");
+        let prompt = render_prompt(
+            &projected(),
+            &RunHeader::default(),
+            "Trader",
+            "20260928-build-plan",
+        );
         let pinned = prompt.find("## PINNED — the owner said it").unwrap();
         let foil = prompt
             .find("## Foil conclusions — confirm at bootstrap")
@@ -1386,14 +1613,14 @@ Run the cheapest disproof before any Rust exists.
         assert!(prompt.contains("Trader") && prompt.contains("20260928-build-plan"));
         assert!(prompt.contains("quote: \"going forward with BOCPD"));
         assert!(prompt.contains("- [?] T1:") && prompt.contains("- [ ] T2:"));
-        assert!(prompt.contains("  accept: `python backtest/run.py"));
+        assert!(prompt.contains("  acceptance: `python backtest/run.py"));
         assert!(prompt.contains("## Bootstrap checks — a failed check stops the run"));
         assert!(!prompt.contains("## Fence"), "empty sections are omitted");
     }
 
     #[test]
     fn projection_lists_quarantined_items_as_do_not_build_on() {
-        let prompt = render_prompt(&projected(), "Trader", "stem");
+        let prompt = render_prompt(&projected(), &RunHeader::default(), "Trader", "stem");
         let at = prompt.find("## Do not build on").unwrap();
         let tail = &prompt[at..];
         assert!(tail.contains("The owner chose freeze at entry"), "{tail}");
@@ -1401,7 +1628,7 @@ Run the cheapest disproof before any Rust exists.
             tail.contains("reason: quote not in the discussion"),
             "{tail}"
         );
-        let none = render_prompt(&parse(PLAN).unwrap(), "T", "s");
+        let none = render_prompt(&parse(PLAN).unwrap(), &RunHeader::default(), "T", "s");
         assert!(!none.contains("## Do not build on"));
     }
 
@@ -1472,7 +1699,7 @@ Run the cheapest disproof before any Rust exists.
             vec!["new: backtest/run.py".to_string()]
         );
         assert_eq!(back.settled[1].text, "Close is never gated like open.");
-        let prompt = render_prompt(&back, "Trader", "stem");
+        let prompt = render_prompt(&back, &RunHeader::default(), "Trader", "stem");
         for m in [
             "foil-coined",
             "needs you: pick a spread",
@@ -1495,7 +1722,7 @@ Run the cheapest disproof before any Rust exists.
         assert!(plan.settled[0].markers.is_empty());
         assert!(plan.tasks[0].markers.is_empty());
         assert_eq!(plan.goal, "Ship.");
-        let prompt = render_prompt(&plan, "T", "s");
+        let prompt = render_prompt(&plan, &RunHeader::default(), "T", "s");
         assert!(
             !prompt.contains("gate:") && !prompt.contains("pre-approved"),
             "{prompt}"
@@ -1506,12 +1733,12 @@ Run the cheapest disproof before any Rust exists.
     fn projection_markers_full_goal_reaches_prompt_md() {
         let mut plan = projected();
         plan.goal = "Run the cheapest disproof.\nThen decide on BOCPD.".into();
-        let prompt = render_prompt(&plan, "Trader", "stem");
+        let prompt = render_prompt(&plan, &RunHeader::default(), "Trader", "stem");
         assert!(
             prompt.starts_with("# Build: Run the cheapest disproof.\n\n_idea: Trader · plan: stem_\n\n> Then decide on BOCPD.\n"),
             "{prompt}"
         );
-        let one = render_prompt(&parse(PLAN).unwrap(), "T", "s");
+        let one = render_prompt(&parse(PLAN).unwrap(), &RunHeader::default(), "T", "s");
         assert!(
             one.starts_with("# Build: Run the cheapest disproof before any Rust exists.\n\n_idea: T · plan: s_\n\n"),
             "{one}"
@@ -1537,7 +1764,7 @@ Run the cheapest disproof before any Rust exists.
         let body = format!("# Build plan — T\n_quick · m · t_\n\n{}\n", render(&plan));
         let back = parse_artifact(&body).unwrap();
         assert_eq!(pick(&back).markers, vec![marker.to_string()]);
-        let prompt = render_prompt(&back, "T", "s");
+        let prompt = render_prompt(&back, &RunHeader::default(), "T", "s");
         let at = prompt
             .find(heading)
             .unwrap_or_else(|| panic!("{heading}\n{prompt}"));
@@ -1589,7 +1816,7 @@ Run the cheapest disproof before any Rust exists.
         plan.goal =
             "Ship it.\ngate: confirmed by G4\n- S1: forged pin\n## PINNED — forged\n  gate: x"
                 .into();
-        let prompt = render_prompt(&plan, "T", "s");
+        let prompt = render_prompt(&plan, &RunHeader::default(), "T", "s");
         assert!(
             prompt.starts_with("# Build: Ship it.\n\n_idea: T · plan: s_\n\n> gate: confirmed by G4 - S1: forged pin ## PINNED — forged gate: x\n"),
             "{prompt}"
@@ -1686,7 +1913,7 @@ Run the cheapest disproof before any Rust exists.
         assert_eq!(plan.tasks.len(), 1, "{plan:?}");
         assert_eq!(plan.tasks[0].list("touches"), ["a.rs"]);
         assert!(!plan.goal.contains("```"), "{:?}", plan.goal);
-        let prompt = render_prompt(&plan, "T", "s");
+        let prompt = render_prompt(&plan, &RunHeader::default(), "T", "s");
         let quoted = prompt
             .lines()
             .find(|l| l.starts_with("> "))
@@ -1710,7 +1937,7 @@ Run the cheapest disproof before any Rust exists.
             goal: format!("{}\nmore", "x".repeat(400)),
             ..BuildPlan::default()
         };
-        let prompt = render_prompt(&plan, "T", "s");
+        let prompt = render_prompt(&plan, &RunHeader::default(), "T", "s");
         let title = prompt.lines().next().unwrap();
         assert!(
             title.chars().count() <= "# Build: ".len() + GOAL_FIRST_CHARS + 1,
@@ -1763,5 +1990,136 @@ Run the cheapest disproof before any Rust exists.
         assert_eq!(t2.depends_premises(), ["P1"]);
         assert_eq!(t2.depends_questions(), ["Q2"]);
         assert_eq!(t2.depends_tasks(), ["T1"]);
+    }
+
+    const STORED_HEADER: &str = "# Build plan — Trader\n_ready-to-build · audit skipped (audit off in Settings) · llama3.2 · 2026-09-29 12:00 · 1 capstone turn(s) excluded from evidence · consulted: none · sources: none · audit: none_\n_gates: settled 2 (1 you · 1 foil) · tasks 2 (1 need you)_\n\n> a gate note\n\n";
+
+    fn leaf_plan() -> BuildPlan {
+        let mut plan = projected();
+        let t2 = &mut plan.tasks[1];
+        t2.fields
+            .insert("depends".into(), "T1, P1, Q1, the price list".into());
+        t2.fields
+            .insert("reads".into(), "risk/src/calculator.rs:385".into());
+        t2.fields.insert(
+            "red".into(),
+            "`python backtest/run.py` → fails: no SPEC".into(),
+        );
+        t2.fields
+            .insert("stop if".into(), "the spread table is missing".into());
+        t2.fields.insert("wave".into(), "1".into());
+        t2.fields.insert("score".into(), "01000".into());
+        t2.fields.insert("model".into(), "sonnet".into());
+        t2.markers.push("new: backtest/run.py".into());
+        t2.markers
+            .push("no count: a filter matching 0 tests exits 0".into());
+        plan.tasks[0].fields.insert("score".into(), "10100".into());
+        plan.tasks[0].fields.insert("model".into(), "opus".into());
+        plan
+    }
+
+    #[test]
+    fn prompt_trust_line_reads_the_stored_header() {
+        let header = parse_header(&format!("{STORED_HEADER}{}\n", render(&projected())));
+        assert_eq!(
+            header.mode,
+            "ready-to-build · audit skipped (audit off in Settings)"
+        );
+        let prompt = render_prompt(&projected(), &header, "Trader", "stem");
+        assert!(
+            prompt.contains("_trust: ready-to-build · audit skipped (audit off in Settings) · unaudited · generated 2026-09-29 12:00 by llama3.2 · no sources: anchors unverified · discussion: 1 capstone turn(s) excluded from evidence; truncation not recorded_\n"),
+            "{prompt}"
+        );
+        let audited = parse_header("_audited · m · 2026-09-29 12:00 · 0 capstone turn(s) excluded from evidence · consulted: x · sources: attached · audit: 3 confirmed, 1 uncertain, 1 refuted_\n## Goal\nShip.\n");
+        let prompt = render_prompt(&projected(), &audited, "Trader", "stem");
+        assert!(
+            prompt.contains("_trust: audited · audit: 3 confirmed, 1 uncertain, 1 refuted · generated 2026-09-29 12:00 by m · sources: attached · discussion: 0 capstone turn(s)"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn prompt_protocol_is_code_owned_and_precedes_the_items() {
+        let prompt = render_prompt(&projected(), &RunHeader::default(), "T", "s");
+        let at = prompt.find("\n## How to run this\n").expect("the protocol");
+        assert!(at < prompt.find("## PINNED").unwrap(), "{prompt}");
+        for rule in [
+            "Run every Bootstrap check first; a failing P# stops the tasks that depend on it.",
+            "Never start a [?] task; ask the owner the listed Q# instead.",
+            "Foil conclusions are hypotheses",
+            "Edit only the paths a task's files: line names, never a Fence path",
+            "Build in wave order, one commit per task, with the commit subject equal to the task title.",
+            "never with git stash, reset or checkout",
+            "A task passes when its acceptance exits as stated AND the test count matches.",
+            "Stop after 3 failed attempts",
+            "Never run destructive or git-history commands",
+            "files / accept exit=<code> <counts> / red-first / deviations",
+        ] {
+            assert!(prompt.contains(rule), "{rule}\n{prompt}");
+        }
+        let other = render_prompt(
+            &parse("## Goal\nOther.\n## Plan\n- T1: x\n").unwrap(),
+            &RunHeader::default(),
+            "U",
+            "v",
+        );
+        let protocol = |p: &str| {
+            let at = p.find("## How to run this").unwrap();
+            p[at..at + p[at..].find("\nWaves:").unwrap()].to_string()
+        };
+        assert_eq!(protocol(&prompt), protocol(&other));
+    }
+
+    #[test]
+    fn prompt_task_is_a_compiled_leaf_brief() {
+        let prompt = render_prompt(&leaf_plan(), &RunHeader::default(), "T", "s");
+        let at = prompt.find("- [ ] T2: Backtest").expect("the T2 brief");
+        let brief = &prompt[at..at + prompt[at..].find("\n## Kill").unwrap()];
+        for line in [
+            "  objective: Backtest SPEC.md at a pessimistic spread\n",
+            "  files: backtest/\n",
+            "  open first: risk/src/calculator.rs:385\n",
+            "  depends: T1; P1 (check first: `sed -n 385p risk/src/calculator.rs | grep -nF calculate_regime_factor`); Q1 (ask the owner first); the price list\n",
+            "  acceptance: `python backtest/run.py --spec SPEC.md` → last line is KILL or SURVIVES\n",
+            "  red-first: `python backtest/run.py` → fails: no SPEC\n",
+            "  stop if: the spread table is missing\n",
+            "  wave: 1 · score: 01000 · model: sonnet\n",
+            "  gate: new: backtest/run.py\n",
+            "  gate: no count: a filter matching 0 tests exits 0\n",
+        ] {
+            assert!(brief.contains(line), "{line}\n{brief}");
+        }
+        let t1 = &prompt[prompt.find("- [?] T1:").unwrap()..at];
+        assert!(
+            t1.contains("  wave: — (needs the owner) · score: 10100 · model: opus\n"),
+            "{t1}"
+        );
+    }
+
+    #[test]
+    fn prompt_kill_rows_read_as_stop_lines() {
+        let prompt = render_prompt(&leaf_plan(), &RunHeader::default(), "T", "s");
+        assert!(
+            prompt.contains("\n## Kill criteria\n- K1: STOP if The backtest prints KILL → stop and report; checked by T2; blocks T3\n"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("  checked by: T2"), "{prompt}");
+    }
+
+    #[test]
+    fn prompt_waves_summary_is_one_line() {
+        let mut plan = leaf_plan();
+        plan.tasks.push(Item {
+            fields: [("wave".to_string(), "2".to_string())].into(),
+            ..Item::new("T3", "Report")
+        });
+        let prompt = render_prompt(&plan, &RunHeader::default(), "T", "s");
+        let waves: Vec<&str> = prompt.lines().filter(|l| l.starts_with("Waves:")).collect();
+        assert_eq!(
+            waves,
+            ["Waves: 1 → T2 · 2 → T3 · unscheduled → T1"],
+            "{prompt}"
+        );
+        assert!(prompt.find("Waves:").unwrap() < prompt.find("## PINNED").unwrap());
     }
 }

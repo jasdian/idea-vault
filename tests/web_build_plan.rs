@@ -97,6 +97,32 @@ async fn artifact_page_offers_prompt_and_attack_plan_copy_blocks() {
     assert!(body.contains("reason: quote not in the discussion"));
 }
 
+fn copy_blocks(body: &str) -> Vec<&str> {
+    body.split(r#"<pre class="copyable">"#)
+        .skip(1)
+        .map(|b| &b[..b.find("</pre>").expect("a closed copy block")])
+        .collect()
+}
+
+#[tokio::test]
+async fn artifact_page_prompt_block_carries_the_run_protocol_and_trust_line() {
+    let (state, vault) = test_state();
+    let uri = seed(&vault, ArtifactKind::BuildPlan, PLAN_BODY);
+    let (_, body) = get(state, &uri).await;
+    let blocks = copy_blocks(&body);
+    assert_eq!(blocks.len(), 2, "{body}");
+    assert!(
+        blocks[0].contains("\n## How to run this\n"),
+        "{}",
+        blocks[0]
+    );
+    assert!(
+        blocks[0].contains("_trust: quick · unaudited · generated 2026-09-28 21:40 by m"),
+        "{}",
+        blocks[0]
+    );
+}
+
 #[tokio::test]
 async fn artifact_page_escapes_model_text_in_copy_blocks() {
     let (state, vault) = test_state();

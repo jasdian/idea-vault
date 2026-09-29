@@ -182,7 +182,12 @@ pub async fn view_artifact(
                 .flatten()
                 .map(|p| {
                     (
-                        plan::render_prompt(&p, &idea.frontmatter.title, stem),
+                        plan::render_prompt(
+                            &p,
+                            &plan::parse_header(&artifact.body),
+                            &idea.frontmatter.title,
+                            stem,
+                        ),
                         plan::render_attack_plan(&p),
                     )
                 });

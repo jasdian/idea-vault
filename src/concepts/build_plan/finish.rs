@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 
 use crate::ai::contract;
 use crate::ai::sources::SourceProbe;
+use crate::concepts::audit::Label;
 use crate::concepts::build_plan::gates::{
     self, AuditView, Evidence, GateInputs, GateReport, OpenArtifact,
 };
@@ -165,6 +166,32 @@ fn mode_label(mode: PlanMode, audit: Option<&AuditView>) -> String {
     }
 }
 
+/// `attached` when reference sources backed the anchor checks, else `none`.
+fn sources_label(probe: &SourceProbe) -> &'static str {
+    if probe.is_empty() {
+        "none"
+    } else {
+        "attached"
+    }
+}
+
+/// `2 confirmed, 1 uncertain, 1 refuted`; `failed` for an unusable audit, `none` without one.
+fn audit_tally(audit: Option<&AuditView>) -> String {
+    match audit {
+        None => "none".into(),
+        Some(a) if a.failed => "failed".into(),
+        Some(a) => {
+            let n = |l: Label| a.findings.iter().filter(|f| f.label == l).count();
+            format!(
+                "{} confirmed, {} uncertain, {} refuted",
+                n(Label::Confirmed),
+                n(Label::Uncertain),
+                n(Label::Refuted)
+            )
+        }
+    }
+}
+
 /// The artifact body: a title, the two code-owned header lines, any gate notes, then the plan in
 /// the canonical grammar.
 fn artifact_body(
@@ -177,10 +204,12 @@ fn artifact_body(
     report: &GateReport,
 ) -> String {
     let mut out = format!(
-        "# Build plan — {title}\n_{} · {} · {} · {excluded} capstone turn(s) excluded from evidence · consulted: {consulted}_\n_gates: {}_\n\n",
+        "# Build plan — {title}\n_{} · {} · {} · {excluded} capstone turn(s) excluded from evidence · consulted: {consulted} · sources: {} · audit: {}_\n_gates: {}_\n\n",
         mode_label(mode, inputs.audit),
         inputs.model,
         inputs.now.format("%Y-%m-%d %H:%M"),
+        sources_label(inputs.probe),
+        audit_tally(inputs.audit),
         tally_line(plan, report),
     );
     for note in &report.notes {
@@ -297,6 +326,7 @@ pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, Concept
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::concepts::build_plan::gates::AuditedFinding;
     use crate::concepts::workflows::builtin_workflows;
     use crate::domain::evidence::CAPSTONE_TURNS;
 
@@ -343,6 +373,36 @@ mod tests {
             "audited · uniform pass (weak)"
         );
         assert_eq!(mode_label(PlanMode::Quick, None), "quick · unaudited");
+    }
+
+    #[test]
+    fn header_names_sources_and_the_audit_tally() {
+        assert_eq!(sources_label(&SourceProbe::default()), "none");
+        assert_eq!(audit_tally(None), "none");
+        let finding = |label| AuditedFinding {
+            text: "x".into(),
+            lenses: vec![],
+            label,
+            reason: String::new(),
+        };
+        let view = AuditView {
+            findings: vec![
+                finding(Label::Confirmed),
+                finding(Label::Confirmed),
+                finding(Label::Uncertain),
+                finding(Label::Refuted),
+            ],
+            ..AuditView::default()
+        };
+        assert_eq!(
+            audit_tally(Some(&view)),
+            "2 confirmed, 1 uncertain, 1 refuted"
+        );
+        let failed = AuditView {
+            failed: true,
+            ..view
+        };
+        assert_eq!(audit_tally(Some(&failed)), "failed");
     }
 
     #[test]
