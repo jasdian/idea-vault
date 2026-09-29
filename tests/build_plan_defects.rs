@@ -262,18 +262,18 @@ fn row06_an_open_premise_stays_verify_first_and_a_writing_check_is_marked() {
         "## assistant\nDoes the budget enforce a per-idea token cap? Worth checking.\n",
         Answer {
             verify: "- P1: The budget enforces a per-idea cap\n  \
-                     check: `grep -nE 'per.idea' src/ai/budget.rs`\n\
+                     check: `grep -nE 'per.idea|MAX_FACTS' src/ai/budget.rs`\n\
                      - P2: The cap was raised twice\n  \
                      check: `sed -i s/cap/limit/ src/ai/budget.rs`",
             ..Answer::default()
         },
     );
-    assert!(plan.settled.is_empty());
+    assert_eq!(plan.verify.len(), 2, "{:#?}", plan.verify);
     let premise = with_text(&plan.verify, "per-idea cap");
     assert!(premise.markers.is_empty(), "{}", markers(premise));
     assert_eq!(
         premise.field("check"),
-        Some("`grep -nE 'per.idea' src/ai/budget.rs`")
+        Some("`grep -nE 'per.idea|MAX_FACTS' src/ai/budget.rs`")
     );
     let writer = with_text(&plan.verify, "raised twice");
     assert!(
@@ -387,13 +387,28 @@ fn row10_a_next_free_number_is_rechecked_at_bootstrap() {
 }
 
 #[test]
-fn row11_an_unstated_figure_is_caught_but_a_counted_stale_one_is_not() {
+fn row11_an_uncounted_or_unstated_figure_is_recounted() {
+    let conversation = "## user\nThe fact corpus holds 56 facts across six ideas.\n";
     let (plan, _) = gate(
-        "## user\nThe fact corpus holds 56 facts across six ideas.\n",
+        conversation,
         Answer {
-            settled: "- S1: The fact corpus holds 68 facts\n  quote: \"The fact corpus holds\"\n\
-                      - S2: The fact corpus holds 56 facts\n  quote: \"The fact corpus holds\"\n  \
-                      count: `find vault -name '*.md'`",
+            settled: "- S1: The fact corpus holds 56 facts\n  \
+                      quote: \"The fact corpus holds 56 facts\"",
+            ..Answer::default()
+        },
+    );
+    assert!(plan.settled.is_empty(), "{:#?}", plan.settled);
+    let stale = only(&plan.verify, "Verify first");
+    assert!(
+        markers(stale).contains("recount: no count command"),
+        "{}",
+        markers(stale)
+    );
+
+    let (plan, _) = gate(
+        conversation,
+        Answer {
+            settled: "- S1: The fact corpus holds 68 facts\n  quote: \"The fact corpus holds\"",
             ..Answer::default()
         },
     );
@@ -403,6 +418,18 @@ fn row11_an_unstated_figure_is_caught_but_a_counted_stale_one_is_not() {
         markers(unstated).contains("figure not in the discussion: 68"),
         "{}",
         markers(unstated)
+    );
+}
+
+#[test]
+fn row11_a_counted_stale_figure_is_a_known_miss() {
+    let (plan, _) = gate(
+        "## user\nThe fact corpus holds 56 facts across six ideas.\n",
+        Answer {
+            settled: "- S1: The fact corpus holds 56 facts\n  quote: \"The fact corpus holds\"\n  \
+                      count: `find vault -name '*.md'`",
+            ..Answer::default()
+        },
     );
     let counted = only(&plan.settled, "Settled");
     assert!(counted.text.contains("56"));
@@ -456,7 +483,7 @@ label — pick one explicitly.\n\n\
     assert!(plan.settled.is_empty(), "{:#?}", plan.settled);
     let freeze = with_text(&plan.open, "proposed: Freeze the zone snapshot at entry");
     assert!(
-        markers(freeze).contains("opened from Settled: its quote sits beside \"pick one\""),
+        markers(freeze).contains("its quote sits beside \"pick one\""),
         "{}",
         markers(freeze)
     );
@@ -640,7 +667,11 @@ fn bp3_prose_acceptance_needs_the_owner() {
     assert_eq!(report.tally.get("needs_owner"), Some(&1));
 }
 
-const GATE_SOURCES: [(&str, &str); 4] = [
+const GATE_SOURCES: [(&str, &str); 5] = [
+    (
+        "build_plan/plan.rs",
+        include_str!("../src/concepts/build_plan/plan.rs"),
+    ),
     (
         "gates/mod.rs",
         include_str!("../src/concepts/build_plan/gates/mod.rs"),
@@ -659,18 +690,25 @@ const GATE_SOURCES: [(&str, &str); 4] = [
     ),
 ];
 
-const MODEL_CALL_NEEDLES: [&str; 11] = [
+const MODEL_CALL_NEEDLES: [&str; 18] = [
     "ask_on_contract",
     "llmbackend",
     ".chat(",
+    "chat_stream",
     "run_agent",
     "ollama",
     "claude_code",
     "ai::backend",
     "ai::claude",
-    "std::process::command",
-    "process::command",
+    "reqwest",
+    "std::process",
     "tokio::process",
+    "skills::invoke",
+    "run_workflow",
+    "extract_knowledge",
+    "swarm::swarm",
+    "audit::audit(",
+    "process::command",
 ];
 
 fn model_calls(source: &str) -> Vec<&'static str> {
@@ -697,7 +735,15 @@ fn gates_source_never_names_a_model_call() {
         "use crate::ai::ollama::OllamaClient;",
         "use crate::ai::claude_code::ClaudeCode;",
         "use std::process::Command;",
+        "use std::process::{Command, Stdio};",
         "tokio::process::Command::new(\"claude\")",
+        "let reply = backend.chat_stream(msgs, on_token).await?;",
+        "let body = reqwest::Client::new().post(url).send().await?;",
+        "skills::invoke(llm, skill, idea).await",
+        "workflows::run_workflow(llm, workflow, idea).await",
+        "knowledge::extract_knowledge(llm, transcript).await",
+        "swarm::swarm(llm, idea, roles).await",
+        "audit::audit(llm, findings).await",
     ] {
         assert!(
             !model_calls(snippet).is_empty(),
@@ -705,6 +751,10 @@ fn gates_source_never_names_a_model_call() {
         );
     }
     assert!(model_calls("// calls .chat( on the backend\nfn pure() {}").is_empty());
+    assert!(
+        model_calls("    // swarm::swarm, reqwest and std::process stay out\nfn pure() {}")
+            .is_empty()
+    );
     for (name, source) in GATE_SOURCES {
         assert!(source.contains("fn "), "{name} was not embedded");
         assert_eq!(model_calls(source), Vec::<&str>::new(), "{name}");

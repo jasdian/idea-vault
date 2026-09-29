@@ -353,13 +353,13 @@ fn read_only(check: &str) -> bool {
         .trim()
         .to_lowercase()
         .replace("2>&1", "");
-    if c.contains('>') || c.contains("-delete") || c.contains("-exec") {
+    if c.contains("-delete") || c.contains("-exec") {
         return false;
     }
-    c.replace("&&", "\n")
-        .replace("||", "\n")
-        .replace([';', '|'], "\n")
-        .lines()
+    let Some(segs) = unquoted_segments(&c) else {
+        return false;
+    };
+    segs.iter()
         .map(|seg| seg.trim().trim_matches('`').trim())
         .filter(|seg| !seg.is_empty())
         .all(|seg| {
@@ -368,6 +368,26 @@ fn read_only(check: &str) -> bool {
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
             })
         })
+}
+
+// Separators and `>` inside single or double quotes are data; an unquoted `>` is a write.
+fn unquoted_segments(command: &str) -> Option<Vec<String>> {
+    let mut out = vec![String::new()];
+    let mut quote: Option<char> = None;
+    for ch in command.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '>') => return None,
+            (None, ';' | '|' | '&' | '\n') => {
+                out.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        out.last_mut().expect("seeded").push(ch);
+    }
+    Some(out)
 }
 
 fn runnable_accept(accept: &str) -> bool {
@@ -975,6 +995,8 @@ mod tests {
             "`cat a > b`",
             "`lsof -i`",
             "`ls && lsof`",
+            "`grep 'x' f | xargs touch`",
+            "`grep \"a|b\" f > out`",
         ]
         .iter()
         .enumerate()
@@ -987,6 +1009,9 @@ mod tests {
             "`sed -n 1,5p f`",
             "`grep -n dd f`",
             "`cargo test 2>&1 | tail -3`",
+            "`grep -nE 'per.idea|MAX_FACTS' src/ai/budget.rs`",
+            "`grep -n \"a; b & c\" f | wc -l`",
+            "`grep -n '->' f`",
         ]
         .iter()
         .enumerate()
@@ -995,10 +1020,10 @@ mod tests {
                 .push(item(&format!("Q{n}"), "Check", &[("check", check)]));
         }
         run(&mut plan);
-        for p in &plan.verify[..5] {
+        for p in &plan.verify[..7] {
             assert!(has_marker(p, "check is not read-only"), "{p:?}");
         }
-        for q in &plan.verify[5..] {
+        for q in &plan.verify[7..] {
             assert!(q.markers.is_empty(), "{q:?}");
         }
     }
@@ -1015,6 +1040,8 @@ mod tests {
             "-c only opens a command after a shell"
         );
         assert!(is_destructive("bash -c \"rm x\""));
+        assert!(is_destructive("sh -c \"ls; rm x\""));
+        assert!(!is_destructive("grep -nE 'per.idea|max_facts' f"));
     }
 
     #[test]
