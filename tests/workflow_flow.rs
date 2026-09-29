@@ -42,6 +42,8 @@ fn tokens(text: &str) -> ChatScript {
     ChatScript::Tokens(vec![text.to_string()])
 }
 
+const PLAN: &str = "## Goal\nBuild the agency tool.\n\n## Settled\n- none\n\n## Verify first\n- none\n\n## Open questions\n- none\n\n## Plan\n- [ ] T1: Build it\n  accept: `cargo test` → exit 0\n\n## Kill criteria\n- none";
+
 #[tokio::test]
 async fn interrogate_runs_the_fixed_dag_in_order_and_persists_only_the_synthesis() {
     let tmp = tempfile::tempdir().unwrap();
@@ -306,7 +308,7 @@ async fn steelman_then_attack_carries_the_steelman_into_every_critic() {
 }
 
 #[tokio::test]
-async fn ready_to_build_folds_audited_findings_into_a_fenced_build_prompt() {
+async fn ready_to_build_folds_audited_findings_into_a_gated_build_plan() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
     let mock = spawn_sequence(
@@ -318,28 +320,31 @@ async fn ready_to_build_folds_audited_findings_into_a_fenced_build_prompt() {
             tokens("- risk: churn"),
             tokens("- Call three agencies"),
             tokens("F1: CONFIRMED — settled\nF2: CONFIRMED — said\nF3: UNCERTAIN — maybe\nF4: REFUTED — not discussed"),
-            tokens("Here it is:\n```markdown\n# Build the agency tool\n```\nGood luck!"),
+            tokens(&format!("Here it is:\n{PLAN}\n\nGood luck!")),
         ],
     )
     .await;
     let outcome = run(&mock, tmp.path(), "ready-to-build", true).await;
     let bodies = mock.chat_bodies();
-    assert_eq!(bodies.len(), 7, "5 harvesters + auditor + build prompt");
+    assert_eq!(bodies.len(), 7, "5 harvesters + auditor + build plan");
     assert!(bodies[0].contains("You are the Harvester"));
     let chain = &bodies[6];
-    assert!(chain.contains("BUILD PROMPT"));
+    assert!(chain.contains("BUILD PLAN"));
     assert!(chain.contains("## Prior stage: findings"));
     assert!(chain.contains("[CONFIRMED] Ship solo first"));
     assert!(chain.contains("[REFUTED] Call three agencies"));
-    assert_eq!(
-        outcome.synthesis,
-        "```markdown\n# Build the agency tool\n```"
+    assert!(
+        outcome.synthesis.starts_with("**Build plan** → [")
+            && outcome.synthesis.contains("· audited"),
+        "{}",
+        outcome.synthesis
     );
     let convo = store::read_conversation(tmp.path(), "i").unwrap();
-    assert!(convo.contains(
-        "## assistant (workflow: ready-to-build)\n```markdown\n# Build the agency tool\n```"
-    ));
-    assert!(!convo.contains("Good luck"));
+    assert!(convo.contains(&format!(
+        "## assistant (workflow: ready-to-build)\n{}",
+        outcome.synthesis
+    )));
+    assert!(!convo.contains("Good luck") && !convo.contains("Build the agency tool"));
 }
 
 fn sampled_temperatures(mock: &support::MockOllama) -> Vec<f64> {
@@ -354,7 +359,7 @@ fn sampled_temperatures(mock: &support::MockOllama) -> Vec<f64> {
 
 fn ready_to_build_mock_script() -> Vec<ChatScript> {
     let mut scripts: Vec<ChatScript> = (0..5).map(|i| tokens(&format!("finding {i}"))).collect();
-    scripts.push(tokens("```\nbuild it\n```"));
+    scripts.push(tokens(PLAN));
     scripts
 }
 
@@ -494,7 +499,7 @@ async fn chained_step_body_at(auditor_reply: &str, max_bytes: usize) -> String {
             tokens("- risk: churn"),
             tokens("- Call three agencies"),
             tokens(auditor_reply),
-            tokens("```markdown\n# Build\n```"),
+            tokens(PLAN),
         ],
     )
     .await;
@@ -597,15 +602,18 @@ async fn empty_harvest_run(audit: bool) -> (Vec<String>, String) {
             tokens(""),
             tokens(""),
             tokens(""),
-            tokens("```markdown\n# Build\n```"),
+            tokens(PLAN),
         ],
     )
     .await;
     run(&mock, tmp.path(), "ready-to-build", audit).await;
-    (
-        mock.chat_bodies(),
-        store::read_conversation(tmp.path(), "i").unwrap(),
-    )
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    let stable = convo
+        .lines()
+        .filter(|l| !l.starts_with("**Build plan** → ["))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (mock.chat_bodies(), stable)
 }
 
 const SKIP_NOTE: &str = "nothing harvested — audit skipped";

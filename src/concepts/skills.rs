@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use chrono::Utc;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::{
@@ -13,6 +14,8 @@ use crate::ai::contract;
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::AgentRole;
+use crate::concepts::build_plan::finish::{finish, Finished, PlanInputs};
+use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::ConceptError;
 use crate::domain::frontmatter::parse_skill;
 use crate::domain::{slug, OutputContract, SkillRole, SkillStage};
@@ -436,6 +439,47 @@ pub(crate) async fn ask_on_contract(
     // permit released on return — before any vault write, which needs no AI slot
 }
 
+/// Gate a planner's answer and persist it as a build-plan artifact plus a pointer turn
+/// ([`finish`](crate::concepts::build_plan::finish::finish)) on the blocking pool. Called after the
+/// model call returned, so no permit is held; the probe and model label come from `llm`, the
+/// turn- and role-scoped backend that produced `answer`.
+pub(crate) async fn persist_plan(
+    llm: &LlmBackend,
+    vault_dir: &Path,
+    idea_slug: &str,
+    answer: String,
+    turn_role: String,
+    lens: &str,
+    audit: Option<AuditView>,
+) -> Result<Finished, ConceptError> {
+    let vault_dir = vault_dir.to_path_buf();
+    let idea_slug = idea_slug.to_string();
+    let lens = lens.to_string();
+    let model = llm.model();
+    let probe = llm.source_probe();
+    let joined = tokio::task::spawn_blocking(move || {
+        finish(PlanInputs {
+            vault_dir: &vault_dir,
+            idea_slug: &idea_slug,
+            answer: &answer,
+            turn_role: &turn_role,
+            lens: &lens,
+            model,
+            audit: audit.as_ref(),
+            probe: &probe,
+            now: Utc::now(),
+        })
+    })
+    .await;
+    match joined {
+        Ok(result) => result,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => Err(ConceptError::Vault(crate::vault::VaultError::Io(
+            std::io::Error::other(format!("build-plan task did not finish: {e}")),
+        ))),
+    }
+}
+
 /// Hydrate a skill's `{context}` slot and run it against the AI, appending the result as an
 /// assistant turn (docs/06-concepts/skills.md §D18).
 ///
@@ -448,6 +492,9 @@ pub(crate) async fn ask_on_contract(
 /// The answer is held to the skill's output contract with at most one retry
 /// ([`ask_on_contract`]). Stateless: the output is appended as an assistant turn only after the
 /// calls complete (nothing partial ever reaches `conversation.md`); idea state is not changed.
+/// A [`OutputContract::BuildPlan`] skill instead lands its gated plan as an artifact and returns
+/// the pointer turn it appended; an answer with neither a goal nor a task is
+/// [`ConceptError::PlanUnusable`] and persists nothing.
 pub async fn invoke(
     ollama: &LlmBackend,
     ai_semaphore: &Semaphore,
@@ -474,6 +521,19 @@ pub async fn invoke(
     )
     .await?;
 
+    if skill.contract == OutputContract::BuildPlan {
+        let finished = persist_plan(
+            &llm,
+            vault_dir,
+            idea_slug,
+            output,
+            format!("assistant (skill: {})", skill.name),
+            &skill.name,
+            None,
+        )
+        .await?;
+        return Ok(finished.pointer);
+    }
     if output.is_empty() {
         // A "successful" call with nothing to say is usually a model misfire — surface it
         // rather than silently appending nothing (D24: surface, not swallow).

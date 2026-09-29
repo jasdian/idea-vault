@@ -32,6 +32,6 @@ pub enum ConceptError {
     NothingToSynthesize,
     /// The planner's answer named neither a goal nor a task, so no build plan was persisted
     /// (docs/adr/0029).
-    #[error("the build plan named neither a goal nor a task")]
+    #[error("the model's answer had neither a goal nor a task — nothing was saved; try again")]
     PlanUnusable,
 }

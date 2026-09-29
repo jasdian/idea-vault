@@ -1,5 +1,8 @@
 //! The build-plan persist boundary (docs/adr/0029): a gated plan lands as an artifact, the
-//! transcript gets only a pointer turn, and pointer turns never ground a later plan.
+//! transcript gets only a pointer turn, and pointer turns never ground a later plan. Both
+//! capstone paths (the quick skill and the audited workflow) reach it against the mock Ollama.
+
+mod support;
 
 use std::path::Path;
 
@@ -379,4 +382,266 @@ fn finish_survives_an_unreadable_open_questions_artifact() {
         "the miss is recorded, not silent: {}",
         artifact.body
     );
+}
+
+const PLANNER_ANSWER: &str = "Sure, here is the plan.
+
+## Goal
+Disprove the strategy cheaply before building.
+
+## Settled
+- S1: Disproof comes before any code.
+  quote: \"the cheapest disproof before any Rust exists\"
+
+## Verify first
+- none
+
+## Open questions
+- Q1: Which market do we backtest first?
+
+## Plan
+- [ ] T1: Write the spec with a dated kill criterion
+  touches: `SPEC.md`
+  accept: `test -s SPEC.md` → exit 0
+
+## Kill criteria
+- K1: The backtest prints KILL → stop and report
+  checked by: T1
+  gates: T1";
+
+fn mock_backend(mock: &support::MockOllama) -> idea_vault::ai::LlmBackend {
+    idea_vault::ai::LlmBackend::ollama_only(
+        idea_vault::ai::OllamaClient::new(mock.url.clone(), "llama3.2").unwrap(),
+    )
+}
+
+async fn quick_plan(
+    answers: &[&str],
+) -> (
+    tempfile::TempDir,
+    support::MockOllama,
+    Result<String, ConceptError>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let mock = support::spawn_sequence(
+        &["llama3.2"],
+        answers
+            .iter()
+            .map(|a| support::ChatScript::Tokens(vec![a.to_string()]))
+            .collect(),
+    )
+    .await;
+    let registry = idea_vault::concepts::skills::SkillRegistry::builtin();
+    let result = idea_vault::concepts::skills::invoke(
+        &mock_backend(&mock),
+        &tokio::sync::Semaphore::new(1),
+        dir.path(),
+        SLUG,
+        registry.get("build-prompt").unwrap(),
+        idea_vault::concepts::skills::ContextSlot {
+            budget: idea_vault::ai::budget::ContextBudget::new(4096),
+            related: &|_| String::new(),
+        },
+        &|_: &str| {},
+    )
+    .await;
+    (dir, mock, result)
+}
+
+fn plan_artifacts(vault: &Path) -> Vec<idea_vault::domain::Artifact> {
+    store::read_artifacts(vault, SLUG)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.frontmatter.kind == ArtifactKind::BuildPlan)
+        .collect()
+}
+
+#[tokio::test]
+async fn quick_plan_lands_an_artifact_and_a_pointer_turn() {
+    let (dir, _mock, result) = quick_plan(&[PLANNER_ANSWER]).await;
+    let pointer = result.unwrap();
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1, "one build-plan artifact");
+    let plan = &plans[0];
+    assert_eq!(plan.frontmatter.lens.as_deref(), Some("build-prompt"));
+    assert_eq!(plan.frontmatter.model, "llama3.2");
+    assert!(
+        plan.body.contains("_quick · unaudited · llama3.2")
+            && plan
+                .body
+                .contains("- S1: Disproof comes before any code. — you"),
+        "{}",
+        plan.body
+    );
+
+    let conversation = store::read_conversation(dir.path(), SLUG).unwrap();
+    let last = store::split_turns(&conversation).pop().unwrap();
+    assert!(
+        last.starts_with("## assistant (skill: build-prompt)\n**Build plan** → ["),
+        "{last}"
+    );
+    assert!(
+        last.contains(&format!(
+            "/idea/{SLUG}/artifact/{}.md",
+            plan.frontmatter.slug
+        )),
+        "{last}"
+    );
+    assert!(
+        pointer.starts_with("**Build plan** → [") && last.contains(pointer.trim()),
+        "invoke returns the pointer it appended: {pointer}"
+    );
+    assert!(
+        !conversation.contains("## Settled") && !conversation.contains("Sure, here is the plan"),
+        "the plan body stays out of the transcript"
+    );
+}
+
+#[tokio::test]
+async fn quick_plan_gates_make_no_model_call() {
+    let (_dir, mock, result) = quick_plan(&[PLANNER_ANSWER, "a second call must not happen"]).await;
+    result.unwrap();
+    let bodies = mock.chat_bodies();
+    assert_eq!(bodies.len(), 1, "one planner call, then only code");
+    assert!(bodies[0].contains("## Kill criteria") && bodies[0].contains("quote:"));
+}
+
+#[tokio::test]
+async fn quick_plan_with_an_unusable_answer_persists_nothing() {
+    let dir_before = {
+        let d = tempfile::tempdir().unwrap();
+        seed(d.path());
+        store::read_conversation(d.path(), SLUG).unwrap()
+    };
+    let (dir, mock, result) = quick_plan(&[
+        "I could not make a plan from this.",
+        "Still nothing to plan here.",
+    ])
+    .await;
+    let err = result.unwrap_err();
+    assert!(matches!(err, ConceptError::PlanUnusable), "{err:?}");
+    assert_eq!(
+        mock.chat_bodies().len(),
+        2,
+        "the contract's single retry ran"
+    );
+    assert_eq!(
+        store::read_conversation(dir.path(), SLUG).unwrap(),
+        dir_before
+    );
+    assert!(store::read_artifacts(dir.path(), SLUG).unwrap().is_empty());
+}
+
+const REFUTED_CLAIM: &str = "Call three agencies next week";
+
+async fn audited_plan() -> (
+    tempfile::TempDir,
+    idea_vault::concepts::workflows::WorkflowOutcome,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    store::append_turn(
+        dir.path(),
+        SLUG,
+        "user",
+        "We should call three agencies next week.",
+    )
+    .unwrap();
+    let answer = format!(
+        "## Goal\nDisprove the strategy cheaply.\n\n## Settled\n- S1: {REFUTED_CLAIM}.\n  quote: \"call three agencies next week\"\n- S2: Disproof comes before any code.\n  quote: \"the cheapest disproof before any Rust exists\"\n\n## Verify first\n- none\n\n## Open questions\n- none\n\n## Plan\n- [ ] T1: Write the spec\n  touches: `SPEC.md`\n  accept: `test -s SPEC.md` → exit 0\n\n## Kill criteria\n- K1: The backtest prints KILL → stop\n  checked by: T1\n  gates: T1"
+    );
+    let tokens = |t: &str| support::ChatScript::Tokens(vec![t.to_string()]);
+    let mock = support::spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens(""),
+            tokens(""),
+            tokens(""),
+            tokens(""),
+            tokens(&format!("- {REFUTED_CLAIM}")),
+            tokens("F1: REFUTED — the owner only floated it"),
+            tokens(&answer),
+        ],
+    )
+    .await;
+    let outcome = idea_vault::concepts::workflows::run_workflow(
+        &mock_backend(&mock),
+        &tokio::sync::Semaphore::new(1),
+        &idea_vault::concepts::skills::SkillRegistry::builtin(),
+        dir.path(),
+        SLUG,
+        "ready-to-build",
+        idea_vault::ai::budget::ContextBudget::new(8192),
+        true,
+        &|_| String::new(),
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock.chat_bodies().len(),
+        7,
+        "5 harvesters + auditor + planner"
+    );
+    (dir, outcome)
+}
+
+#[tokio::test]
+async fn audited_plan_carries_the_audit_into_the_gates() {
+    let (dir, _) = audited_plan().await;
+    let plans = plan_artifacts(dir.path());
+    assert_eq!(plans.len(), 1);
+    let body = &plans[0].body;
+    assert_eq!(plans[0].frontmatter.lens.as_deref(), Some("ready-to-build"));
+    assert!(body.contains("_audited · llama3.2"), "{body}");
+    let quarantined = body
+        .split("## Quarantined")
+        .nth(1)
+        .unwrap_or_else(|| panic!("a Quarantined section: {body}"));
+    assert!(
+        quarantined.contains(REFUTED_CLAIM)
+            && quarantined.contains("refuted by the audit: the owner only floated it"),
+        "the refuted claim is quarantined with the auditor's reason: {body}"
+    );
+    let settled = body.split("## Settled").nth(1).unwrap();
+    let settled = settled.split("\n## ").next().unwrap();
+    assert!(
+        !settled.contains(REFUTED_CLAIM) && settled.contains("Disproof comes before any code"),
+        "{settled}"
+    );
+}
+
+#[tokio::test]
+async fn audited_plan_pointer_names_the_workflow() {
+    let (dir, outcome) = audited_plan().await;
+    let conversation = store::read_conversation(dir.path(), SLUG).unwrap();
+    let last = store::split_turns(&conversation).pop().unwrap();
+    assert!(
+        last.starts_with("## assistant (workflow: ready-to-build)\n**Build plan** → ["),
+        "{last}"
+    );
+    assert!(last.contains("· audited\n"), "{last}");
+    assert!(
+        !last.contains("_Audit:") && !last.contains("## Settled"),
+        "the pointer carries neither the audit appendix nor the plan body: {last}"
+    );
+    assert!(
+        last.contains(outcome.synthesis.trim()),
+        "{}",
+        outcome.synthesis
+    );
+}
+
+#[test]
+fn an_unusable_plan_answers_422_with_the_retry_hint() {
+    use axum::response::IntoResponse;
+    let response = idea_vault::web::WebError::from(ConceptError::PlanUnusable).into_response();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(ConceptError::PlanUnusable
+        .to_string()
+        .contains("nothing was saved; try again"));
 }

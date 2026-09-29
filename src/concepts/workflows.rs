@@ -18,7 +18,10 @@ use crate::ai::budget::{related_allowance, ContextBudget};
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{build_prompt, AgentResult, AgentRole, AgentTask};
 use crate::concepts::audit::{self, AuditReport, Finding};
-use crate::concepts::skills::{ask_on_contract, hydrate_context, RelatedProvider, SkillRegistry};
+use crate::concepts::build_plan::gates::AuditView;
+use crate::concepts::skills::{
+    ask_on_contract, hydrate_context, persist_plan, RelatedProvider, SkillRegistry,
+};
 use crate::concepts::swarm::{fan_out, judge, synthesize};
 use crate::concepts::ConceptError;
 use crate::domain::OutputContract;
@@ -141,7 +144,8 @@ pub fn get_workflow(name: &str) -> Option<&'static Workflow> {
     builtin_workflows().iter().find(|w| w.name == name)
 }
 
-/// What a workflow run produced: the final stage's output plus every fan-out agent's raw result
+/// What a workflow run produced: the final stage's output (for a workflow ending in a build-plan
+/// step, the pointer turn it appended) plus every fan-out agent's raw result
 /// (`None` = failed agent, skipped by the judge) and the audit, if one ran.
 #[derive(Debug)]
 pub struct WorkflowOutcome {
@@ -242,6 +246,11 @@ fn stage_context(
 /// nothing carried forward; a failed final stage, or a fan-out with no usable result before an
 /// synthesis, fails the run with nothing persisted; an empty harvest skips the audit without a
 /// model call, exactly as when the audit is off.
+///
+/// A workflow whose last stage chains a [`OutputContract::BuildPlan`] skill persists through the
+/// build-plan gates instead: the audited harvest (when the audit ran) is carried into them, the
+/// plan lands as an artifact and the turn is its pointer; an unusable plan fails the run with
+/// nothing persisted.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_workflow(
     ollama: &LlmBackend,
@@ -393,7 +402,31 @@ pub async fn run_workflow(
     }
 
     // Persist boundary: only the final output becomes truth, as one labelled turn.
-    if output.trim().is_empty() {
+    let planner = match workflow.stages.last() {
+        Some(Stage::Chain(step)) => step
+            .skill
+            .and_then(|s| registry.get(s))
+            .filter(|s| s.contract == OutputContract::BuildPlan)
+            .map(|_| step.role),
+        _ => None,
+    };
+    if let Some(role) = planner {
+        let audit = match (&report, &findings) {
+            (Some(r), Some(f)) => Some(AuditView::new(f, r)),
+            _ => None,
+        };
+        let finished = persist_plan(
+            &ollama.for_role(role.as_str()),
+            vault_dir,
+            idea_slug,
+            output,
+            format!("assistant (workflow: {})", workflow.name),
+            workflow.name,
+            audit,
+        )
+        .await?;
+        output = finished.pointer;
+    } else if output.trim().is_empty() {
         tracing::warn!(
             workflow = workflow.name,
             idea_slug,

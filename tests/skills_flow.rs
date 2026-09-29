@@ -245,30 +245,27 @@ async fn an_on_contract_answer_is_never_retried() {
     assert_eq!(bodies.len(), 1);
 }
 
+const PLAN: &str = "## Goal\nKick the tires.\n\n## Settled\n- none\n\n## Verify first\n- none\n\n## Open questions\n- none\n\n## Plan\n- [ ] T1: Build X\n  accept: `cargo test` → exit 0\n\n## Kill criteria\n- none";
+
 #[tokio::test]
-async fn build_prompt_persists_only_the_fenced_block() {
+async fn build_prompt_persists_a_pointer_not_the_plan() {
     let (output, bodies, convo) = invoke_with(
         "build-prompt",
-        &["Here is your prompt:\n```markdown\n# Build X\n```bash\ncargo test\n```\n```\nGood luck!"],
+        &[&format!("Here is your plan:\n{PLAN}\n\nGood luck!")],
     )
     .await;
     assert_eq!(bodies.len(), 1);
-    assert_eq!(
-        output,
-        "```markdown\n# Build X\n```bash\ncargo test\n```\n```"
-    );
-    assert!(!convo.contains("Good luck") && !convo.contains("Here is your prompt"));
+    assert!(output.starts_with("**Build plan** → ["), "{output}");
+    assert!(convo.ends_with(&format!("## assistant (skill: build-prompt)\n{output}")));
+    assert!(!convo.contains("Good luck") && !convo.contains("Here is your plan"));
+    assert!(!convo.contains("## Plan") && !convo.contains("Build X"));
 }
 
 #[tokio::test]
 async fn a_skill_invocation_samples_at_its_role_profile() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
-    let mock = spawn(
-        &["llama3.2"],
-        ChatScript::Tokens(vec!["```\nbuild it\n```".into()]),
-    )
-    .await;
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![PLAN.into()])).await;
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let mut s = client.settings();
     s.role_tuning = true;
