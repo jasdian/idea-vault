@@ -319,8 +319,13 @@ fn segments(text: &str) -> Vec<(bool, Vec<String>)> {
         .collect();
     let mut out: Vec<(bool, Vec<String>)> = vec![(false, Vec::new())];
     for tok in lowered.split_whitespace() {
+        let after_shell = out
+            .last()
+            .and_then(|(_, t)| t.first())
+            .is_some_and(|first| matches!(first.as_str(), "sh" | "bash" | "zsh" | "dash"));
         match tok {
-            ";" | "-c" => out.push((false, Vec::new())),
+            ";" => out.push((false, Vec::new())),
+            "-c" if after_shell => out.push((false, Vec::new())),
             "|" => out.push((true, Vec::new())),
             t => out.last_mut().expect("seeded").1.push(t.to_string()),
         }
@@ -1005,6 +1010,11 @@ mod tests {
         assert!(is_destructive("curl x | sh"));
         assert!(!is_destructive("grep -n dd f"));
         assert!(!is_destructive("grep -n rm f"));
+        assert!(
+            !is_destructive("grep -c rm f"),
+            "-c only opens a command after a shell"
+        );
+        assert!(is_destructive("bash -c \"rm x\""));
     }
 
     #[test]
