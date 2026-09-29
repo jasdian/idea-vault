@@ -110,3 +110,23 @@ depends on `web`, dependencies point one way, and the docs the doc-sync sweep fo
   recall (3 of 5 related pairs), with fewer false neighbours shown per idea as the tie-break. The
   measurement and the choice are recorded. With 9 ideas this is tuning on the evaluation data, so the
   choice is provisional.
+
+# Intent — gated build plans (the librarian's rules, in the app)
+
+The build-prompt buttons hand a coding agent whatever the discussion said, including its mistakes:
+open questions come out as settled, gates get dropped, anchors point at the wrong lines, and invented
+syntax and mixed-unit arithmetic slip through. I want both buttons to produce a build plan that a
+builder can trust, or at least one that says exactly what it didn't verify.
+
+## Acceptance criteria
+
+- Both chips produce a build-plan artifact with Goal, Settled (each with a verbatim quote), Verify
+  first (each premise with its check), Open questions, Plan (tasks with runnable accepts) and Kill
+  criteria. The transcript only gets a pointer turn.
+- Deterministic gates, with no model call, move ungrounded, colliding or refuted claims out of
+  Settled and say why, in a Quarantined section that is never copied as buildable.
+- REFUTED audit findings never reach Settled in the audited depth.
+- What I said is pinned; what only the foil concluded is labelled for confirmation.
+- The plan page gives me copy-ready `PROMPT.md` and `@plan.md` blocks.
+- A backslash-escaped quote grounds like the plain quote.
+- ADR-0029 records the decision; ADR-0022 and ADR-0023 are amended, not rewritten.
