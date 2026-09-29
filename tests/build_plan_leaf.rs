@@ -3,6 +3,10 @@
 //! `gates::run`. The gate only marks and tallies; it never demotes a task to `[?]`.
 
 use idea_vault::ai::sources::SourceProbe;
+use idea_vault::concepts::build_plan::gates::leaf::{
+    COMPOUND_ACCEPT, CROSSES_ROOTS, JUSTIFY, NO_COUNT, NO_RED, PREFIX, SPLIT, SPLIT_ONE_COMMIT,
+    SWEEP,
+};
 use idea_vault::concepts::build_plan::gates::{run, Evidence, GateInputs, GateReport};
 use idea_vault::concepts::build_plan::plan::{parse, BuildPlan, Item};
 
@@ -90,21 +94,21 @@ fn leaf_gate_and_or_a_verb_list_in_the_subject_asks_for_one_commit() {
     .concat();
     let (plan, _) = gate_plan(&plan_section);
     assert!(
-        marked(by_id(&plan, "T1"), "split: one commit"),
+        marked(by_id(&plan, "T1"), SPLIT_ONE_COMMIT),
         "{:?}",
         by_id(&plan, "T1")
     );
     assert!(
-        marked(by_id(&plan, "T4"), "split: one commit"),
+        marked(by_id(&plan, "T4"), SPLIT_ONE_COMMIT),
         "{:?}",
         by_id(&plan, "T4")
     );
     assert!(
-        !marked(by_id(&plan, "T2"), "split: one commit"),
+        !marked(by_id(&plan, "T2"), SPLIT_ONE_COMMIT),
         "a backticked 'and' is a name"
     );
     assert!(
-        !marked(by_id(&plan, "T3"), "split: one commit"),
+        !marked(by_id(&plan, "T3"), SPLIT_ONE_COMMIT),
         "a noun list is one subject"
     );
 }
@@ -136,12 +140,12 @@ fn leaf_gate_touches_across_top_level_roots_are_marked() {
     .concat();
     let (plan, _) = gate_plan(&plan_section);
     assert!(
-        marked(by_id(&plan, "T1"), "crosses roots"),
+        marked(by_id(&plan, "T1"), CROSSES_ROOTS),
         "{:?}",
         by_id(&plan, "T1")
     );
     assert!(
-        !marked(by_id(&plan, "T2"), "crosses roots"),
+        !marked(by_id(&plan, "T2"), CROSSES_ROOTS),
         "a file and its own test, plus a repo-root manifest, are one cluster: {:?}",
         by_id(&plan, "T2")
     );
@@ -193,21 +197,21 @@ fn leaf_gate_a_compound_accept_is_marked() {
     .concat();
     let (plan, _) = gate_plan(&plan_section);
     assert!(
-        marked(by_id(&plan, "T1"), "compound accept"),
+        marked(by_id(&plan, "T1"), COMPOUND_ACCEPT),
         "{:?}",
         by_id(&plan, "T1")
     );
     assert!(
-        marked(by_id(&plan, "T2"), "compound accept"),
+        marked(by_id(&plan, "T2"), COMPOUND_ACCEPT),
         "{:?}",
         by_id(&plan, "T2")
     );
     assert!(
-        !marked(by_id(&plan, "T3"), "compound accept"),
+        !marked(by_id(&plan, "T3"), COMPOUND_ACCEPT),
         "a quoted pipe is a pattern"
     );
     assert!(
-        !marked(by_id(&plan, "T4"), "compound accept"),
+        !marked(by_id(&plan, "T4"), COMPOUND_ACCEPT),
         "a backticked value is not a command"
     );
 }
@@ -251,7 +255,7 @@ fn leaf_gate_a_test_runner_accept_without_a_count_is_marked() {
     ]
     .concat();
     let (plan, _) = gate_plan(&plan_section);
-    let no_count = "no count: a filter matching 0 tests exits 0";
+    let no_count = NO_COUNT;
     assert!(
         marked(by_id(&plan, "T1"), no_count),
         "{:?}",
@@ -329,27 +333,27 @@ fn leaf_gate_one_split_trigger_asks_to_justify_unless_exempt() {
     .concat();
     let (plan, _) = gate_plan(&plan_section);
     assert!(
-        marked(by_id(&plan, "T1"), "justify:"),
+        marked(by_id(&plan, "T1"), JUSTIFY),
         "{:?}",
         by_id(&plan, "T1")
     );
     assert!(
-        !marked(by_id(&plan, "T1"), "split:"),
+        !marked(by_id(&plan, "T1"), SPLIT),
         "{:?}",
         by_id(&plan, "T1")
     );
     assert!(
-        !marked(by_id(&plan, "T2"), "justify:"),
+        !marked(by_id(&plan, "T2"), JUSTIFY),
         "{:?}",
         by_id(&plan, "T2")
     );
     assert!(
-        !marked(by_id(&plan, "T3"), "justify:"),
+        !marked(by_id(&plan, "T3"), JUSTIFY),
         "test files do not count: {:?}",
         by_id(&plan, "T3")
     );
     assert!(
-        marked(by_id(&plan, "T4"), "justify:"),
+        marked(by_id(&plan, "T4"), JUSTIFY),
         "reads + touches > 6: {:?}",
         by_id(&plan, "T4")
     );
@@ -373,8 +377,8 @@ fn leaf_gate_two_split_triggers_split_even_when_exempt() {
     .concat();
     let (plan, _) = gate_plan(&plan_section);
     let t1 = by_id(&plan, "T1");
-    assert!(marked(t1, "split:"), "{t1:?}");
-    assert!(!marked(t1, "justify:"), "{t1:?}");
+    assert!(marked(t1, SPLIT), "{t1:?}");
+    assert!(!marked(t1, JUSTIFY), "{t1:?}");
 }
 
 #[test]
@@ -404,12 +408,12 @@ fn leaf_gate_a_behaviour_verb_without_red_needs_red_first_proof() {
     .concat();
     let (plan, _) = gate_plan(&plan_section);
     assert!(
-        marked(by_id(&plan, "T1"), "no red-first proof"),
+        marked(by_id(&plan, "T1"), NO_RED),
         "{:?}",
         by_id(&plan, "T1")
     );
-    assert!(!marked(by_id(&plan, "T2"), "no red-first proof"));
-    assert!(!marked(by_id(&plan, "T3"), "no red-first proof"));
+    assert!(!marked(by_id(&plan, "T2"), NO_RED));
+    assert!(!marked(by_id(&plan, "T3"), NO_RED));
 }
 
 #[test]
@@ -432,7 +436,7 @@ fn leaf_gate_a_sweep_must_end_with_a_grep() {
     ]
     .concat();
     let (plan, _) = gate_plan(&plan_section);
-    let sweep = "sweep: end with a grep printing 0";
+    let sweep = SWEEP;
     assert!(
         marked(by_id(&plan, "T1"), sweep),
         "{:?}",
@@ -456,22 +460,24 @@ fn leaf_gate_a_one_task_one_file_plan_gets_no_split_notes() {
             ("accept", COUNTED),
         ],
     );
-    let (plan, _) = gate_plan(&plan_section);
+    let (plan, report) = gate_plan(&plan_section);
     let t1 = by_id(&plan, "T1");
+    assert_eq!(tally(&report, "leaf_ok"), 1, "{:?} {t1:?}", report.tally);
+    assert_eq!(tally(&report, "leaf_notes"), 0, "{:?}", report.tally);
     assert!(
         !t1.markers
             .iter()
-            .any(|m| m == "split: one commit" || m.starts_with("justify:")),
+            .any(|m| m.starts_with(SPLIT) || m.starts_with(JUSTIFY)),
         "{t1:?}"
     );
 
     let (two, _) = gate_plan(&[plan_section, filler()].concat());
     assert!(
-        marked(by_id(&two, "T1"), "split: one commit"),
+        marked(by_id(&two, "T1"), SPLIT_ONE_COMMIT),
         "the floor needs one task"
     );
     assert!(
-        marked(by_id(&two, "T1"), "justify:"),
+        marked(by_id(&two, "T1"), JUSTIFY),
         "the floor needs one task"
     );
 }
@@ -510,4 +516,193 @@ fn leaf_gate_marks_and_tallies_but_never_demotes() {
     assert_eq!(tally(&report, "leaf_split"), 1, "{:?}", report.tally);
     assert_eq!(tally(&report, "leaf_notes"), 2, "{:?}", report.tally);
     assert_eq!(tally(&report, "needs_owner"), 0, "{:?}", report.tally);
+}
+
+#[test]
+fn leaf_gate_an_exit_code_or_a_zero_is_not_a_test_count() {
+    let bare = [
+        "`cargo test parser_` → exit 0, tests pass",
+        "`cargo test parser_` → exit 0, 0 passed",
+        "`cargo test parser_` → exit 0; test passes",
+        "`cargo test parser_` → exit 0, ok",
+    ];
+    let mut tasks: Vec<String> = bare
+        .iter()
+        .enumerate()
+        .map(|(i, accept)| {
+            task(
+                &format!("T{}", i + 1),
+                "Add the parser",
+                &[("touches", "`src/a.rs`"), ("accept", accept)],
+            )
+        })
+        .collect();
+    tasks.push(task(
+        "T5",
+        "Add the reader",
+        &[
+            ("touches", "`src/b.rs`"),
+            (
+                "accept",
+                "`cargo test reader_` → exit 0, prints `test result: ok. 3 passed`",
+            ),
+        ],
+    ));
+    tasks.push(filler());
+    let (plan, _) = gate_plan(&tasks.concat());
+    for id in ["T1", "T2", "T3", "T4"] {
+        assert!(marked(by_id(&plan, id), NO_COUNT), "{:?}", by_id(&plan, id));
+    }
+    assert!(
+        !marked(by_id(&plan, "T5"), NO_COUNT),
+        "{:?}",
+        by_id(&plan, "T5")
+    );
+}
+
+#[test]
+fn leaf_gate_expected_output_in_backticks_is_not_a_second_command() {
+    let plan_section = [
+        task(
+            "T1",
+            "Add the parser",
+            &[
+                ("touches", "`src/a.rs`"),
+                (
+                    "accept",
+                    "`cargo test x` → exit 0, prints `test result: ok. 3 passed`",
+                ),
+            ],
+        ),
+        task(
+            "T2",
+            "Add the reader",
+            &[
+                ("touches", "`src/b.rs`"),
+                (
+                    "accept",
+                    "`cargo test a` → exit 0, 2 passed; `test -f out.txt` → exit 0",
+                ),
+            ],
+        ),
+        filler(),
+    ]
+    .concat();
+    let (plan, _) = gate_plan(&plan_section);
+    assert!(
+        !marked(by_id(&plan, "T1"), COMPOUND_ACCEPT),
+        "{:?}",
+        by_id(&plan, "T1")
+    );
+    assert!(
+        marked(by_id(&plan, "T2"), COMPOUND_ACCEPT),
+        "a span before its own arrow is a second command: {:?}",
+        by_id(&plan, "T2")
+    );
+}
+
+#[test]
+fn leaf_gate_an_env_prefixed_runner_is_a_test_runner() {
+    let plan_section = [
+        task(
+            "T1",
+            "Add the parser",
+            &[
+                ("touches", "`src/a.rs`"),
+                ("accept", "`RUST_LOG=1 cargo test parser_` → exit 0"),
+            ],
+        ),
+        task(
+            "T2",
+            "Add the reader",
+            &[
+                ("touches", "`web/b.ts`"),
+                ("accept", "`FXE_LIVEPG=1 pnpm test reader` → passes"),
+            ],
+        ),
+        task(
+            "T3",
+            "Add the writer",
+            &[
+                ("touches", "`src/c.rs`"),
+                (
+                    "accept",
+                    "`RUST_LOG=1 cargo test writer_` → exit 0, ≥2 passed",
+                ),
+            ],
+        ),
+        filler(),
+    ]
+    .concat();
+    let (plan, _) = gate_plan(&plan_section);
+    for id in ["T1", "T2"] {
+        assert!(marked(by_id(&plan, id), NO_COUNT), "{:?}", by_id(&plan, id));
+    }
+    assert!(
+        !marked(by_id(&plan, "T3"), NO_COUNT),
+        "{:?}",
+        by_id(&plan, "T3")
+    );
+}
+
+#[test]
+fn leaf_gate_tally_reads_only_its_own_findings() {
+    let plan_section = [
+        task(
+            "T1",
+            "Add the `load and save` helper",
+            &[("touches", "`src/a.rs`"), ("accept", COUNTED)],
+        ),
+        filler(),
+    ]
+    .concat();
+    let (plan, report) = gate_plan(&plan_section);
+    assert_eq!(
+        tally(&report, "leaf_ok"),
+        2,
+        "{:?} {:?}",
+        report.tally,
+        by_id(&plan, "T1")
+    );
+    assert_eq!(tally(&report, "leaf_notes"), 0, "{:?}", report.tally);
+}
+
+#[test]
+fn leaf_gate_every_marker_carries_the_leaf_prefix() {
+    let plan_section = [
+        task(
+            "T1",
+            "Reject empty slugs everywhere, wire the route",
+            &[
+                (
+                    "touches",
+                    "`src/a.rs`, `src/b.rs`, `src/c.rs`, `src/d.rs`, `docs/a.md`",
+                ),
+                ("accept", "`cargo test a && cargo test b` → exit 0"),
+            ],
+        ),
+        filler(),
+    ]
+    .concat();
+    let (plan, _) = gate_plan(&plan_section);
+    let t1 = by_id(&plan, "T1");
+    let leaf: Vec<&String> = t1
+        .markers
+        .iter()
+        .filter(|m| {
+            [
+                "split: one commit",
+                "crosses roots",
+                "compound accept",
+                "no count",
+                "justify:",
+                "no red-first",
+                "sweep:",
+            ]
+            .iter()
+            .any(|p| m.contains(p))
+        })
+        .collect();
+    assert_eq!(leaf.len(), 7, "{t1:?}");
+    assert!(leaf.iter().all(|m| m.starts_with(PREFIX)), "{leaf:?}");
 }

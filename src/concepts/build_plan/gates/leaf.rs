@@ -6,12 +6,16 @@
 use super::{GateInputs, GateReport};
 use crate::concepts::build_plan::plan::{BuildPlan, Item};
 
-pub const SPLIT_ONE_COMMIT: &str = "split: one commit";
-pub const CROSSES_ROOTS: &str = "crosses roots";
-pub const COMPOUND_ACCEPT: &str = "compound accept";
-pub const NO_COUNT: &str = "no count: a filter matching 0 tests exits 0";
-pub const NO_RED: &str = "no red-first proof";
-pub const SWEEP: &str = "sweep: end with a grep printing 0";
+/// The prefix every G13 marker carries, so no other gate's marker is read as a leaf finding.
+pub const PREFIX: &str = "leaf: ";
+pub const SPLIT: &str = "leaf: split:";
+pub const JUSTIFY: &str = "leaf: justify:";
+pub const SPLIT_ONE_COMMIT: &str = "leaf: split: one commit";
+pub const CROSSES_ROOTS: &str = "leaf: crosses roots";
+pub const COMPOUND_ACCEPT: &str = "leaf: compound accept";
+pub const NO_COUNT: &str = "leaf: no count: a filter matching 0 tests exits 0";
+pub const NO_RED: &str = "leaf: no red-first proof";
+pub const SWEEP: &str = "leaf: sweep: end with a grep printing 0";
 
 const MAX_NON_TEST_TOUCHES: usize = 3;
 const MAX_READS_AND_TOUCHES: usize = 6;
@@ -114,8 +118,9 @@ const TEST_RUNNERS: &[&[&str]] = &[
 ];
 
 /// Mark every task of `plan` against the leaf invariants and split triggers, and tally each task
-/// once as `leaf_ok` (no finding), `leaf_split` (a `split:` marker) or `leaf_notes` (any other
-/// finding, including empty touches, which is also tallied as `unscoped` and never marked).
+/// once, from this gate's own findings only, as `leaf_ok` (none), `leaf_split` (a [`SPLIT`]
+/// finding) or `leaf_notes` (any other finding, including empty touches, which is also tallied as
+/// `unscoped` and never marked).
 pub fn apply(plan: &mut BuildPlan, _inputs: &GateInputs, report: &mut GateReport) {
     let floor = plan.tasks.len() == 1 && plan.tasks[0].list("touches").len() <= 1;
     for task in &mut plan.tasks {
@@ -124,7 +129,8 @@ pub fn apply(plan: &mut BuildPlan, _inputs: &GateInputs, report: &mut GateReport
         if unscoped {
             report.count("unscoped");
         }
-        let split = findings.iter().any(|m| m.starts_with("split:"));
+        let split = findings.iter().any(|m| m.starts_with(SPLIT));
+        let noted = unscoped || !findings.is_empty();
         for marker in findings {
             if !task.markers.contains(&marker) {
                 task.markers.push(marker.clone());
@@ -132,27 +138,12 @@ pub fn apply(plan: &mut BuildPlan, _inputs: &GateInputs, report: &mut GateReport
         }
         report.count(if split {
             "leaf_split"
-        } else if unscoped || task.markers.iter().any(|m| is_leaf_marker(m)) {
+        } else if noted {
             "leaf_notes"
         } else {
             "leaf_ok"
         });
     }
-}
-
-fn is_leaf_marker(marker: &str) -> bool {
-    [
-        SPLIT_ONE_COMMIT,
-        CROSSES_ROOTS,
-        COMPOUND_ACCEPT,
-        NO_COUNT,
-        NO_RED,
-        SWEEP,
-        "justify:",
-        "split:",
-    ]
-    .iter()
-    .any(|p| marker.starts_with(p))
 }
 
 /// The leaf markers `task` earns; `floor` (a one-task, one-file plan) suppresses split notes.
@@ -190,8 +181,8 @@ fn leaf_findings(task: &Item, floor: bool) -> Vec<String> {
         match triggers.len() {
             0 => {}
             1 if task.field("exempt").is_some() => {}
-            1 => out.push(format!("justify: {} — add exempt: or split", triggers[0])),
-            _ => out.push(format!("split: {}", triggers.join(", "))),
+            1 => out.push(format!("{JUSTIFY} {} — add exempt: or split", triggers[0])),
+            _ => out.push(format!("{SPLIT} {}", triggers.join(", "))),
         }
     }
 
@@ -236,8 +227,9 @@ fn roots(touches: &[String]) -> Vec<String> {
         let Some((root, _)) = path.split_once('/') else {
             continue;
         };
-        if !root.is_empty() && !out.iter().any(|r| r == root) {
-            out.push(root.to_string());
+        let root = root.replace(['⟨', '⟩'], "");
+        if !root.is_empty() && !out.contains(&root) {
+            out.push(root);
         }
     }
     out.sort();
@@ -250,6 +242,7 @@ fn is_test_path(path: &str) -> bool {
     path.split('/')
         .any(|seg| matches!(seg, "tests" | "test" | "__tests__" | "spec" | "specs"))
         || name.starts_with("test_")
+        || name == "tests.rs"
         || ["_test.", ".test.", "_spec.", ".spec.", "_tests."]
             .iter()
             .any(|p| name.contains(p))
@@ -276,17 +269,39 @@ fn accept_condition(accept: &str) -> &str {
     accept.splitn(3, '`').nth(2).unwrap_or_default()
 }
 
-/// L3: the command chains or pipes outside quotes, or a second backticked span is a command.
+/// L3: the command chains or pipes outside quotes, or a later backticked span is a command with
+/// its own arrow; a span after an arrow is expected output (`test result: ok. 3 passed`).
 fn is_compound(accept: &str, command: &str) -> bool {
     if chains_unquoted(command) {
         return true;
     }
-    accept.split('`').skip(1).step_by(2).skip(1).any(|span| {
-        span.split_whitespace()
-            .next()
-            .is_some_and(|w| COMMAND_STARTS.contains(&w.to_lowercase().as_str()))
-            && span.trim().contains(char::is_whitespace)
-    })
+    let parts: Vec<&str> = accept.split('`').collect();
+    parts
+        .iter()
+        .enumerate()
+        .skip(3)
+        .step_by(2)
+        .any(|(i, span)| {
+            let span = span.to_lowercase();
+            let after = parts.get(i + 1).map_or("", |t| t.trim_start());
+            unprefixed(&span)
+                .first()
+                .is_some_and(|w| COMMAND_STARTS.contains(w))
+                && (after.starts_with('→') || after.starts_with("->"))
+        })
+}
+
+/// The words of `command` after any leading `NAME=value` environment assignments.
+fn unprefixed(command: &str) -> Vec<&str> {
+    command
+        .split_whitespace()
+        .skip_while(|w| {
+            w.split_once('=').is_some_and(|(name, _)| {
+                name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        })
+        .collect()
 }
 
 fn chains_unquoted(command: &str) -> bool {
@@ -307,13 +322,14 @@ fn chains_unquoted(command: &str) -> bool {
 }
 
 fn is_test_runner(command: &str) -> bool {
-    let words: Vec<&str> = command.split_whitespace().collect();
+    let words = unprefixed(command);
     TEST_RUNNERS
         .iter()
         .any(|runner| words.len() >= runner.len() && words[..runner.len()] == **runner)
 }
 
-/// A number tied to passing tests (`3 passed`, `≥8 tests`, `at least 2`), not an exit code.
+/// A nonzero number followed by a test word (`3 passed`, `≥8 tests`, `ok. 3 passed`); an exit
+/// code or a zero is never a count, since a filter matching no test exits 0 and passes 0.
 fn has_count(condition: &str) -> bool {
     let spaced = condition
         .to_lowercase()
@@ -328,8 +344,9 @@ fn has_count(condition: &str) -> bool {
         }
         let before = i.checked_sub(1).map(|j| toks[j]).unwrap_or_default();
         let after = toks.get(i + 1).copied().unwrap_or_default();
-        matches!(before, ">=" | ">" | "least")
-            || ["pass", "test", "case", "ok"]
+        !matches!(before, "exit" | "code" | "status")
+            && digits.chars().any(|c| c != '0')
+            && ["pass", "test", "case"]
                 .iter()
                 .any(|p| after.starts_with(p))
     })
@@ -349,11 +366,17 @@ mod tests {
 
     #[test]
     fn a_count_is_a_number_tied_to_passing_tests_not_the_exit_code() {
+        assert!(!has_count(" exit 0, tests pass"));
+        assert!(!has_count(" exit 0, 0 passed"));
+        assert!(!has_count(" exit 0; test passes"));
+        assert!(!has_count(" exit 0, ok"));
+        assert!(!has_count(" at least 2 (see log)"));
+        assert!(has_count(" exit 0, prints `test result: ok. 3 passed`"));
         assert!(!has_count(" exit 0"));
         assert!(!has_count(" exit 0, 0 failed"));
         assert!(has_count(" exit 0, ≥8 passed"));
         assert!(has_count(" exit 0 and 3 tests pass"));
-        assert!(has_count(" at least 2 (see log)"));
+        assert!(has_count(" at least 2 tests pass"));
         assert!(has_count(" exit 0, >=4 passed"));
     }
 
@@ -368,6 +391,9 @@ mod tests {
 
     #[test]
     fn test_runners_are_matched_by_leading_words() {
+        assert!(is_test_runner("rust_log=1 cargo test x"));
+        assert!(is_test_runner("fxe_livepg=1 a_b=2 pnpm test"));
+        assert!(!is_test_runner("rust_log=1 cargo build"));
         assert!(is_test_runner("cargo test --quiet x"));
         assert!(is_test_runner("python -m pytest tests/x.py"));
         assert!(is_test_runner("npx vitest run"));
@@ -391,6 +417,8 @@ mod tests {
         assert!(is_test_path("web/src/__tests__/x.ts"));
         assert!(is_test_path("pkg/x_test.go"));
         assert!(!is_test_path("src/testing.rs"));
+        assert!(is_test_path("src/foo/tests.rs"));
+        assert_eq!(roots(&paths(&["src⟩/a.rs", "⟨docs/a.md"])), ["docs", "src"]);
     }
 
     #[test]
@@ -416,13 +444,15 @@ mod tests {
         assert_eq!(floored, [NO_COUNT, NO_RED], "{floored:?}");
         let full = leaf_findings(&t, false);
         assert!(full.contains(&SPLIT_ONE_COMMIT.to_string()), "{full:?}");
-        assert!(full.iter().any(|m| m.starts_with("justify:")), "{full:?}");
+        assert!(full.iter().any(|m| m.starts_with(JUSTIFY)), "{full:?}");
     }
 
     #[test]
     fn a_second_backticked_command_is_compound_but_a_value_is_not() {
         let accept = "`cargo test a` → 2 passed, then `cargo clippy --all` → exit 0";
         assert!(is_compound(accept, &accept_command(accept)));
+        let accept = "`cargo test x` → exit 0, prints `test result: ok. 3 passed`";
+        assert!(!is_compound(accept, &accept_command(accept)));
         let accept = "`cargo test a` → prints `ok`, 2 passed";
         assert!(!is_compound(accept, &accept_command(accept)));
     }
