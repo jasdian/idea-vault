@@ -610,7 +610,7 @@ mod tests {
     }
 
     fn run_with(plan: &mut BuildPlan, conversation: &str) -> GateReport {
-        let evidence = Evidence::new("", conversation, &[]);
+        let evidence = Evidence::new("", conversation);
         let probe = SourceProbe::default();
         let inputs = GateInputs {
             evidence: &evidence,

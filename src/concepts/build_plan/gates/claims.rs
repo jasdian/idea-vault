@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn g1_an_owner_quote_keeps_the_item_settled_labelled_you() {
-        let ev = Evidence::new("", CONVERSATION, &["build-prompt"]);
+        let ev = Evidence::new("", CONVERSATION);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "The parser ships first",
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn g1_capstone_turns_are_not_evidence() {
-        let ev = Evidence::new("", CONVERSATION, &["build-prompt"]);
+        let ev = Evidence::new("", CONVERSATION);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "The cache lives in redis",
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn g1_a_missing_quote_is_quarantined() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let mut item = settled(
             "The owner chose freeze at entry",
             Some("\"we freeze the snapshot at entry\""),
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn g1_a_foil_quote_stays_settled_labelled_foil() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "The probe is read only",
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn g1_no_quote_is_opened() {
-        let ev = Evidence::new("An idea about a parser.", CONVERSATION, &[]);
+        let ev = Evidence::new("An idea about a parser.", CONVERSATION);
         let mut unproven = settled("We hire a team of five first", None);
         unproven.provenance = Some(Provenance::Owner);
         let mut plan = BuildPlan {
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn g1_a_short_quote_is_opened_not_quarantined() {
-        let ev = Evidence::new("An idea about a parser.", CONVERSATION, &[]);
+        let ev = Evidence::new("An idea about a parser.", CONVERSATION);
         let mut plan = BuildPlan {
             settled: vec![
                 settled("The owner froze the scope", Some("\"Freeze it.\"")),
@@ -464,7 +464,7 @@ mod tests {
     fn g2_a_quote_beside_pick_one_is_opened() {
         let conv = "## assistant\nZone snapshots freeze at entry for every position we take. \
 That is the choice here: pick one explicitly before building.\n";
-        let ev = Evidence::new("", conv, &[]);
+        let ev = Evidence::new("", conv);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "Snapshots freeze at entry",
@@ -487,7 +487,7 @@ That is the choice here: pick one explicitly before building.\n";
             "## assistant\nZone snapshots freeze at entry for every forklift extension. {filler} \
 Separately, the fork in the road is lunch.\n"
         );
-        let ev = Evidence::new("", &conv, &[]);
+        let ev = Evidence::new("", &conv);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "Snapshots freeze at entry",
@@ -502,7 +502,7 @@ Separately, the fork in the road is lunch.\n"
     #[test]
     fn g2_an_owner_decision_to_fork_stays_settled() {
         let conv = "## user\nFork the upstream repo and patch it, that part is decided.\n";
-        let ev = Evidence::new("", conv, &[]);
+        let ev = Evidence::new("", conv);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "Fork the upstream repo and patch it",
@@ -517,7 +517,7 @@ Separately, the fork in the road is lunch.\n"
     #[test]
     fn g2_a_marker_just_before_the_quote_is_seen_and_a_far_one_is_not() {
         let near = "## assistant\nUnresolved: zone snapshots freeze at entry for every position.\n";
-        let ev = Evidence::new("", near, &[]);
+        let ev = Evidence::new("", near);
         let item = || {
             settled(
                 "Snapshots freeze at entry",
@@ -537,7 +537,7 @@ Separately, the fork in the road is lunch.\n"
         let far = format!(
             "## assistant\nUnresolved lunch. {filler} Zone snapshots freeze at entry for every position.\n"
         );
-        let ev = Evidence::new("", &far, &[]);
+        let ev = Evidence::new("", &far);
         let mut plan = BuildPlan {
             settled: vec![item()],
             ..BuildPlan::default()
@@ -548,7 +548,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g2_a_hedged_item_is_opened() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "Either the parser or the probe ships first",
@@ -566,7 +566,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g2_an_item_matching_its_own_open_question_is_opened() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let mut plan = BuildPlan {
             settled: vec![settled(
                 "The parser ships before the probe",
@@ -585,7 +585,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g2_an_owner_quote_only_gets_a_marker_from_the_artifact() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let artifact = OpenArtifact {
             name: "2026-09-01-open-questions".into(),
             items: vec!["Which ships first, the parser or the probe?".into()],
@@ -608,7 +608,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g2_a_foil_item_listed_in_the_artifact_is_opened() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let artifact = OpenArtifact {
             name: "2026-09-01-open-questions".into(),
             items: vec!["Must the probe stay read only?".into()],
@@ -632,7 +632,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g3_a_refuted_settled_claim_is_quarantined_with_the_reason() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let audit = AuditView {
             findings: vec![finding(
                 "The probe must stay read only forever",
@@ -659,7 +659,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g3_an_uncertain_settled_claim_is_opened_with_the_reason() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let audit = AuditView {
             findings: vec![finding(
                 "The probe must stay read only forever",
@@ -691,7 +691,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g3_uncertain_findings_missing_from_open_are_added() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let long = format!("Which exchange feeds the backtest {}", "é".repeat(400));
         let audit = AuditView {
             findings: vec![
@@ -730,7 +730,7 @@ Separately, the fork in the road is lunch.\n"
     #[test]
     fn g3_an_audit_opened_item_is_not_appended_again() {
         let conv = "## user\nSnapshots freeze entry zones daily for every desk.\n";
-        let ev = Evidence::new("", conv, &[]);
+        let ev = Evidence::new("", conv);
         let audit = AuditView {
             findings: vec![finding(
                 "Snapshots freeze entry, but maybe weekly bins matter",
@@ -753,7 +753,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g3_a_failed_audit_still_carries_open_question_findings() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let audit = AuditView {
             findings: vec![
                 finding(
@@ -804,7 +804,7 @@ Separately, the fork in the road is lunch.\n"
 
     #[test]
     fn g3_a_failed_audit_is_noted() {
-        let ev = Evidence::new("", CONVERSATION, &[]);
+        let ev = Evidence::new("", CONVERSATION);
         let failed = AuditView {
             failed: true,
             ..AuditView::default()

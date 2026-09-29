@@ -701,7 +701,7 @@ mod tests {
     }
 
     fn run(plan: &mut BuildPlan, probe: &SourceProbe) -> GateReport {
-        let evidence = Evidence::new("An idea about the vault.", CONVERSATION, &[]);
+        let evidence = Evidence::new("An idea about the vault.", CONVERSATION);
         let inputs = GateInputs {
             evidence: &evidence,
             open_artifact: None,

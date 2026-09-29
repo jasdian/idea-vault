@@ -55,7 +55,7 @@ struct Extra<'a> {
 }
 
 fn gate_answer(conversation: &str, answer: &str, extra: Extra) -> (BuildPlan, GateReport) {
-    let evidence = Evidence::new(IDEA, conversation, &["build-prompt"]);
+    let evidence = Evidence::new(IDEA, conversation);
     let mut plan = parse(answer).expect("the fixture is a usable plan");
     let report = run(
         &mut plan,

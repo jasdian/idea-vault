@@ -1,8 +1,9 @@
 //! The build-plan persist boundary (docs/adr/0030): parse the planner's answer, run the gates
 //! over it against the idea's evidence, write the gated plan as `artifacts/<stamp>-build-plan.md`
 //! and append a short pointer turn to `conversation.md`. The plan body never enters the
-//! transcript, and build-plan turns are excluded from every evidence haystack
-//! ([`CAPSTONE_TURNS`]), so neither a later plan nor store-time extraction grounds in plan text.
+//! transcript, and build-plan turns (named capstone turns or pointer-shaped skill and workflow
+//! turns, [`POINTER_PREFIX`]) are excluded from every evidence haystack, so neither a later plan
+//! nor store-time extraction grounds in plan text.
 //!
 //! [`finish`] is blocking (vault reads and writes, the bounded source probe) and holds no
 //! permit; callers run it after the model call, in `spawn_blocking`.
@@ -18,7 +19,7 @@ use crate::concepts::build_plan::gates::{
 };
 use crate::concepts::build_plan::plan::{self, BuildPlan, Provenance};
 use crate::concepts::ConceptError;
-use crate::domain::evidence::{CAPSTONE_TURNS, POINTER_PREFIX};
+use crate::domain::evidence::POINTER_PREFIX;
 use crate::domain::frontmatter::ArtifactFrontmatter;
 use crate::domain::{slug, Artifact, ArtifactKind};
 use crate::vault::store;
@@ -200,7 +201,7 @@ pub fn finish(inputs: PlanInputs) -> Result<Finished, ConceptError> {
     let mut plan = plan::parse(inputs.answer).map_err(|_| ConceptError::PlanUnusable)?;
     let idea = store::read_idea(inputs.vault_dir, inputs.idea_slug)?;
     let conversation = store::read_conversation(inputs.vault_dir, inputs.idea_slug)?;
-    let evidence = Evidence::new(&idea.body, &conversation, CAPSTONE_TURNS);
+    let evidence = Evidence::new(&idea.body, &conversation);
     let excluded = store::split_turns(&conversation)
         .iter()
         .filter(|t| store::is_capstone_turn(t))
@@ -267,6 +268,7 @@ pub fn finish(inputs: PlanInputs) -> Result<Finished, ConceptError> {
 mod tests {
     use super::*;
     use crate::concepts::workflows::builtin_workflows;
+    use crate::domain::evidence::CAPSTONE_TURNS;
 
     #[test]
     fn every_workflow_chaining_the_planner_is_a_capstone() {

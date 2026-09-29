@@ -34,7 +34,8 @@ pub fn normalize_for_match(text: &str) -> String {
 
 /// The skill/workflow names whose transcript turns are build plans or their pointers
 /// (docs/adr/0030). Those turns are model-authored plan text, so they are never evidence: not
-/// for a later plan's quotes, and not for store-time memory quotes.
+/// for a later plan's quotes, and not for store-time memory quotes. A skill or workflow turn
+/// under any other name is excluded by its pointer shape ([`POINTER_PREFIX`]).
 pub const CAPSTONE_TURNS: &[&str] = &["build-prompt", "ready-to-build"];
 
 /// The line prefix the code writes at the start of every build-plan pointer turn, whatever
@@ -241,6 +242,7 @@ mod tests {
             "segments must occur in order"
         );
     }
+
     #[test]
     fn pointer_body_is_recognised_by_its_prefix() {
         assert!(is_pointer_body(&format!("{POINTER_PREFIX}x](/a) · quick")));

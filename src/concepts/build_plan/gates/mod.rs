@@ -20,7 +20,7 @@ use crate::concepts::audit::{AuditReport, Finding, Label};
 use crate::concepts::build_plan::plan::{BuildPlan, Provenance};
 use crate::domain::evidence::{locate, normalize_for_match};
 use crate::vault::store::{
-    is_pointer_turn, parse_turn_heading, split_turns, turn_role, TurnSource,
+    is_capstone_turn, parse_turn_heading, split_turns, turn_role, TurnSource,
 };
 
 /// One evidence turn: who wrote it, its raw text and its normalized form (for quote matching).
@@ -40,11 +40,10 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    /// Evidence from `idea_body` and `conversation` (the raw `conversation.md`). A turn headed
-    /// `skill: <n>` or `workflow: <n>` with `n` in `capstones`, or any assistant turn whose body
-    /// is a build-plan pointer, is excluded; `## user` turns are the owner's, every other turn is
-    /// the foil's.
-    pub fn new(idea_body: &str, conversation: &str, capstones: &[&str]) -> Self {
+    /// Evidence from `idea_body` and `conversation` (the raw `conversation.md`). Exactly the turns
+    /// [`is_capstone_turn`] flags are excluded; `## user` turns are the owner's, every other turn
+    /// is the foil's.
+    pub fn new(idea_body: &str, conversation: &str) -> Self {
         let mut turns = Vec::new();
         if !idea_body.trim().is_empty() {
             turns.push(EvidenceTurn {
@@ -54,16 +53,11 @@ impl Evidence {
             });
         }
         for turn in split_turns(conversation) {
-            if is_pointer_turn(&turn) {
+            if is_capstone_turn(&turn) {
                 continue;
             }
             let speaker = match parse_turn_heading(turn_role(&turn)) {
                 TurnSource::User => Provenance::Owner,
-                TurnSource::Skill(n) | TurnSource::Workflow(n)
-                    if capstones.contains(&n.as_str()) =>
-                {
-                    continue
-                }
                 _ => Provenance::Foil,
             };
             turns.push(EvidenceTurn {
@@ -198,11 +192,7 @@ mod tests {
 
     #[test]
     fn evidence_credits_the_owner_first_and_skips_capstone_turns() {
-        let ev = Evidence::new(
-            "An idea about the parser before the probe.",
-            CONVERSATION,
-            &["build-prompt"],
-        );
+        let ev = Evidence::new("An idea about the parser before the probe.", CONVERSATION);
         assert_eq!(
             ev.turns().iter().map(|t| t.speaker).collect::<Vec<_>>(),
             [Provenance::Idea, Provenance::Owner, Provenance::Foil]
@@ -216,6 +206,21 @@ mod tests {
             None,
             "an earlier build plan never grounds a new one"
         );
+    }
+
+    #[test]
+    fn evidence_keeps_exactly_the_turns_the_capstone_predicate_keeps() {
+        let conversation = format!(
+            "{CONVERSATION}\n## assistant (skill: house-plan)\n**Build plan** → [p](/idea/x/artifact/p.md) · quick\n\n\
+## assistant\n**Build plan** → [a chat reply that echoes it](/x)\n"
+        );
+        let ev = Evidence::new("", &conversation);
+        let kept = split_turns(&conversation)
+            .iter()
+            .filter(|t| !is_capstone_turn(t))
+            .count();
+        assert_eq!(ev.turns().len(), kept);
+        assert_eq!(kept, 3);
     }
 
     #[test]

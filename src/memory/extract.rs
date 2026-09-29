@@ -560,6 +560,16 @@ mod tests {
     }
 
     #[test]
+    fn an_owner_named_pointer_turn_never_grounds_a_memory_quote() {
+        let conversation = "## user\nWe ship the parser first, before anything else.\n\n\
+## assistant (skill: house-plan)\n**Build plan** → [p](/idea/x/artifact/p.md) · quick\n\n\
+- Q1: proposed: the owner chose freeze at entry\n";
+        let hay = evidence_haystack("An idea.", conversation);
+        assert!(grounded("ship the parser first", &hay));
+        assert!(!grounded("the owner chose freeze at entry", &hay));
+    }
+
+    #[test]
     fn parse_tags_reads_the_last_tags_line_slugified_and_capped() {
         let raw = "FACT: One\nBody.\nTAGS: ignored, earlier\nFACT: Two\nBody two.\n\
                    TAGS: Trading Tools, MVP!, trading tools, a, b, c, d, e\n";

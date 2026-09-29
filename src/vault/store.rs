@@ -489,8 +489,9 @@ fn memory_index_line(fact: &MemoryFact) -> (MemoryIndexEntry, String) {
 }
 
 /// True for a build-plan turn or its pointer: headed `skill: <n>` or `workflow: <n>` with `n` in
-/// [`CAPSTONE_TURNS`](crate::domain::evidence::CAPSTONE_TURNS), or pointer-shaped
-/// ([`is_pointer_turn`]) whatever its name (docs/adr/0030).
+/// [`CAPSTONE_TURNS`](crate::domain::evidence::CAPSTONE_TURNS), or a skill or workflow turn that is
+/// pointer-shaped ([`is_pointer_turn`]) whatever its name (docs/adr/0030). The one predicate
+/// behind every evidence haystack.
 pub fn is_capstone_turn(turn: &str) -> bool {
     let named = matches!(
         parse_turn_heading(turn_role(turn)),
@@ -500,14 +501,19 @@ pub fn is_capstone_turn(turn: &str) -> bool {
     named || is_pointer_turn(turn)
 }
 
-/// True for an assistant turn whose body is a build-plan pointer; a user turn quoting the
-/// pointer text is not one.
+/// True for a skill or workflow turn whose body is a build-plan pointer. Those are the only
+/// headings code writes a pointer under, so a chat reply, a swarm answer or a user turn that
+/// merely starts with the pointer text is not one.
 pub fn is_pointer_turn(turn: &str) -> bool {
     match parse_turn_heading(turn_role(turn)) {
-        TurnSource::User | TurnSource::Other(_) => false,
-        _ => crate::domain::evidence::is_pointer_body(
+        TurnSource::Skill(_) | TurnSource::Workflow(_) => crate::domain::evidence::is_pointer_body(
             turn.split_once('\n').map_or("", |(_, rest)| rest),
         ),
+        TurnSource::User
+        | TurnSource::Other(_)
+        | TurnSource::Chat
+        | TurnSource::Swarm(_)
+        | TurnSource::Knowledge => false,
     }
 }
 
@@ -817,8 +823,16 @@ mod tests {
         assert!(is_capstone_turn(&format!(
             "## assistant (workflow: mine)\n{body}"
         )));
-        assert!(is_capstone_turn(&format!("## assistant\n{body}")));
+        assert!(
+            !is_capstone_turn(&format!("## assistant\n{body}")),
+            "a plain chat reply that echoes the pointer is not a pointer turn"
+        );
+        assert!(
+            !is_capstone_turn(&format!("## assistant (swarm: critic)\n{body}")),
+            "a swarm answer that echoes the pointer is not a pointer turn"
+        );
         assert!(!is_capstone_turn(&format!("## user\n{body}")));
+        assert!(!is_capstone_turn(&format!("## user (skill: mine)\n{body}")));
         assert!(!is_capstone_turn(
             "## assistant (skill: mine)\nA plain answer.\n"
         ));
