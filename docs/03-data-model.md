@@ -224,6 +224,7 @@ classDiagram
         Finding
         Synthesis
         Quarantine
+        BuildPlan
     }
     IdeaFrontmatter --> IdeaState
     ArtifactFrontmatter --> ArtifactKind
