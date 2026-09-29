@@ -117,7 +117,7 @@ async fn artifact_page_prompt_block_carries_the_run_protocol_and_trust_line() {
         blocks[0]
     );
     assert!(
-        blocks[0].contains("_trust: quick · unaudited · generated 2026-09-28 21:40 by m"),
+        blocks[0].contains("_trust: quick · audit tally not recorded · generated 2026-09-28 21:40 by m · sources not recorded"),
         "{}",
         blocks[0]
     );
@@ -161,10 +161,12 @@ async fn artifact_page_attack_plan_block_opens_with_the_escaped_bootstrap_row() 
     assert_eq!(status, StatusCode::OK);
     let blocks = copy_blocks(&body);
     assert_eq!(blocks.len(), 2, "{body}");
-    let t0 = "| [ ] | T0 | Run the bootstrap checks P1 | — | 0 | 00000 | haiku | none (read-only) | P1: `grep -c &#60;main&#62; src/a.rs \\| grep -q 1` → exit 0 |";
+    let t0 = "| [ ] | T0 | Run the bootstrap checks P1 (read-only, no commit; a failed P# blocks only the tasks whose premises list it) | — | 0 | 00000 | haiku | none (read-only) | P1: `grep -c &#60;main&#62; src/a.rs \\| grep -q 1` → exit 0 |";
     assert!(blocks[1].contains(t0), "{}", blocks[1]);
     assert!(
-        blocks[1].contains("| [ ] | T1 | Write the parser | T0 | 1 | 00000 | sonnet | src/a.rs |"),
+        blocks[1].contains(
+            "| [ ] | T1 | Write the parser (premises: P1) | T0 | 1 | 00000 | sonnet | src/a.rs |"
+        ),
         "{}",
         blocks[1]
     );

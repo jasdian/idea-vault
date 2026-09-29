@@ -1033,8 +1033,6 @@ pub fn parse_header(body: &str) -> RunHeader {
     header
 }
 
-/// The `PROMPT.md` trust line: mode, audit tally (or `unaudited`), time and model, whether
-/// sources backed the anchor checks, and what was kept out of the discussion.
 /// `_what ran: <mode label> · gates: <tally>_`, the line under the `PROMPT.md` title.
 fn what_ran_line(h: &RunHeader) -> String {
     let mode = if h.mode.is_empty() {
@@ -1062,16 +1060,20 @@ fn foil_unverified(h: &RunHeader) -> bool {
         .any(|m| h.mode.contains(m))
 }
 
+/// The `PROMPT.md` trust line: mode, audit tally (or `unaudited`), time and model, whether
+/// sources backed the anchor checks, and what was kept out of the discussion. A segment the
+/// header never recorded reads `not recorded`, never as its `none` value.
 fn trust_line(h: &RunHeader) -> String {
     let mut parts = vec![if h.mode.is_empty() {
         "mode not recorded".to_string()
     } else {
         h.mode.clone()
     }];
-    match h.audit.as_deref().filter(|a| !is_none(a)) {
-        Some(a) => parts.push(format!("audit: {a}")),
-        None if h.mode.contains("unaudited") => {}
-        None => parts.push("unaudited".into()),
+    match h.audit.as_deref() {
+        None => parts.push("audit tally not recorded".into()),
+        Some(a) if !is_none(a) => parts.push(format!("audit: {a}")),
+        Some(_) if h.mode.contains("unaudited") => {}
+        Some(_) => parts.push("unaudited".into()),
     }
     let when = if h.generated.is_empty() {
         "generated at an unrecorded time".to_string()
@@ -1083,9 +1085,10 @@ fn trust_line(h: &RunHeader) -> String {
     } else {
         format!("{when} by {}", h.model)
     });
-    parts.push(match h.sources.as_deref().filter(|s| !is_none(s)) {
+    parts.push(match h.sources.as_deref() {
+        None => "sources not recorded".into(),
+        Some(s) if is_none(s) => "no sources: anchors unverified".into(),
         Some(s) => format!("sources: {s}"),
-        None => "no sources: anchors unverified".into(),
     });
     parts.push(format!(
         "discussion: {}; truncation not recorded",
@@ -1271,7 +1274,7 @@ pub fn render_prompt(plan: &BuildPlan, header: &RunHeader, idea_title: &str, ste
     prompt_section(&mut out, "## Fence", &plan.fence, &[], false);
     prompt_section(
         &mut out,
-        "## Bootstrap checks — a failed check stops the run",
+        "## Bootstrap checks — a failed check stops the tasks that depend on it",
         &plan.verify,
         &["check"],
         false,
@@ -1329,7 +1332,8 @@ fn cell_or_dash(text: &str) -> String {
 /// fence paths, one STOP line per kill criterion), then one table row per task with the
 /// gate-derived `wave`, `score` and `model`, its `touches` and `accept`. A `T0` bootstrap row
 /// whose accept is the joined Verify-first checks comes first, and every task relying on a
-/// premise depends on it. `Depends` lists task ids only; question and free-text dependencies go
+/// premise depends on it and names its premises in the Task cell, so a failed `P#` blocks only
+/// the tasks that cite it; a premise without a check makes the `T0` row `[?]`. `Depends` lists task ids only; question and free-text dependencies go
 /// to the Task cell, as does the reason of a `[?]` row a loop must never auto-select. An empty
 /// `## Log` closes it.
 pub fn render_attack_plan(plan: &BuildPlan) -> String {
@@ -1353,8 +1357,14 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
         "\n| [ ] | T | Task | Depends | wave | score | model | touches | accept |\n|---|---|---|---|---|---|---|---|---|\n",
     );
     let bootstrap = !plan.verify.is_empty();
+    let premise_ids: Vec<&str> = plan.verify.iter().map(|p| p.id.as_str()).collect();
     if bootstrap {
-        let ids: Vec<&str> = plan.verify.iter().map(|p| p.id.as_str()).collect();
+        let unchecked: Vec<String> = plan
+            .verify
+            .iter()
+            .filter(|p| p.field("check").is_none())
+            .map(|p| format!("{} has no check", p.id))
+            .collect();
         let checks: Vec<String> = plan
             .verify
             .iter()
@@ -1363,15 +1373,33 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
                 None => format!("{}: no check, confirm by hand: {}", p.id, p.text),
             })
             .collect();
+        let mut task = format!(
+            "Run the bootstrap checks {} (read-only, no commit; a failed P# blocks only the tasks whose premises list it)",
+            premise_ids.join(", ")
+        );
+        if !unchecked.is_empty() {
+            task.push_str(&format!(" — reason: {}", unchecked.join("; ")));
+        }
         out.push_str(&format!(
-            "| [ ] | {BOOTSTRAP_ID} | Run the bootstrap checks {} | — | 0 | 00000 | haiku | none (read-only) | {} |\n",
-            table_cell(&ids.join(", ")),
+            "| {} | {BOOTSTRAP_ID} | {} | — | 0 | {} | haiku | none (read-only) | {} |\n",
+            if unchecked.is_empty() { "[ ]" } else { "[?]" },
+            table_cell(&task),
+            if unchecked.is_empty() {
+                "00000"
+            } else {
+                "00100"
+            },
             table_cell(&checks.join("; ")),
         ));
     }
     for t in &plan.tasks {
         let mut depends = t.depends_tasks();
-        if bootstrap && !t.depends_premises().is_empty() {
+        let premises: Vec<String> = t
+            .depends_premises()
+            .into_iter()
+            .filter(|p| premise_ids.contains(&p.as_str()))
+            .collect();
+        if !premises.is_empty() {
             depends.insert(0, BOOTSTRAP_ID.to_string());
         }
         let mut after: Vec<String> = t
@@ -1381,6 +1409,9 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
             .collect();
         after.extend(t.depends_free());
         let mut task = t.text.clone();
+        if !premises.is_empty() {
+            task.push_str(&format!(" (premises: {})", premises.join(", ")));
+        }
         if !after.is_empty() {
             task.push_str(&format!(" (after: {})", after.join("; ")));
         }
@@ -1787,7 +1818,8 @@ Run the cheapest disproof before any Rust exists.
         assert!(prompt.contains("quote: \"going forward with BOCPD"));
         assert!(prompt.contains("- [?] T1:") && prompt.contains("- [ ] T2:"));
         assert!(prompt.contains("  acceptance: `python backtest/run.py"));
-        assert!(prompt.contains("## Bootstrap checks — a failed check stops the run"));
+        assert!(prompt
+            .contains("## Bootstrap checks — a failed check stops the tasks that depend on it"));
         assert!(!prompt.contains("## Fence"), "empty sections are omitted");
     }
 
@@ -2217,6 +2249,35 @@ Run the cheapest disproof before any Rust exists.
     }
 
     #[test]
+    fn prompt_legacy_header_reads_not_recorded_instead_of_none() {
+        let legacy =
+            parse_header("_audited · m · 2026-09-29 12:00_\n_gates: settled 1_\n## Goal\nShip.\n");
+        assert_eq!(
+            (legacy.audit.as_deref(), legacy.sources.as_deref()),
+            (None, None)
+        );
+        let prompt = render_prompt(&projected(), &legacy, "T", "s");
+        assert!(
+            prompt.contains("_trust: audited · audit tally not recorded · generated 2026-09-29 12:00 by m · sources not recorded · discussion:"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("unaudited"), "{prompt}");
+        assert!(!prompt.contains("anchors unverified"), "{prompt}");
+    }
+
+    #[test]
+    fn prompt_bootstrap_heading_agrees_with_the_protocol() {
+        let prompt = render_prompt(&projected(), &RunHeader::default(), "T", "s");
+        assert!(
+            prompt.contains(
+                "\n## Bootstrap checks — a failed check stops the tasks that depend on it\n"
+            ),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("stops the run"), "{prompt}");
+    }
+
+    #[test]
     fn prompt_protocol_is_code_owned_and_precedes_the_items() {
         let prompt = render_prompt(&projected(), &RunHeader::default(), "T", "s");
         let at = prompt.find("\n## How to run this\n").expect("the protocol");
@@ -2329,7 +2390,7 @@ Run the cheapest disproof before any Rust exists.
             assert!(cells.iter().all(|c| c != "?" && !c.is_empty()), "{row}");
         }
         assert!(
-            out.contains("| [ ] | T2 | Backtest SPEC.md at a pessimistic spread (after: Q1 answered; the price list) | T0, T1 | 1 | 01000 | sonnet | backtest/ | `python backtest/run.py --spec SPEC.md` → last line is KILL or SURVIVES |\n"),
+            out.contains("| [ ] | T2 | Backtest SPEC.md at a pessimistic spread (premises: P1) (after: Q1 answered; the price list) | T0, T1 | 1 | 01000 | sonnet | backtest/ | `python backtest/run.py --spec SPEC.md` → last line is KILL or SURVIVES |\n"),
             "{out}"
         );
         assert!(
@@ -2344,13 +2405,62 @@ Run the cheapest disproof before any Rust exists.
         let rows = rows(&out);
         assert_eq!(
             rows[0],
-            "| [ ] | T0 | Run the bootstrap checks P1 | — | 0 | 00000 | haiku | none (read-only) | P1: `sed -n 385p risk/src/calculator.rs \\| grep -nF calculate_regime_factor` |",
+            "| [ ] | T0 | Run the bootstrap checks P1 (read-only, no commit; a failed P# blocks only the tasks whose premises list it) | — | 0 | 00000 | haiku | none (read-only) | P1: `sed -n 385p risk/src/calculator.rs \\| grep -nF calculate_regime_factor` |",
             "{out}"
         );
         assert_eq!(cells(rows[2])[3], "T0, T1", "{out}");
         assert_eq!(cells(rows[1])[3], "—", "{out}");
         let none = render_attack_plan(&parse("## Goal\nShip.\n## Plan\n- T1: x\n").unwrap());
         assert!(!none.contains("| T0 |"), "{none}");
+    }
+
+    #[test]
+    fn attack_plan_task_cell_keeps_each_premise_id() {
+        let mut plan = gated_plan();
+        plan.verify.push(Item::new("P2", "Unrelated"));
+        plan.verify.push(Item {
+            fields: [("check".to_string(), "`true` → exit 0".to_string())].into(),
+            ..Item::new("P3", "The spread table exists")
+        });
+        plan.tasks[1]
+            .fields
+            .insert("depends".into(), "T1, P1, P3, Q1".into());
+        let out = render_attack_plan(&plan);
+        let t2 = rows(&out)
+            .into_iter()
+            .find(|r| r.contains("| T2 |"))
+            .expect("the T2 row");
+        assert_eq!(
+            cells(t2)[2],
+            "Backtest SPEC.md at a pessimistic spread (premises: P1, P3) (after: Q1 answered)",
+            "{out}"
+        );
+        assert_eq!(cells(t2)[3], "T0, T1", "{out}");
+        let t1 = rows(&out)
+            .into_iter()
+            .find(|r| r.contains("| T1 |"))
+            .expect("the T1 row");
+        assert!(!cells(t1)[2].contains("premises:"), "{out}");
+    }
+
+    #[test]
+    fn attack_plan_premise_without_a_check_makes_the_bootstrap_row_owners() {
+        let mut plan = gated_plan();
+        plan.verify.push(Item::new("P2", "The broker allows it"));
+        let out = render_attack_plan(&plan);
+        let t0 = rows(&out)[0];
+        let c = cells(t0);
+        assert_eq!(c[0], "[?]", "{out}");
+        assert_eq!(c[1], "T0", "{out}");
+        assert!(c[2].ends_with(" — reason: P2 has no check"), "{out}");
+        assert_eq!(c[5], "00100", "{out}");
+        let checked = render_attack_plan(&gated_plan());
+        let c = cells(rows(&checked)[0]);
+        assert_eq!(
+            (c[0].as_str(), c[5].as_str()),
+            ("[ ]", "00000"),
+            "{checked}"
+        );
     }
 
     #[test]

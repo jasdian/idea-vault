@@ -244,6 +244,8 @@ fn file_level(path: &str) -> bool {
         .is_some_and(|last| path_like(last) && !last.contains('/'))
 }
 
+/// Whether a word reads as a path: it holds a `/`, or it is `stem.ext` whose extension carries a
+/// letter, so decimals and versions (`0.7`, `2.0`, `v1.2`) are not paths.
 fn path_like(word: &str) -> bool {
     !word.starts_with('-')
         && !word.contains("://")
@@ -252,6 +254,7 @@ fn path_like(word: &str) -> bool {
                 !stem.is_empty()
                     && (1..=5).contains(&ext.len())
                     && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                    && ext.chars().any(|c| c.is_ascii_alphabetic())
             }))
 }
 
@@ -906,6 +909,23 @@ mod tests {
         assert_eq!(get(&p, "T1").field("depends"), None);
         assert!(get(&p, "T1").markers.iter().all(|m| !m.contains("premise")));
         assert_eq!(report.tally.get("premises_wired"), None);
+    }
+
+    #[test]
+    fn a_premise_sharing_only_a_decimal_or_version_is_not_wired() {
+        for number in ["0.7", "2.0", "v1.2"] {
+            let mut p = plan(vec![task("T1", &[("touches", "src/a.rs")])]);
+            p.tasks[0].text = format!("Default the temperature to `{number}`");
+            p.verify.push(premise(
+                "P1",
+                &format!("The default is `{number}` today"),
+                "`grep -n temperature src/config.rs`",
+            ));
+            let report = run(&mut p);
+            assert_eq!(get(&p, "T1").field("depends"), None, "{number}");
+            assert_eq!(report.tally.get("premises_wired"), None, "{number}");
+        }
+        assert!(path_like("SPEC.md") && path_like("archive.7z"));
     }
 
     #[test]
