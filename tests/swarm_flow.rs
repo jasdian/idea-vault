@@ -364,3 +364,46 @@ async fn audit_cap_swarm_turn_counts_the_findings_left_out() {
         "{convo}"
     );
 }
+
+#[tokio::test]
+async fn angles_answered_names_the_angle_that_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::Tokens(vec!["finding A".into()]),
+            ChatScript::EofAfter(vec!["half a".into()]),
+            ChatScript::Tokens(vec!["converged view".into()]),
+        ],
+    )
+    .await;
+    run_swarm(&mock, tmp.path(), 1, &["premortem", "cheapest-disproof"])
+        .await
+        .unwrap();
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("_1 of 2 angles answered; missing: cheapest-disproof_"),
+        "{convo}"
+    );
+}
+
+#[tokio::test]
+async fn angles_answered_has_no_line_when_every_angle_answered() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::Tokens(vec!["finding A".into()]),
+            ChatScript::Tokens(vec!["finding B".into()]),
+            ChatScript::Tokens(vec!["converged view".into()]),
+        ],
+    )
+    .await;
+    run_swarm(&mock, tmp.path(), 1, &["premortem", "cheapest-disproof"])
+        .await
+        .unwrap();
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(!convo.contains("angles answered"), "{convo}");
+}

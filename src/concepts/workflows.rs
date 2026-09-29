@@ -23,7 +23,7 @@ use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::skills::{
     ask_on_contract, hydrate_context, persist_plan, RelatedProvider, SkillRegistry,
 };
-use crate::concepts::swarm::{fan_out, judge, synthesize};
+use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize};
 use crate::concepts::ConceptError;
 use crate::domain::OutputContract;
 use crate::vault::store;
@@ -389,6 +389,7 @@ pub async fn run_workflow(
     let mut step_results: Vec<Option<AgentResult>> = Vec::new();
     let mut findings: Option<Vec<Finding>> = None;
     let mut dropped = 0;
+    let mut fanned: (Vec<String>, Vec<Option<AgentResult>>) = (Vec::new(), Vec::new());
     let mut report: Option<AuditReport> = None;
     let mut output = String::new();
 
@@ -410,7 +411,14 @@ pub async fn run_workflow(
                 let on_done = |done: usize, of: usize, angle: &str| {
                     note(&format!("fanned out {done}/{of} {angle}"));
                 };
-                step_results.extend(fan_out(ollama, ai_semaphore, registry, tasks, &on_done).await);
+                let results = fan_out(ollama, ai_semaphore, registry, tasks, &on_done).await;
+                fanned.0.extend(
+                    steps
+                        .iter()
+                        .map(|s| s.skill.unwrap_or(s.role.as_str()).to_string()),
+                );
+                fanned.1.extend(results.iter().cloned());
+                step_results.extend(results);
                 findings = None;
             }
             Stage::Chain(step) => {
@@ -568,7 +576,7 @@ pub async fn run_workflow(
             vault_dir,
             idea_slug,
             &format!("assistant (workflow: {})", workflow.name),
-            &format!("{output}{appendix}"),
+            &format!("{output}{}{appendix}", angles_line(&fanned.0, &fanned.1)),
         )?;
     }
 

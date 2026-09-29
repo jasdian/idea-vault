@@ -87,6 +87,26 @@ pub(crate) async fn fan_out(
     join_all(futures).await
 }
 
+/// The code-owned line naming the angles that returned nothing, from `angles` and the parallel
+/// fan-out `results`: a failed or empty angle is unanswered. Empty when every angle answered.
+pub(crate) fn angles_line(angles: &[String], results: &[Option<AgentResult>]) -> String {
+    let missing: Vec<&str> = angles
+        .iter()
+        .zip(results)
+        .filter(|(_, r)| r.as_ref().is_none_or(|r| r.content.trim().is_empty()))
+        .map(|(a, _)| a.as_str())
+        .collect();
+    if missing.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n_{} of {} angles answered; missing: {}_",
+        angles.len() - missing.len(),
+        angles.len(),
+        missing.join(", ")
+    )
+}
+
 /// Converge findings with one Synthesizer call (shared with `workflows` and `knowledge`). The
 /// synthesizer sees the idea statement and every finding with its lens and — when audited — the
 /// auditor's verdict, each clipped so the whole prompt stays within `budget`.
@@ -282,7 +302,10 @@ pub async fn swarm(
             vault_dir,
             idea_slug,
             &format!("assistant (swarm: {})", named.join(", ")),
-            &format!("{synthesis}{appendix}"),
+            &format!(
+                "{synthesis}{}{appendix}",
+                angles_line(&angles, &agent_results)
+            ),
         )?;
     }
 

@@ -1094,3 +1094,69 @@ async fn audit_cap_turn_has_no_line_when_nothing_was_left_out() {
     let convo = store::read_conversation(tmp.path(), "i").unwrap();
     assert!(!convo.contains("not audited"));
 }
+
+#[tokio::test]
+async fn angles_answered_names_the_angle_that_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("finding one"),
+            ChatScript::EofAfter(vec!["partial".into()]),
+            tokens("finding three"),
+            tokens("notes"),
+            tokens("converged anyway"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "interrogate", false).await;
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("_3 of 4 angles answered; missing: cheapest-disproof_"),
+        "{convo}"
+    );
+}
+
+#[tokio::test]
+async fn angles_answered_counts_an_empty_angle_as_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("finding one"),
+            tokens("finding two"),
+            tokens(""),
+            tokens("notes"),
+            tokens("converged anyway"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "interrogate", false).await;
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("_3 of 4 angles answered; missing: constraints_"),
+        "{convo}"
+    );
+}
+
+#[tokio::test]
+async fn angles_answered_has_no_line_when_every_angle_answered() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("one"),
+            tokens("two"),
+            tokens("three"),
+            tokens("four"),
+            tokens("converged"),
+        ],
+    )
+    .await;
+    run(&mock, tmp.path(), "interrogate", false).await;
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(!convo.contains("angles answered"), "{convo}");
+}
