@@ -76,3 +76,27 @@ of being rejected outright. Task-capable clients keep using `task:{}` exactly as
   a model call," and explains how it differs from the "blocking call_tool inline" alternative
   ADR-0024 already considered and rejected.
 - Every commit ships through this gate: `bash scripts/gate.sh` green.
+
+# Module-boundary cleanup from the 2026-09-29 doc-sync (owner: "queue L1–L6 and move AppState into web")
+
+The owner wants the module graph in `docs/02-module-reference.md` (D4) to be true again: nothing
+depends on `web`, dependencies point one way, and the docs the doc-sync sweep found false are corrected.
+
+## Acceptance criteria
+
+- `AppState` lives in `web` (`web::state`). No file under `src/web/` imports `crate::app`, so the only
+  edge between the two is `app → web`. `app` keeps building the router. Behaviour is unchanged: the
+  existing tests stay green without edits other than import paths.
+- `LlmBackendKind` lives in `ai`, so `ai` never imports `config`. `config` reads it from `ai`, and
+  behaviour and the settings page are unchanged.
+- D4 lists the real edges, including `concepts → memory` (skill hydration uses
+  `memory::compact::effective_window`) and `config` as a bin-level leaf.
+- `docs/10-testing-strategy.md` describes the test suite that exists. The keystone rebuild test is
+  described as the fixture-based test it is (it covers `fact_links` and `edges`), not a randomized
+  property test.
+- `docs/13-mcp-server-inbound.md` says a plain MCP caller can cancel with the task id from its
+  "still running" note.
+- `docs/09-web-ui.md` says the related panel's tag-drift notes cover this idea's own tags only.
+- The doc checker no longer flags external-crate paths such as `http::request::Parts`, and still
+  flags a genuinely unknown path.
+- Every commit ships through `bash scripts/gate.sh` green.
