@@ -1,4 +1,4 @@
-//! The deterministic build-plan gates G1–G12 (docs/adr/0030). Each gate reads the parsed
+//! The deterministic build-plan gates G1–G13 (docs/adr/0030). Each gate reads the parsed
 //! [`BuildPlan`] plus the evidence it was given and moves claims between sections — Settled to
 //! Open questions, Verify first or Quarantined — adding `⟨…⟩` markers and header notes. No gate
 //! calls a model or runs a command; the only I/O is the bounded [`SourceProbe`], so [`run`] is
@@ -8,8 +8,10 @@
 //! - [`sources`]: G4 anchor and symbol, G5 tokens and names, G6 figures and units, G12 freshness.
 //! - [`tasks`]: G7 scope fence, G8 dependency repair, G9 executable task, G10 kill wiring,
 //!   G11 shape and caps.
+//! - [`leaf`]: G13 leaf gate (markers and tally only, never a demotion).
 
 pub mod claims;
+pub mod leaf;
 pub mod sources;
 pub mod tasks;
 
@@ -173,12 +175,13 @@ impl GateReport {
 }
 
 /// Run every gate over `plan`, in order: claims (G1–G3), then sources (G4–G6, G12), then tasks
-/// (G7–G11). Blocking (the source probe reads files).
+/// (G7–G11), then the leaf gate (G13). Blocking (the source probe reads files).
 pub fn run(plan: &mut BuildPlan, inputs: &GateInputs) -> GateReport {
     let mut report = GateReport::default();
     claims::apply(plan, inputs, &mut report);
     sources::apply(plan, inputs, &mut report);
     tasks::apply(plan, inputs, &mut report);
+    leaf::apply(plan, inputs, &mut report);
     report
 }
 

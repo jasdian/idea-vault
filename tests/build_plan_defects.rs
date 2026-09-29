@@ -743,7 +743,7 @@ fn accept_repair_does_not_launder_a_destructive_command() {
     assert_eq!(report.tally.get("needs_owner"), Some(&1));
 }
 
-const GATE_SOURCES: [(&str, &str); 5] = [
+const GATE_SOURCES: [(&str, &str); 6] = [
     (
         "build_plan/plan.rs",
         include_str!("../src/concepts/build_plan/plan.rs"),
@@ -763,6 +763,10 @@ const GATE_SOURCES: [(&str, &str); 5] = [
     (
         "gates/tasks.rs",
         include_str!("../src/concepts/build_plan/gates/tasks.rs"),
+    ),
+    (
+        "gates/leaf.rs",
+        include_str!("../src/concepts/build_plan/gates/leaf.rs"),
     ),
 ];
 
