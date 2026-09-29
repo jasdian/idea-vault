@@ -11,12 +11,12 @@
 use axum::extract::{Path, State};
 use axum::response::Html;
 
-use crate::app::AppState;
 use crate::domain::IdeaState;
 use crate::memory::compact;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::respond_with_transcript;
+use crate::web::state::AppState;
 use crate::web::WebError;
 
 /// `POST /idea/{slug}/compact` — fold the conversation head now, on demand.

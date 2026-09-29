@@ -6,10 +6,10 @@ use axum::Form;
 use chrono::Utc;
 use serde::Deserialize;
 
-use crate::app::AppState;
 use crate::domain::{slug as domain_slug, Idea, IdeaFrontmatter, IdeaState, MAX_IDEA_TAGS};
 use crate::index::{queries, reindex};
 use crate::vault::store;
+use crate::web::state::AppState;
 use crate::web::templates::{IdeaPage, IdeaRow, ListPage, SearchResults};
 use crate::web::WebError;
 

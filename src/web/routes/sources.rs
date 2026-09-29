@@ -18,9 +18,9 @@ use axum::Form;
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use crate::app::AppState;
 use crate::domain::Name;
 use crate::sources::{SourceConfig, SourceStatus};
+use crate::web::state::AppState;
 use crate::web::templates::{
     ApplyState, SourceEditRow, SourceRow, SourceRowView, SourcesList, SourcesPage,
 };

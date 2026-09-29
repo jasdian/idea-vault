@@ -29,7 +29,7 @@ use axum::Router;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
-use crate::app::AppState;
+use crate::web::state::AppState;
 use auth::AuthLayer;
 use handler::IdeaVaultMcpServer;
 

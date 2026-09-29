@@ -19,11 +19,11 @@ use rmcp::model::{CallToolResult, Content, JsonObject, TaskSupport, Tool, ToolEx
 use rmcp::ErrorData as McpError;
 use serde_json::{json, Value};
 
-use crate::app::AppState;
 use crate::index::{self, queries};
 use crate::vault::store;
 use crate::web::routes::ideas::create_idea_core;
 use crate::web::routes::memory::reopen_idea_core;
+use crate::web::state::AppState;
 
 use super::tasks::TaskRegistry;
 

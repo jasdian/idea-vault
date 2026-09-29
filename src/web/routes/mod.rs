@@ -9,7 +9,7 @@ pub mod settings;
 pub mod skills;
 pub mod sources;
 
-use crate::app::AppState;
+use crate::web::state::AppState;
 
 // The byte budget for one AI prompt (D21) is no longer a constant here: every route reads the
 // live, backend/model-derived `state.llm.context_budget()` (ADR-0014), so chat, store, reopen,
@@ -97,8 +97,8 @@ pub(crate) fn reindex_logged_forced(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::scoped_llm;
-    use crate::app::AppState;
     use crate::sources::SourceConfig;
+    use crate::web::state::AppState;
     use std::sync::{Arc, Mutex};
 
     /// The smallest real `AppState` [`scoped_llm`] can run against: temp vault + registry, an

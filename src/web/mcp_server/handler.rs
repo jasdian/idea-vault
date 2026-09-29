@@ -19,7 +19,7 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ErrorData as McpError;
 use rmcp::ServerHandler;
 
-use crate::app::AppState;
+use crate::web::state::AppState;
 
 use super::tasks::TaskRegistry;
 use super::{prompts, tools};

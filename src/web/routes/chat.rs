@@ -18,13 +18,13 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use crate::ai::ollama::ChatMessage;
-use crate::app::AppState;
 use crate::domain::{Idea, IdeaState};
 use crate::memory;
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::{render_queue_panel, respond_with_transcript};
 use crate::web::routes::{reindex_logged, related_block_logged, scoped_llm};
+use crate::web::state::AppState;
 use crate::web::WebError;
 
 /// The rigorous-foil persona for free chat (CLAUDE.md: steelman, then stress-test).

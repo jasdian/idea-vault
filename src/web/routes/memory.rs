@@ -5,7 +5,6 @@
 use axum::extract::{Path, State};
 use chrono::Utc;
 
-use crate::app::AppState;
 use crate::concepts;
 use crate::domain::{Idea, IdeaState};
 use crate::memory;
@@ -13,6 +12,7 @@ use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::ideas::{build_discussion, respond_with_transcript, state_badge_oob};
 use crate::web::routes::{reindex_logged, related_block_logged, scoped_llm};
+use crate::web::state::AppState;
 
 use crate::web::WebError;
 use askama::Template as _;

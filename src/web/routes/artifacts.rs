@@ -6,13 +6,13 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 
-use crate::app::AppState;
 use crate::concepts::knowledge;
 use crate::domain::{slug as domain_slug, ArtifactKind};
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::memory::{guard_discussion_state, progress_sink};
 use crate::web::routes::{reindex_logged, scoped_llm};
+use crate::web::state::AppState;
 use crate::web::templates::{
     render_markdown, ArtifactEntry, ArtifactExport, ArtifactPage, ArtifactsPanel, ExportSection,
 };

@@ -6,9 +6,9 @@
 use askama::Template as _;
 use axum::extract::State;
 
-use crate::app::AppState;
 use crate::concepts::skills::{Skill, SkillRegistry};
 use crate::domain::{OutputContract, SkillRole, SkillStage};
+use crate::web::state::AppState;
 use crate::web::templates::{SkillCard, SkillGroup, SkillsList, SkillsPage};
 use crate::web::WebError;
 

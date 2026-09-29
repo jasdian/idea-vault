@@ -7,8 +7,8 @@ use axum::extract::{RawForm, State};
 use serde::Deserialize;
 
 use crate::ai::{LlmBackendKind, LlmSettings, RoleProfile};
-use crate::app::AppState;
 use crate::concepts::agents::AgentRole;
+use crate::web::state::AppState;
 use crate::web::templates::{RoleRow, SettingsForm, SettingsPage};
 use crate::web::WebError;
 

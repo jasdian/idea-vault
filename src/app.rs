@@ -1,51 +1,24 @@
-//! Application wiring: shared [`AppState`] and the axum [`build_router`] route map
+//! Application wiring: the axum [`build_router`] route map over the shared [`AppState`]
 //! (docs/01-architecture.md D25, docs/09-web-ui.md D16/D17).
 //!
-//! `AppState` is the cloneable bundle injected into every handler: config, the SQLite index
-//! connection (behind a mutex), the LLM backend (Ollama or claude-code, docs/adr/0009), and the
-//! single process-wide AI concurrency semaphore (ADR-0006 — chat and swarm share one bound).
-
-use std::sync::{Arc, Mutex};
+//! `AppState` itself lives in `web::state` (D4: only `app → web`) and is re-exported here, so
+//! `idea_vault::app::AppState` keeps working for `main.rs` and the tests.
 
 use axum::routing::{get, post};
 use axum::Router;
-use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
-use crate::config::Config;
 use crate::web::routes::{
     admin, artifacts, chat, compact, ideas, mcp, memory, settings, skills, sources,
 };
-
-/// Cloneable shared state injected into handlers (docs/01-architecture.md "Cross-cutting concerns").
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<Config>,
-    pub db: Arc<Mutex<rusqlite::Connection>>,
-    pub llm: crate::ai::LlmBackend,
-    pub ai_semaphore: Arc<Semaphore>,
-    /// The live skill registry: built-ins plus the owner's `vault/.skills/` (docs/adr/0022).
-    /// Handlers take one `snapshot()` per request/job so a reload never changes a run mid-flight.
-    pub skills: Arc<crate::concepts::skills::LiveSkills>,
-    /// In-flight background AI jobs, one per idea, so a slow model call survives the browser
-    /// navigating away (`web::jobs`).
-    pub jobs: crate::web::jobs::Jobs,
-    /// Per-idea FIFO of chat messages sent while a job was already running — drained by the poll
-    /// loop as the idea goes idle, instead of dropping the message (`web::jobs` queue).
-    pub queues: crate::web::jobs::Queues,
-    /// Persistent MCP server registry (`mcp` module doc). The same `Arc` is handed to the LLM
-    /// backend via `with_mcp`, so a registry edit here is live on the next model turn.
-    pub mcp: Arc<crate::mcp::McpRegistry>,
-    /// Persistent named-source registry (`sources` module doc). Live like `mcp`: a Sources-page
-    /// edit is visible to the very next model turn with no restart.
-    pub sources: Arc<crate::sources::SourceRegistry>,
-}
+pub use crate::web::state::AppState;
 
 /// Build the full axum router (D17 route map) with the tracing middleware layer (D16).
 ///
-/// If [`Config::mcp_server_token`] is set, the inbound MCP server (docs/adr/0024) is additionally
-/// mounted at `/api/mcp` — a separate path from the outbound `/mcp*` registry-management UI above,
-/// gated by its own Bearer `AuthLayer` (`web::mcp_server`). Unset: not mounted at all.
+/// If [`Config::mcp_server_token`](crate::config::Config::mcp_server_token) is set, the inbound
+/// MCP server (docs/adr/0024) is additionally mounted at `/api/mcp` — a separate path from the
+/// outbound `/mcp*` registry-management UI above, gated by its own Bearer `AuthLayer`
+/// (`web::mcp_server`). Unset: not mounted at all.
 pub fn build_router(state: AppState) -> Router {
     let router = Router::new()
         // Full pages (ideas group).

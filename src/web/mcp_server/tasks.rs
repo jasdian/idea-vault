@@ -39,12 +39,12 @@ use rmcp::model::{
 use rmcp::ErrorData as McpError;
 use serde_json::Value;
 
-use crate::app::AppState;
 use crate::domain::IdeaState;
 use crate::vault::store;
 use crate::web::jobs::{self, Pending};
 use crate::web::routes::chat::spawn_chat_turn;
 use crate::web::routes::memory::{guard_can_store, run_store_work};
+use crate::web::state::AppState;
 
 use super::tools::required_str;
 

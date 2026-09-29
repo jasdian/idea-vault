@@ -15,9 +15,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::ai::AiHealth;
-use crate::app::AppState;
 use crate::sources::SourceStatus;
 use crate::vault::VaultHealth;
+use crate::web::state::AppState;
 use crate::web::WebError;
 
 /// R11 — `GET /admin/health` — probe the LLM backend and the vault. `200` when the vault is

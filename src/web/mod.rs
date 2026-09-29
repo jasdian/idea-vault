@@ -8,6 +8,7 @@
 pub mod jobs;
 pub mod mcp_server;
 pub mod routes;
+pub mod state;
 pub mod templates;
 
 use axum::http::StatusCode;

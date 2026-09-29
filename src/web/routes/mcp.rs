@@ -21,9 +21,9 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::ai::mcp::McpClient;
-use crate::app::AppState;
 use crate::domain::Name;
 use crate::mcp::{McpServerConfig, TokenChange, ToolSummary};
+use crate::web::state::AppState;
 use crate::web::templates::{McpEditRow, McpList, McpPage, McpRow, McpServerRow, McpStatus};
 use crate::web::WebError;
 

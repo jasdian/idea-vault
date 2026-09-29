@@ -87,7 +87,11 @@ ok "$rule"
 # 8. D4 one-way module deps (docs/02-module-reference.md): the lower layers never reach up
 #    into the bin-level `config` leaf.
 rule="D4: ai, domain, mcp and sources never import crate::config"
-hits=$({ grep -rn 'crate::config' src/ai src/domain src/mcp.rs src/sources.rs --include='*.rs' || true; } | strip_rust_comments)
+hits=$({ grep -rnE '\bconfig::|crate::\{[^}]*\bconfig\b' src/ai src/domain src/mcp.rs src/sources.rs --include='*.rs' || true; } | strip_rust_comments)
+[ -z "$hits" ] || fail "$rule" "$hits"
+ok "$rule"
+rule="D4: nothing under src/web imports crate::app (only app → web)"
+hits=$({ grep -rnE '\bapp::|crate::\{[^}]*\bapp\b' src/web --include='*.rs' || true; } | strip_rust_comments)
 [ -z "$hits" ] || fail "$rule" "$hits"
 ok "$rule"
 
