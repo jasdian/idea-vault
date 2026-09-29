@@ -2,6 +2,8 @@
 //! (R6), and run a swarm (R7). These drive the state machine (docs/04-state-machine.md D9) and the
 //! harness concepts (docs/06-concepts). Grouped here per D17's `memory`/idea-actions bucket.
 
+use std::sync::Arc;
+
 use axum::extract::{Path, State};
 use chrono::Utc;
 
@@ -233,27 +235,44 @@ pub async fn run_skill(
     State(state): State<AppState>,
     Path((slug, name)): Path<(String, String)>,
 ) -> Result<axum::response::Html<String>, WebError> {
-    let vault_dir = state.config.vault_dir.clone();
-    let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
-    guard_discussion_state(idea.frontmatter.state)?;
-
-    let Some(skill) = state.skills.snapshot().get(&name).cloned() else {
-        return Err(WebError::NotFound(format!("skill: {name}")));
-    };
+    let idea = store::read_idea(&state.config.vault_dir, &slug)?; // 404 if missing
+    let skill = guard_skill(&state, &idea, &name)?;
 
     if !jobs::try_claim(&state.jobs, &slug) {
         return respond_with_transcript(&state, &slug);
     }
+    spawn_skill_job(&state, &slug, skill);
+    respond_with_transcript(&state, &slug)
+}
+
+/// R6's synchronous guards, shared with the MCP `run_skill` tool (HND-2/HND-10): the idea must
+/// be in an active discussion state and the skill must exist in the current skill book.
+pub(crate) fn guard_skill(
+    state: &AppState,
+    idea: &Idea,
+    name: &str,
+) -> Result<concepts::skills::Skill, WebError> {
+    guard_discussion_state(idea.frontmatter.state)?;
+    state
+        .skills
+        .snapshot()
+        .get(name)
+        .cloned()
+        .ok_or_else(|| WebError::NotFound(format!("skill: {name}")))
+}
+
+/// Spawn R6's detached skill job on an already-claimed slot (ADR-0010). The caller owns the
+/// claim, so the web route and the MCP tool can each answer a lost claim their own way (HND-6).
+pub(crate) fn spawn_skill_job(state: &AppState, slug: &str, skill: concepts::skills::Skill) {
     let ts = state.clone();
-    let tslug = slug.clone();
-    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
+    let tslug = slug.to_string();
+    let abort = jobs::spawn_job(&state.jobs, slug, async move {
         match run_skill_work(&ts, &tslug, skill).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, abort);
-    respond_with_transcript(&state, &slug)
+    jobs::set_abort(&state.jobs, slug, abort);
 }
 
 async fn run_skill_work(
@@ -305,21 +324,38 @@ pub async fn run_swarm(
     Path(slug): Path<String>,
     axum::Form(form): axum::Form<SwarmForm>,
 ) -> Result<axum::response::Html<String>, WebError> {
-    let vault_dir = state.config.vault_dir.clone();
-    let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
-    guard_discussion_state(idea.frontmatter.state)?;
+    let idea = store::read_idea(&state.config.vault_dir, &slug)?; // 404 if missing
+    let requested = form
+        .angles
+        .split(',')
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .collect();
+    let (skills, angles) = guard_swarm(&state, &idea, requested)?;
 
-    let angles: Vec<String> = if form.angles.trim().is_empty() {
+    if !jobs::try_claim(&state.jobs, &slug) {
+        return respond_with_transcript(&state, &slug);
+    }
+    spawn_swarm_job(&state, &slug, skills, angles);
+    respond_with_transcript(&state, &slug)
+}
+
+/// R7's synchronous guards, shared with the MCP `run_swarm` tool (HND-2/HND-10). An empty
+/// `requested` list means the canonical D14 angle set. Returns the skill-book snapshot the job
+/// must run against alongside the validated angles.
+pub(crate) fn guard_swarm(
+    state: &AppState,
+    idea: &Idea,
+    requested: Vec<String>,
+) -> Result<(Arc<concepts::skills::SkillRegistry>, Vec<String>), WebError> {
+    guard_discussion_state(idea.frontmatter.state)?;
+    let angles: Vec<String> = if requested.is_empty() {
         crate::concepts::swarm::DEFAULT_ANGLES
             .iter()
             .map(|a| a.to_string())
             .collect()
     } else {
-        form.angles
-            .split(',')
-            .map(|a| a.trim().to_string())
-            .filter(|a| !a.is_empty())
-            .collect()
+        requested
     };
     if angles.len() > MAX_ANGLES {
         return Err(WebError::BadRequest(format!(
@@ -328,7 +364,7 @@ pub async fn run_swarm(
         )));
     }
     // Reject unknown angles synchronously (they map to skills) — `swarm` checks this too, but that
-    // now runs in the background task, so validate here to keep a bad request a 400 not an error turn.
+    // runs in the background task, so validate here to keep a bad request a 400 not an error turn.
     // A capstone (build-prompt) folds the whole discussion into one deliverable; it is not an angle,
     // and neither is a converge move.
     // One snapshot for the whole job, so a skill-book reload can't change the angles mid-run.
@@ -350,20 +386,25 @@ pub async fn run_swarm(
             Some(_) => {}
         }
     }
+    Ok((skills, angles))
+}
 
-    if !jobs::try_claim(&state.jobs, &slug) {
-        return respond_with_transcript(&state, &slug);
-    }
+/// Spawn R7's detached swarm job on an already-claimed slot — see [`spawn_skill_job`].
+pub(crate) fn spawn_swarm_job(
+    state: &AppState,
+    slug: &str,
+    skills: Arc<concepts::skills::SkillRegistry>,
+    angles: Vec<String>,
+) {
     let ts = state.clone();
-    let tslug = slug.clone();
-    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
+    let tslug = slug.to_string();
+    let abort = jobs::spawn_job(&state.jobs, slug, async move {
         match run_swarm_work(&ts, &tslug, &skills, angles).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, abort);
-    respond_with_transcript(&state, &slug)
+    jobs::set_abort(&state.jobs, slug, abort);
 }
 
 /// R22 — `POST /idea/{slug}/workflow/{name}` — run a deterministic workflow as a background job

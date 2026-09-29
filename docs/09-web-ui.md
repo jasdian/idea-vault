@@ -161,7 +161,7 @@ timeouts, not a model call that can run for minutes, so the handler awaits it in
 a handful of small files under `vault/.skills/` synchronously, no model call, and returns the
 refreshed `#skills` panel directly — the same shape as R23/R32. **R35** is a single mounted protocol
 endpoint, not a page or partial — it carries its own MCP-level `tools/call`/`tasks/*` dispatch
-(`web::mcp_server`), and its two long-running tools (`chat`, `store_idea`) still go through the same
+(`web::mcp_server`), and its four long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`) still go through the same
 `web::jobs` claim → spawn → poll machinery every other AI route uses, bridged onto the MCP Tasks
 primitive rather than exposed as HTML ([ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md)).
 **R36–R41 (`/sources`, ADR-0021) never run docker** (the app never invokes docker at all, ADR-0020). A mutation only rewrites the generated
@@ -418,7 +418,7 @@ base.html`.
 | AppState (shared handler state) | `web::state` (re-exported as `app::AppState`) |
 | Route handlers | `web::routes::{ideas,chat,memory,settings,admin,artifacts,compact,mcp,skills,sources}` |
 | Inbound MCP server (R35) | `web::mcp_server::{mod,auth,handler,tools,tasks,prompts}` — `rmcp::ServerHandler` + Bearer `AuthLayer`, [ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md) |
-| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, workflow R22, store R4, extract R18, compact R21, and the R9b poll endpoint — **not** R31's inline MCP probe, [ADR-0018](./adr/0018-mcp-servers.md); also driven by R35's `chat`/`store_idea` MCP tasks via `web::mcp_server::tasks::TaskRegistry`) |
+| Background job registry + poll | `web::jobs` (shared by chat R9, skill R6, swarm R7, workflow R22, store R4, extract R18, compact R21, and the R9b poll endpoint — **not** R31's inline MCP probe, [ADR-0018](./adr/0018-mcp-servers.md); also driven by R35's `chat`/`store_idea`/`run_skill`/`run_swarm` MCP tasks via `web::mcp_server::tasks::TaskRegistry`) |
 | Pending chat-message queue | `web::jobs` queue half (`Queues`, `enqueue`/`dequeue`/`remove_queued`/`list_queued`, `MAX_QUEUED`); drained by `web::routes::chat::start_next_queued` from R9b; rendered by `web::routes::ideas::render_queue_panel` |
 | Swarm angle defaults | `concepts::swarm::DEFAULT_ANGLES` (picker pre-check + R7's empty-request fallback) |
 | Skill registry (skill book + move chips + angle picker) | `concepts::skills::LiveSkills` (`AppState.skills`; `load`/`snapshot`/`reload`), `SkillRegistry` (`load`/`visible`), spine coverage `concepts::coverage::coverage` |

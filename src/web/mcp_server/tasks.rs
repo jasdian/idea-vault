@@ -1,4 +1,5 @@
-//! The Task↔Job bridge (docs/adr/0024): maps `chat`/`store_idea`'s MCP-task lifecycle
+//! The Task↔Job bridge (docs/adr/0024): maps the long-running tools' (`chat`, `store_idea`,
+//! `run_skill`, `run_swarm`) MCP-task lifecycle
 //! (`tasks/get`/`tasks/result`/`tasks/cancel`, SEP-1686) onto idea-vault's existing
 //! slug-keyed background-job machinery (`web::jobs`, ADR-0010), without any change to `jobs.rs`
 //! itself — every job-state read/write below goes through its existing public functions.
@@ -43,12 +44,14 @@ use crate::domain::IdeaState;
 use crate::vault::store;
 use crate::web::jobs::{self, Pending};
 use crate::web::routes::chat::spawn_chat_turn;
-use crate::web::routes::memory::{guard_can_store, run_store_work};
+use crate::web::routes::memory::{
+    guard_can_store, guard_skill, guard_swarm, run_store_work, spawn_skill_job, spawn_swarm_job,
+};
 use crate::web::state::AppState;
 
 use super::tools::required_str;
 
-/// How long a plain (non-task) `chat`/`store_idea` call waits for its job before answering
+/// How long a plain (non-task) long-running tool call waits for its job before answering
 /// "still running". Deliberately a short does-it-finish-fast grace period, not a whole model turn:
 /// a fast local model or a cached claude-code reply lands inside it, while anything slower is
 /// handed back to the caller to retry — this is the scoped exception to ADR-0010 that ADR-0028
@@ -65,12 +68,16 @@ const SYNC_POLL_INTERVAL: Duration = Duration::from_millis(250);
 enum TaskKind {
     Chat,
     Store,
+    Skill,
+    Swarm,
 }
 
 fn kind_for(name: &str) -> Result<TaskKind, McpError> {
     match name {
         "chat" => Ok(TaskKind::Chat),
         "store_idea" => Ok(TaskKind::Store),
+        "run_skill" => Ok(TaskKind::Skill),
+        "run_swarm" => Ok(TaskKind::Swarm),
         _ => Err(McpError::invalid_params(
             format!("'{name}' does not support task-based invocation"),
             None,
@@ -99,9 +106,9 @@ fn translate_terminal(terminal: &Terminal) -> (TaskStatus, Option<String>) {
 struct TaskEntry {
     slug: String,
     kind: TaskKind,
-    /// The `chat` message this task was claimed for (`None` for `store_idea`) — what a plain
-    /// retry is matched on, so a genuinely new message never reattaches to an older turn.
-    message: Option<String>,
+    /// What distinguishes this operation from another of the same kind ([`op_key`]) — what a
+    /// plain retry is matched on, so a genuinely new message never reattaches to an older turn.
+    key: Option<String>,
     terminal: Option<Terminal>,
 }
 
@@ -142,7 +149,7 @@ impl TaskRegistry {
     }
 
     /// Mint a task id for a just-spawned job and record it under both maps.
-    fn register(&self, slug: String, kind: TaskKind, message: Option<String>) -> String {
+    fn register(&self, slug: String, kind: TaskKind, key: Option<String>) -> String {
         let task_id = next_task_id();
         let mut map = self.lock();
         map.by_slug.insert(slug.clone(), task_id.clone());
@@ -151,7 +158,7 @@ impl TaskRegistry {
             TaskEntry {
                 slug,
                 kind,
-                message,
+                key,
                 terminal: None,
             },
         );
@@ -161,7 +168,7 @@ impl TaskRegistry {
     /// `enqueue_task`: validate + claim + spawn, then mint a task id. Fails fast (a protocol
     /// error, not a minted task) on a bad slug/state/busy-idea — matching the HTTP routes' own
     /// synchronous guards, so a doomed call never produces a task the client has to poll to learn
-    /// it was doomed. (This is a deliberate asymmetry with the five synchronous tools, which
+    /// it was doomed. (This is a deliberate asymmetry with the synchronous tools, which
     /// surface the same class of business error as a `CallToolResult`-level tool error instead —
     /// see docs/adr/0024's Consequences.)
     pub(super) async fn enqueue(
@@ -173,15 +180,15 @@ impl TaskRegistry {
         let args = args.map(Value::Object).unwrap_or(Value::Null);
         let kind = kind_for(name)?;
         let slug = required_str(&args, "slug")?.to_string();
-        let message = claim_and_spawn(state, &slug, kind, &args)?;
-        let task_id = self.register(slug, kind, message);
+        let key = claim_and_spawn(state, &slug, kind, &args)?;
+        let task_id = self.register(slug, kind, key);
         let now = Utc::now().to_rfc3339();
         let task =
             Task::new(task_id, TaskStatus::Working, now.clone(), now).with_poll_interval(1_500);
         Ok(CreateTaskResult::new(task))
     }
 
-    /// A plain (non-task) `tools/call` for `chat`/`store_idea` (docs/adr/0028): the same
+    /// A plain (non-task) `tools/call` for a long-running tool (docs/adr/0028): the same
     /// validate → claim → spawn as [`Self::enqueue`], then a bounded wait on the minted task.
     /// A terminal outcome inside [`SYNC_WAIT_BUDGET`] is returned as the tool result — the same
     /// payload `tasks/result` would build; otherwise the call returns a non-error "still running"
@@ -201,20 +208,17 @@ impl TaskRegistry {
         let args = args.map(Value::Object).unwrap_or(Value::Null);
         let kind = kind_for(name)?;
         let slug = required_str(&args, "slug")?.to_string();
-        let message = match kind {
-            TaskKind::Chat => Some(required_str(&args, "message")?.to_string()),
-            TaskKind::Store => None,
-        };
+        let key = op_key(kind, &args)?;
 
-        let task_id = match self.reattachable(&slug, kind, message.as_deref()) {
+        let task_id = match self.reattachable(&slug, kind, key.as_deref()) {
             Some(task_id) => task_id,
             None => {
                 self.settle_newest(state, &slug)?;
                 match claim_and_spawn(state, &slug, kind, &args) {
-                    Ok(message) => self.register(slug.clone(), kind, message),
+                    Ok(key) => self.register(slug.clone(), kind, key),
                     // A twin call may have claimed and registered between our lookup and our
                     // claim (three separate critical sections); if so, join it rather than fail.
-                    Err(e) => match self.reattachable(&slug, kind, message.as_deref()) {
+                    Err(e) => match self.reattachable(&slug, kind, key.as_deref()) {
                         Some(task_id) => task_id,
                         None => return Err(e),
                     },
@@ -245,15 +249,15 @@ impl TaskRegistry {
         }
     }
 
-    /// The newest task for `slug`, if it was claimed for the same operation (kind and, for
-    /// `chat`, the same message). `by_slug` is only cleared once the plain path has served the
+    /// The newest task for `slug`, if it was claimed for the same operation (same kind and the
+    /// same [`op_key`]). `by_slug` is only cleared once the plain path has served the
     /// outcome, so a match here is reattached to whether it is still `Working` or already
     /// terminal — the latter is the common retry after the "still running" note.
-    fn reattachable(&self, slug: &str, kind: TaskKind, message: Option<&str>) -> Option<String> {
+    fn reattachable(&self, slug: &str, kind: TaskKind, key: Option<&str>) -> Option<String> {
         let map = self.lock();
         let task_id = map.by_slug.get(slug)?;
         let entry = map.tasks.get(task_id)?;
-        (entry.kind == kind && entry.message.as_deref() == message).then(|| task_id.clone())
+        (entry.kind == kind && entry.key.as_deref() == key).then(|| task_id.clone())
     }
 
     /// Observe the slug's newest task once before a fresh claim, so a job that finished without
@@ -387,10 +391,45 @@ impl TaskRegistry {
     }
 }
 
+/// The operation key a plain retry reattaches on: the `chat` message, the skill name, or the
+/// swarm's comma-joined angle list (empty for the default set). `store_idea` has none — one slug
+/// has only one store.
+fn op_key(kind: TaskKind, args: &Value) -> Result<Option<String>, McpError> {
+    match kind {
+        TaskKind::Chat => Ok(Some(required_str(args, "message")?.to_string())),
+        TaskKind::Skill => Ok(Some(required_str(args, "name")?.to_string())),
+        TaskKind::Swarm => Ok(Some(swarm_angles(args)?.join(","))),
+        TaskKind::Store => Ok(None),
+    }
+}
+
+/// `run_swarm`'s optional `angles` argument: absent means the default D14 set (an empty list).
+fn swarm_angles(args: &Value) -> Result<Vec<String>, McpError> {
+    let Some(raw) = args.get("angles") else {
+        return Ok(Vec::new());
+    };
+    raw.as_array()
+        .ok_or_else(|| McpError::invalid_params("'angles' must be an array of strings", None))?
+        .iter()
+        .map(|a| {
+            a.as_str().map(|s| s.trim().to_string()).ok_or_else(|| {
+                McpError::invalid_params("'angles' must be an array of strings", None)
+            })
+        })
+        .filter(|a| !matches!(a, Ok(s) if s.is_empty()))
+        .collect()
+}
+
+fn busy_error(slug: &str) -> McpError {
+    McpError::invalid_params(
+        format!("idea '{slug}' is already busy with another job"),
+        None,
+    )
+}
+
 /// The shared validate → claim → spawn sequence behind both `enqueue_task` and the plain-call
 /// fallback — one copy of the business rules, so the two entry points can never drift. Returns
-/// the `chat` message the job was claimed for (`None` for `store_idea`) for the caller to record
-/// on the task entry.
+/// the job's [`op_key`] for the caller to record on the task entry.
 fn claim_and_spawn(
     state: &AppState,
     slug: &str,
@@ -410,10 +449,7 @@ fn claim_and_spawn(
                 ));
             }
             if !jobs::try_claim_idle(&state.jobs, slug) {
-                return Err(McpError::invalid_params(
-                    format!("idea '{slug}' is already busy with another job"),
-                    None,
-                ));
+                return Err(busy_error(slug));
             }
             if let Err(e) = spawn_chat_turn(state, slug, idea, &message) {
                 return Err(McpError::internal_error(e.to_string(), None));
@@ -425,10 +461,7 @@ fn claim_and_spawn(
                 return Err(McpError::invalid_params(e.to_string(), None));
             }
             if !jobs::try_claim(&state.jobs, slug) {
-                return Err(McpError::invalid_params(
-                    format!("idea '{slug}' is already busy with another job"),
-                    None,
-                ));
+                return Err(busy_error(slug));
             }
             let task_state = state.clone();
             let task_slug = slug.to_string();
@@ -441,6 +474,29 @@ fn claim_and_spawn(
             });
             jobs::set_abort(&state.jobs, slug, abort);
             Ok(None)
+        }
+        // Owner actions like their web routes (R6/R7): `try_claim`, not the chat queue's
+        // `try_claim_idle` — the same guards via the shared `guard_*` fns (HND-10).
+        TaskKind::Skill => {
+            let name = required_str(args, "name")?.to_string();
+            let skill = guard_skill(state, &idea, &name)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            if !jobs::try_claim(&state.jobs, slug) {
+                return Err(busy_error(slug));
+            }
+            spawn_skill_job(state, slug, skill);
+            Ok(Some(name))
+        }
+        TaskKind::Swarm => {
+            let requested = swarm_angles(args)?;
+            let key = requested.join(",");
+            let (skills, angles) = guard_swarm(state, &idea, requested)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            if !jobs::try_claim(&state.jobs, slug) {
+                return Err(busy_error(slug));
+            }
+            spawn_swarm_job(state, slug, skills, angles);
+            Ok(Some(key))
         }
     }
 }
@@ -477,16 +533,20 @@ fn finish_result(
     notice: Option<String>,
 ) -> CallToolResult {
     match kind {
-        TaskKind::Chat => match store::read_conversation(&state.config.vault_dir, slug) {
-            Ok(conversation) => {
-                let reply = store::split_turns(&conversation)
-                    .into_iter()
-                    .last()
-                    .unwrap_or_default();
-                CallToolResult::success(vec![Content::text(reply)])
+        // Each of these appends exactly one assistant turn — the reply, the skill's move, or the
+        // swarm's converged synthesis — so the newest turn is the result.
+        TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm => {
+            match store::read_conversation(&state.config.vault_dir, slug) {
+                Ok(conversation) => {
+                    let reply = store::split_turns(&conversation)
+                        .into_iter()
+                        .last()
+                        .unwrap_or_default();
+                    CallToolResult::success(vec![Content::text(reply)])
+                }
+                Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
             }
-            Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
-        },
+        }
         TaskKind::Store => match store::read_idea(&state.config.vault_dir, slug) {
             Ok(idea) => {
                 let mut msg = format!("stored — state is now {}", idea.frontmatter.state.as_str());

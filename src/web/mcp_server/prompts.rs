@@ -28,16 +28,22 @@ struct PromptSpec {
 static PROMPTS: &[PromptSpec] = &[
     PromptSpec {
         name: "continue-discussion",
-        description: "Resume an idea (reopening it first if it's stored) and push it further with one foil turn.",
+        description:
+            "Resume an idea (reopening it first if it's stored) and push it further with the foil.",
         arguments: &[ArgSpec {
             name: "slug",
             description: "the idea's slug (see the list_ideas tool)",
             required: true,
         }],
-        template: "Use get_idea to read idea '{slug}' in full (frontmatter, body, conversation, \
-memory). If its state is 'stored', call reopen_idea first. Then act as a rigorous ideation foil: \
-steelman the owner's latest point, then stress-test it from an angle the discussion has not yet \
-covered, and send that as one chat turn to the idea.",
+        // The foil is idea-vault's own model (ADR-0024): a chat message is saved as the owner's
+        // turn, so the client relays and picks moves — it must not argue as the foil itself, or
+        // the transcript gets a second foil speaking in the owner's voice.
+        template: "Use get_idea to read idea '{slug}' in full (body, conversation, memory, \
+artifacts) and give me a short recap of where it stands. If its state is 'stored', call \
+reopen_idea first. idea-vault's own model is the foil; you are my relay. Send my messages to it \
+verbatim with the chat tool and show me its replies. When I ask for a move, call list_skills and \
+run_skill with the one I pick; when I ask to attack it from many angles, call run_swarm. Do not \
+write foil turns yourself. When I say I'm done, call store_idea.",
     },
     PromptSpec {
         name: "new-idea",
@@ -47,8 +53,11 @@ covered, and send that as one chat turn to the idea.",
             description: "a short working title for the idea",
             required: true,
         }],
-        template: "Call create_idea with title '{title}'. Then send an opening chat turn to the \
-new idea that steelmans it in the owner's likely framing before probing its weakest assumption.",
+        template: "Ask me for the idea in my own words, then call create_idea with title \
+'{title}' and that text as the body. Send my framing as the opening chat turn so \
+idea-vault's foil can steelman it and probe its weakest assumption, and show me its reply. From \
+then on relay my messages with chat (do not write foil turns yourself), offer moves from \
+list_skills via run_skill or run_swarm when I ask, and call store_idea when I say I'm done.",
     },
 ];
 
@@ -80,7 +89,7 @@ pub(super) fn list_prompts() -> ListPromptsResult {
 }
 
 /// Render one prompt by name, filling `{arg}` placeholders from `arguments`. Every argument in
-/// this MVP catalog is required, so a missing one is always an error — there is no optional-arg
+/// this catalog is required, so a missing one is always an error — there is no optional-arg
 /// default phrase to fall back to (contrast the sibling `mcp-server`'s catalog).
 pub(super) fn get_prompt(
     name: &str,
@@ -141,6 +150,20 @@ mod tests {
         let text = render_text(&result);
         assert!(text.contains("my-idea"));
         assert!(!text.contains('{'), "placeholder must be filled: {text}");
+    }
+
+    /// The client relays; the foil is the app's own model. A prompt that told the client to act
+    /// as the foil saved its critique as an owner turn and doubled the foil (docs/adr/0024).
+    #[test]
+    fn prompts_make_the_client_a_relay_not_a_second_foil() {
+        for (name, arg) in [("continue-discussion", "slug"), ("new-idea", "title")] {
+            let result = get_prompt(name, Some(json!({ arg: "x" }).as_object().unwrap())).unwrap();
+            let text = render_text(&result);
+            assert!(!text.contains("act as"), "{name}: {text}");
+            for tool in ["chat", "list_skills", "run_skill", "store_idea"] {
+                assert!(text.contains(tool), "{name} must name {tool}: {text}");
+            }
+        }
     }
 
     #[test]

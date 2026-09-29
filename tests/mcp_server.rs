@@ -133,7 +133,7 @@ async fn unauthenticated_request_is_401() {
 }
 
 #[tokio::test]
-async fn tools_list_includes_the_mvp_catalog() {
+async fn tools_list_includes_the_catalog() {
     let (state, _vault) = test_state();
     let state = with_mcp_token(state, TOKEN);
     let app = build_router(state);
@@ -157,6 +157,10 @@ async fn tools_list_includes_the_mvp_catalog() {
         "reopen_idea",
         "chat",
         "store_idea",
+        "list_skills",
+        "run_skill",
+        "run_swarm",
+        "get_artifact",
     ] {
         assert!(
             names.contains(&expected),
@@ -873,4 +877,393 @@ async fn cancelled_task_is_reported_as_cancelled_not_a_false_success() {
         body["result"]["isError"], true,
         "a cancelled task must not report a false success: {body}"
     );
+}
+
+/// A full `tools/call` JSON-RPC response — for the long-running tools, whose business errors are
+/// protocol-level `invalid_params` (docs/adr/0024) and so live under `error`, not `result`.
+async fn call_tool_body(app: &Router, session: &str, name: &str, args: Value) -> Value {
+    let req = json!({
+        "jsonrpc": "2.0", "id": 90, "method": "tools/call",
+        "params": { "name": name, "arguments": args }
+    });
+    let (status, _, body) = send(app, mcp_request(req, Some(session), Some(TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "tools/call {name} failed: {body}");
+    body
+}
+
+/// Create an idea over MCP and move it into discussion with one owner turn on disk — the D9
+/// precondition for moves and store, without spending a chat round-trip on it.
+async fn create_in_discussion(app: &Router, session: &str, vault_dir: &std::path::Path) -> String {
+    let created =
+        tool_json(&call_tool(app, session, "create_idea", json!({ "title": "Moves" })).await);
+    let slug = created["slug"].as_str().unwrap().to_string();
+    set_state(
+        vault_dir,
+        &slug,
+        idea_vault::domain::IdeaState::InDiscussion,
+    );
+    idea_vault::vault::store::append_turn(vault_dir, &slug, "user", "the idea in full").unwrap();
+    slug
+}
+
+fn set_state(vault_dir: &std::path::Path, slug: &str, state: idea_vault::domain::IdeaState) {
+    let mut idea = idea_vault::vault::store::read_idea(vault_dir, slug).unwrap();
+    idea.frontmatter.state = state;
+    idea_vault::vault::store::write_idea(vault_dir, &idea).unwrap();
+}
+
+/// Plain-call a long-running tool until it stops answering "still running" (ADR-0028 retry).
+async fn call_until_done(app: &Router, session: &str, name: &str, args: Value) -> Value {
+    for _ in 0..20 {
+        let result = call_tool(app, session, name, args.clone()).await;
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        if !text.contains("is still running") {
+            return result;
+        }
+    }
+    panic!("{name} never finished");
+}
+
+#[tokio::test]
+async fn list_skills_returns_the_skill_book_with_stages() {
+    let (state, _vault) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let skills = tool_json(&call_tool(&app, &session, "list_skills", json!({})).await);
+    let skills = skills.as_array().expect("skills array");
+    let premortem = skills
+        .iter()
+        .find(|s| s["name"] == "premortem")
+        .unwrap_or_else(|| panic!("premortem missing: {skills:?}"));
+    assert_eq!(premortem["stage"], "attack");
+    assert_eq!(premortem["source"], "built-in");
+    // Hidden extract-* lenses are knowledge-extraction internals, not moves (ADR-0015).
+    assert!(skills
+        .iter()
+        .all(|s| !s["name"].as_str().unwrap().starts_with("extract-")));
+}
+
+#[tokio::test]
+async fn run_skill_plain_call_appends_one_assistant_turn_and_returns_it() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["1. ranked cause".into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let result = call_until_done(
+        &app,
+        &session,
+        "run_skill",
+        json!({ "slug": slug, "name": "premortem" }),
+    )
+    .await;
+    assert_ne!(result["isError"], true, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("ranked cause"), "{result}");
+
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert_eq!(
+        conversation.matches("## assistant").count(),
+        1,
+        "{conversation}"
+    );
+}
+
+#[tokio::test]
+async fn run_skill_refuses_unknown_skill_draft_stored_and_busy_ideas() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::TokensAfterDelay {
+            tokens: vec!["slow move".into()],
+            delay_ms: 2_000,
+        },
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let body = call_tool_body(
+        &app,
+        &session,
+        "run_skill",
+        json!({ "slug": slug, "name": "nope" }),
+    )
+    .await;
+    assert!(body["error"].is_object(), "unknown skill: {body}");
+
+    for state in [
+        idea_vault::domain::IdeaState::Draft,
+        idea_vault::domain::IdeaState::Stored,
+    ] {
+        set_state(&vault_dir, &slug, state);
+        let body = call_tool_body(
+            &app,
+            &session,
+            "run_skill",
+            json!({ "slug": slug, "name": "premortem" }),
+        )
+        .await;
+        assert!(body["error"].is_object(), "{state:?} must refuse: {body}");
+    }
+    assert!(
+        mock.chat_bodies().is_empty(),
+        "no guard failure may reach the model"
+    );
+
+    // Busy: a running move holds the claim; a different move is refused, not queued.
+    set_state(
+        &vault_dir,
+        &slug,
+        idea_vault::domain::IdeaState::InDiscussion,
+    );
+    let first = call_tool(
+        &app,
+        &session,
+        "run_skill",
+        json!({ "slug": slug, "name": "premortem" }),
+    )
+    .await;
+    assert!(
+        first["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is still running"),
+        "{first}"
+    );
+    let body = call_tool_body(
+        &app,
+        &session,
+        "run_skill",
+        json!({ "slug": slug, "name": "cheapest-disproof" }),
+    )
+    .await;
+    assert!(body["error"].is_object(), "busy idea must refuse: {body}");
+}
+
+#[tokio::test]
+async fn run_swarm_as_a_task_persists_exactly_one_synthesis_turn() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec!["converged finding".into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 80, "method": "tools/call",
+        "params": { "name": "run_swarm", "arguments": { "slug": slug }, "task": {} }
+    });
+    let (_, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no taskId: {body}"))
+        .to_string();
+
+    let mut status_str = "working".to_string();
+    for _ in 0..500 {
+        let get = json!({
+            "jsonrpc": "2.0", "id": 81, "method": "tasks/get",
+            "params": { "taskId": task_id }
+        });
+        let (_, _, body) = send(&app, mcp_request(get, Some(&session), Some(TOKEN))).await;
+        status_str = body["result"]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if status_str != "working" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(status_str, "completed");
+
+    let result_req = json!({
+        "jsonrpc": "2.0", "id": 82, "method": "tasks/result",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(&app, mcp_request(result_req, Some(&session), Some(TOKEN))).await;
+    let text = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("converged finding"), "{body}");
+
+    let conversation =
+        std::fs::read_to_string(vault_dir.join(&slug).join("conversation.md")).unwrap();
+    assert_eq!(
+        conversation.matches("## assistant (swarm: ").count(),
+        1,
+        "{conversation}"
+    );
+    assert!(
+        mock.chat_bodies().len() > 1,
+        "a swarm fans out more than one call"
+    );
+}
+
+#[tokio::test]
+async fn run_swarm_rejects_oversized_unknown_and_capstone_angles_before_any_model_call() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["x".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let nine: Vec<&str> = std::iter::repeat_n("premortem", 9).collect();
+    for angles in [
+        json!(nine),
+        json!(["nope"]),
+        json!(["build-prompt"]),
+        json!("premortem"),
+    ] {
+        let body = call_tool_body(
+            &app,
+            &session,
+            "run_swarm",
+            json!({ "slug": slug, "angles": angles }),
+        )
+        .await;
+        assert!(
+            body["error"].is_object(),
+            "angles {angles} must refuse: {body}"
+        );
+    }
+    assert!(mock.chat_bodies().is_empty());
+}
+
+#[tokio::test]
+async fn get_idea_after_store_exposes_fact_bodies_and_the_quarantine_artifact() {
+    let mock = support::spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::Tokens(vec!["## Consolidated\n\nthe idea in full".into()]),
+            ChatScript::Tokens(vec![
+                "FACT: Core claim\nQUOTE: \"the idea in full\"\nThe grounded body.\n\
+                 FACT: Invented\nQUOTE: \"we raise a seed round\"\nNever said.\n"
+                    .into(),
+            ]),
+        ],
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let stored = call_until_done(&app, &session, "store_idea", json!({ "slug": slug })).await;
+    let text = stored["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.starts_with("stored"), "{stored}");
+
+    let idea = tool_json(&call_tool(&app, &session, "get_idea", json!({ "slug": slug })).await);
+    assert_eq!(idea["state"], "stored");
+    let memory = idea["memory"].as_array().unwrap();
+    assert_eq!(
+        memory.len(),
+        1,
+        "only the grounded fact is remembered: {memory:?}"
+    );
+    assert_eq!(memory[0]["slug"], "core-claim");
+    assert!(memory[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("The grounded body."));
+    let quarantine = idea["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "quarantine")
+        .unwrap_or_else(|| panic!("no quarantine artifact: {idea}"))
+        .clone();
+
+    let artifact = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "get_artifact",
+            json!({ "slug": slug, "artifact": quarantine["slug"] }),
+        )
+        .await,
+    );
+    assert!(artifact["body"]
+        .as_str()
+        .unwrap()
+        .contains("we raise a seed round"));
+
+    let missing = call_tool(
+        &app,
+        &session,
+        "get_artifact",
+        json!({ "slug": slug, "artifact": "no-such-artifact" }),
+    )
+    .await;
+    assert_eq!(missing["isError"], true, "{missing}");
+}
+
+#[tokio::test]
+async fn store_idea_refuses_an_in_discussion_idea_with_no_turns() {
+    let (state, vault_dir) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let created =
+        tool_json(&call_tool(&app, &session, "create_idea", json!({ "title": "Empty" })).await);
+    let slug = created["slug"].as_str().unwrap().to_string();
+    set_state(
+        &vault_dir,
+        &slug,
+        idea_vault::domain::IdeaState::InDiscussion,
+    );
+
+    let body = call_tool_body(&app, &session, "store_idea", json!({ "slug": slug })).await;
+    assert!(body["error"].is_object(), "{body}");
+}
+
+#[tokio::test]
+async fn search_and_reopen_idea_work_over_mcp() {
+    let (state, vault_dir) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let created = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "create_idea",
+            json!({ "title": "Searchable", "body": "a zeppelin courier service" }),
+        )
+        .await,
+    );
+    let slug = created["slug"].as_str().unwrap().to_string();
+
+    let hits =
+        tool_json(&call_tool(&app, &session, "search", json!({ "query": "zeppelin" })).await);
+    assert!(
+        hits.as_array().unwrap().iter().any(|h| h["slug"] == slug),
+        "{hits}"
+    );
+
+    // Reopen is only an edge from Stored (D9).
+    let refused = call_tool(&app, &session, "reopen_idea", json!({ "slug": slug })).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    set_state(&vault_dir, &slug, idea_vault::domain::IdeaState::Stored);
+    let reopened =
+        tool_json(&call_tool(&app, &session, "reopen_idea", json!({ "slug": slug })).await);
+    assert_eq!(reopened["state"], "reopened");
 }

@@ -48,10 +48,13 @@ impl ServerHandler for IdeaVaultMcpServer {
                 .build(),
         )
         .with_instructions(
-            "idea-vault: a localhost ideation vault. list_ideas/get_idea/search read the vault; \
-             create_idea starts a new Draft. chat and store_idea run a model turn and can take a \
-             while — prefer calling them with task:{} and polling tasks/get, then tasks/result \
-             once complete. Called plainly, they wait a few seconds and otherwise answer with a \
+            "idea-vault: a localhost ideation vault. list_ideas/get_idea/get_artifact/search \
+             read the vault; list_skills reads the skill book; create_idea starts a new Draft. \
+             The foil is idea-vault's own model: a chat message is saved as the owner's turn and \
+             the foil answers it, so relay the owner's words rather than arguing in their place. \
+             chat, run_skill, run_swarm and store_idea run model turns and can take a while — \
+             prefer calling them with task:{} and polling tasks/get, then tasks/result once \
+             complete. Called plainly, they wait a few seconds and otherwise answer with a \
              'still running' note: call again with the same arguments to collect the result.",
         )
     }

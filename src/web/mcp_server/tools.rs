@@ -1,6 +1,6 @@
-//! The MVP tool catalog (docs/adr/0024) and the synchronous half of tool dispatch.
+//! The tool catalog (docs/adr/0024) and the synchronous half of tool dispatch.
 //!
-//! `chat` and `store_idea` are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
+//! The long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`) are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
 //! with `task:{}` takes the Task lifecycle in `tasks.rs` (`enqueue_task` → `tasks/get` →
 //! `tasks/result`), while a plain `tools/call` from a Task-unaware client is routed by
 //! `call_sync` to [`super::tasks::TaskRegistry::call_sync_bounded`] — the same claim/spawn and
@@ -8,7 +8,7 @@
 //!
 //! Until ADR-0028 both tools were [`TaskSupport::Required`]: the `rmcp` dispatch layer rejected a
 //! plain `tools/call` for either with `-32601 Method not found` before `call_sync` was reached, so
-//! `call_sync` only ever handled the five synchronous tools. That constraint was relaxed because a
+//! `call_sync` only ever handled the synchronous tools. That constraint was relaxed because a
 //! client without Tasks support (Claude Code's own MCP client among them) could not call them at
 //! all; flipping the two `TaskSupport` values back is the whole revert if the bounded wait ever
 //! proves the wrong trade.
@@ -20,7 +20,7 @@ use rmcp::ErrorData as McpError;
 use serde_json::{json, Value};
 
 use crate::index::{self, queries};
-use crate::vault::store;
+use crate::vault::{store, VaultError};
 use crate::web::routes::ideas::create_idea_core;
 use crate::web::routes::memory::reopen_idea_core;
 use crate::web::state::AppState;
@@ -48,7 +48,7 @@ fn optional_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 
-/// The full MVP tool catalog (advertised by `tools/list` and consulted by `get_tool` for
+/// The full tool catalog (advertised by `tools/list` and consulted by `get_tool` for
 /// task-support validation).
 pub(super) fn catalog() -> Vec<Tool> {
     vec![
@@ -60,7 +60,8 @@ pub(super) fn catalog() -> Vec<Tool> {
         Tool::new(
             "get_idea",
             "Read one idea in full: frontmatter, body, the complete conversation transcript, \
-             and its memory index.",
+             its memory facts (with bodies), the compacted-context summary if any, and its \
+             artifact list (read one with get_artifact).",
             to_schema(json!({
                 "type": "object",
                 "properties": { "slug": { "type": "string", "description": "idea slug" } },
@@ -136,18 +137,78 @@ pub(super) fn catalog() -> Vec<Tool> {
         )
         // Was `TaskSupport::Required` until ADR-0028 — same reasoning as `chat` above.
         .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
+        Tool::new(
+            "list_skills",
+            "List the skill book: every named ideation move (name, stage, role, description, \
+             use-when/avoid-when guidance, source). Pass a name to run_skill, or a non-capstone, \
+             non-converge name as a run_swarm angle.",
+            to_schema(schema_empty()),
+        ),
+        Tool::new(
+            "run_skill",
+            "Apply one named skill (see list_skills) to an in-discussion idea; the foil's move \
+             is appended to the conversation and returned. Long-running: prefer invoking it as \
+             a task (tools/call with task:{}); a plain call waits a few seconds and otherwise \
+             returns a 'still running' note — call again with the same arguments to collect it.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "name": { "type": "string", "description": "skill name from list_skills" },
+                },
+                "required": ["slug", "name"],
+                "additionalProperties": false,
+            })),
+        )
+        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
+        Tool::new(
+            "run_swarm",
+            "Fan out up to 8 subagents, each attacking the idea from one angle (a skill name), \
+             then converge them into one synthesis turn, which is returned. Omit angles for the \
+             default set. Long-running (many model calls): prefer invoking it as a task; a plain \
+             call waits a few seconds and otherwise returns a 'still running' note — call again \
+             with the same arguments to collect it.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "angles": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "skill names to use as angles; omit for the default set",
+                    },
+                },
+                "required": ["slug"],
+                "additionalProperties": false,
+            })),
+        )
+        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
+        Tool::new(
+            "get_artifact",
+            "Read one markdown artifact of an idea (a swarm/extract finding or synthesis, or \
+             quarantined memory facts) by its slug from get_idea's artifact list.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string", "description": "idea slug" },
+                    "artifact": { "type": "string", "description": "artifact slug" },
+                },
+                "required": ["slug", "artifact"],
+                "additionalProperties": false,
+            })),
+        ),
     ]
 }
 
-/// Dispatch a plain (non-task) `tools/call`. The five synchronous tools answer inline;
-/// `chat`/`store_idea` take the bounded-wait path on the shared task registry (module doc).
+/// Dispatch a plain (non-task) `tools/call`. The synchronous tools answer inline; the
+/// long-running ones take the bounded-wait path on the shared task registry (module doc).
 pub(super) async fn call_sync(
     state: &AppState,
     tasks: &TaskRegistry,
     name: &str,
     args: Option<JsonObject>,
 ) -> Result<CallToolResult, McpError> {
-    if matches!(name, "chat" | "store_idea") {
+    if matches!(name, "chat" | "store_idea" | "run_skill" | "run_swarm") {
         return tasks.call_sync_bounded(state, name, args).await;
     }
     let args = args.map(Value::Object).unwrap_or(Value::Null);
@@ -157,6 +218,8 @@ pub(super) async fn call_sync(
         "search" => search(state, &args),
         "create_idea" => create_idea(state, &args),
         "reopen_idea" => reopen_idea(state, &args).await,
+        "list_skills" => Ok(list_skills(state)),
+        "get_artifact" => get_artifact(state, &args),
         _ => Err(McpError::invalid_params(
             format!("unknown tool '{name}'"),
             None,
@@ -193,22 +256,30 @@ fn list_ideas(state: &AppState) -> Result<CallToolResult, McpError> {
 
 fn get_idea(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
     let slug = required_str(args, "slug")?;
-    let vault_dir = &state.config.vault_dir;
+    match idea_payload(&state.config.vault_dir, slug) {
+        Ok(payload) => Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )])),
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+    }
+}
 
-    let idea = match store::read_idea(vault_dir, slug) {
-        Ok(idea) => idea,
-        Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-    };
-    let conversation = match store::read_conversation(vault_dir, slug) {
-        Ok(c) => c,
-        Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-    };
-    let memory = match store::read_memory_index(vault_dir, slug) {
-        Ok(m) => m,
-        Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-    };
+/// Everything the idea page shows, as one JSON document — so an MCP client sees the same idea the
+/// owner does (fact bodies, not only the MEMORY.md one-liners; artifacts incl. quarantined facts).
+fn idea_payload(vault_dir: &std::path::Path, slug: &str) -> Result<Value, VaultError> {
+    let idea = store::read_idea(vault_dir, slug)?;
+    let conversation = store::read_conversation(vault_dir, slug)?;
+    let index = store::read_memory_index(vault_dir, slug)?;
+    let facts = store::read_memory_facts(vault_dir, slug)?;
+    let compacted = store::read_compacted(vault_dir, slug)?;
+    let artifacts = store::read_artifacts(vault_dir, slug)?;
+    let html_reports: Vec<String> = store::list_artifact_files(vault_dir, slug)?
+        .into_iter()
+        .filter(|f| f.ext == store::ArtifactExt::Html)
+        .map(|f| f.slug)
+        .collect();
 
-    let payload = json!({
+    Ok(json!({
         "slug": idea.frontmatter.slug,
         "title": idea.frontmatter.title,
         "state": idea.frontmatter.state.as_str(),
@@ -218,14 +289,72 @@ fn get_idea(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> 
         "updated": idea.frontmatter.updated.to_rfc3339(),
         "body": idea.body,
         "conversation": conversation,
-        "memory": memory.entries.iter().map(|e| json!({
-            "slug": e.slug,
-            "summary": e.summary,
+        "compacted": compacted.map(|c| json!({
+            "compacted_through": c.frontmatter.compacted_through,
+            "summary": c.summary,
+        })),
+        "memory": facts.iter().map(|f| json!({
+            "slug": f.frontmatter.slug,
+            "title": f.frontmatter.title,
+            "summary": index
+                .entries
+                .iter()
+                .find(|e| e.slug == f.frontmatter.slug)
+                .map(|e| e.summary.as_str()),
+            "tags": f.frontmatter.tags,
+            "links": f.frontmatter.links,
+            "body": f.body,
         })).collect::<Vec<_>>(),
-    });
-    Ok(CallToolResult::success(vec![Content::text(
-        payload.to_string(),
-    )]))
+        "artifacts": artifacts.iter().map(|a| json!({
+            "slug": a.frontmatter.slug,
+            "title": a.frontmatter.title,
+            "kind": a.frontmatter.kind.as_str(),
+            "lens": a.frontmatter.lens,
+            "created": a.frontmatter.created.to_rfc3339(),
+        })).collect::<Vec<_>>(),
+        // Derived browser-only exports (strict-CSP HTML), listed so the client can point the owner
+        // at `/idea/{slug}/artifact/{name}.html`; their markdown twin is the readable truth.
+        "html_reports": html_reports,
+    }))
+}
+
+fn list_skills(state: &AppState) -> CallToolResult {
+    let skills = state.skills.snapshot();
+    let payload: Vec<Value> = skills
+        .visible()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "description": s.description,
+                "stage": s.stage.as_str(),
+                "role": s.role,
+                "use_when": s.use_when,
+                "avoid_when": s.avoid_when,
+                "source": s.source.as_str(),
+            })
+        })
+        .collect();
+    CallToolResult::success(vec![Content::text(Value::Array(payload).to_string())])
+}
+
+fn get_artifact(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
+    let slug = required_str(args, "slug")?;
+    let artifact = required_str(args, "artifact")?;
+    match store::read_artifact(&state.config.vault_dir, slug, artifact) {
+        Ok(a) => Ok(CallToolResult::success(vec![Content::text(
+            json!({
+                "slug": a.frontmatter.slug,
+                "title": a.frontmatter.title,
+                "kind": a.frontmatter.kind.as_str(),
+                "lens": a.frontmatter.lens,
+                "created": a.frontmatter.created.to_rfc3339(),
+                "model": a.frontmatter.model,
+                "body": a.body,
+            })
+            .to_string(),
+        )])),
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+    }
 }
 
 fn search(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
@@ -298,7 +427,7 @@ mod tests {
     #[test]
     fn catalog_is_stable_and_marks_long_running_tools_as_task_optional() {
         let tools = catalog();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 11);
         let mut seen = std::collections::HashSet::new();
         for t in &tools {
             assert!(
@@ -309,7 +438,7 @@ mod tests {
         }
         // `Required` until ADR-0028 (a Task-unaware client could not call these at all); the
         // Task path is unchanged, the plain path is the bounded wait in `tasks.rs`.
-        for name in ["chat", "store_idea"] {
+        for name in ["chat", "store_idea", "run_skill", "run_swarm"] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(
                 t.task_support(),
@@ -323,6 +452,8 @@ mod tests {
             "search",
             "create_idea",
             "reopen_idea",
+            "list_skills",
+            "get_artifact",
         ] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(

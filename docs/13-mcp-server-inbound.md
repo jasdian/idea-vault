@@ -2,9 +2,11 @@
 
 > How idea-vault exposes **itself** as a Model Context Protocol server at `POST /api/mcp`, so an
 > external LLM client (Claude Desktop/Code, or any Streamable-HTTP MCP client) can list ideas,
-> read one, continue a discussion, and store it — the mirror image of
+> read one, continue a discussion, run skills and swarms on it, and store it — the mirror image of
 > [ADR-0018](./adr/0018-mcp-servers.md)'s **outbound** registry (idea-vault calling *other* MCP
-> servers). Decision record: [ADR-0024](./adr/0024-mcp-server-inbound.md). This doc is both the
+> servers). Decision records: [ADR-0024](./adr/0024-mcp-server-inbound.md), amended by
+> [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md) and
+> [ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md). This doc is both the
 > feature reference and a general-purpose **cookbook** for wiring an MCP server onto an axum app
 > that already runs long AI calls as background jobs — the pattern generalizes past idea-vault.
 
@@ -28,9 +30,9 @@ web::mcp_server
 ├── mod.rs       — router() : assembles the rmcp StreamableHttpService + AuthLayer, mounts /api/mcp
 ├── auth.rs      — single-token Bearer AuthLayer/AuthMiddleware (Tower Layer/Service pair)
 ├── handler.rs   — IdeaVaultMcpServer : the rmcp::ServerHandler impl
-├── tools.rs     — the MVP tool catalog + synchronous tool dispatch (list_ideas, get_idea, search,
-│                   create_idea, reopen_idea)
-├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea
+├── tools.rs     — the tool catalog + synchronous tool dispatch (list_ideas, get_idea, search,
+│                   create_idea, reopen_idea, list_skills, get_artifact)
+├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm
 └── prompts.rs   — a small canned prompt catalog
 ```
 
@@ -112,14 +114,14 @@ client onto the polling lifecycle, with zero branching in your own handler. `Opt
 client choose: `tools/call` with `task:{}` goes to `enqueue_task`, without it to `call_tool`.
 
 `chat`/`store_idea` were `Required` until [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md)
-and are now `Optional`, because a client that does not implement Tasks (Claude Code's own MCP
+and are now `Optional` (as are `run_skill`/`run_swarm`, added by ADR-0029), because a client that does not implement Tasks (Claude Code's own MCP
 client, for one) could otherwise not call them at all. The two paths a plain call and a task call
 take are:
 
 | Call shape | Handler | Behaviour |
 |---|---|---|
 | `tools/call` + `task:{}` | `enqueue_task` → `TaskRegistry::enqueue` | Unchanged from ADR-0024: claim + spawn, return a task id, client polls `tasks/get`/`tasks/result`. |
-| plain `tools/call` | `call_tool` → `tools::call_sync` → `TaskRegistry::call_sync_bounded` | Same claim + spawn, a real task id is minted, then a **bounded wait** (`SYNC_WAIT_BUDGET`, 3 s, polled every `SYNC_POLL_INTERVAL`, 250 ms). Finished in time → the same result `tasks/result` would give. Not finished → a non-error "still running" note naming the task id; the job keeps running, and a plain retry with the **same arguments** reattaches to that task — waiting if it is still running, or serving its cached result if it finished in the meantime — with no second job and no duplicate turn. A *different* `chat` message while the previous turn is still running is a new operation and fails "already busy", exactly like task mode. |
+| plain `tools/call` | `call_tool` → `tools::call_sync` → `TaskRegistry::call_sync_bounded` | Same claim + spawn, a real task id is minted, then a **bounded wait** (`SYNC_WAIT_BUDGET`, 3 s, polled every `SYNC_POLL_INTERVAL`, 250 ms). Finished in time → the same result `tasks/result` would give. Not finished → a non-error "still running" note naming the task id; the job keeps running, and a plain retry with the **same arguments** reattaches to that task — waiting if it is still running, or serving its cached result if it finished in the meantime — with no second job and no duplicate turn. A *different* operation (another `chat` message, another skill, another angle list) while the previous one is still running is a new operation and fails "already busy", exactly like task mode. |
 
 The wait is deliberately a "did it finish fast?" grace window, not a model timeout — it must stay
 far below any HTTP client's request timeout, which is why it is a module constant in `tasks.rs`
@@ -138,7 +140,8 @@ onto a different app with its own "background job, polled by the client" system:
    busy) so a doomed call fails fast as a protocol error rather than minting a task the client has
    to poll just to learn it was doomed. On success it claims the job slot, spawns the work exactly
    like the HTTP route does (reusing the *same* `pub(crate)` functions the route calls —
-   `chat::spawn_chat_turn`, `memory::run_store_work` — never a second copy of the business logic),
+   `chat::spawn_chat_turn`, `memory::run_store_work`, `memory::{guard_skill, spawn_skill_job,
+   guard_swarm, spawn_swarm_job}` — never a second copy of the business logic),
    mints a task id, and records `task_id → (idea slug, tool kind)` in an in-memory map.
 2. **`get_task_info`** (`tasks/get`) looks up the slug, calls the job system's own status peek
    (`web::jobs::peek`), and translates its states into MCP `TaskStatus`: `Running → Working`,
@@ -148,13 +151,15 @@ onto a different app with its own "background job, polled by the client" system:
    *status* but never stores a *return value* (the web UI doesn't need one — it just re-renders
    the transcript from disk once a job finishes). So once the job is idle, this function
    **re-derives the tool's result by re-reading the vault** — the newest conversation turn for
-   `chat`, the fresh frontmatter for `store_idea`. This isn't a workaround; the vault is the
+   `chat`/`run_skill`/`run_swarm` (each appends exactly one assistant turn), the fresh
+   frontmatter for `store_idea`. This isn't a workaround; the vault is the
    source of truth (ADR-0002) regardless of which surface asks, so re-reading it after completion
    is the *correct* way to answer "what happened," not a shortcut around a missing feature.
 4. **`cancel_task`** (`tasks/cancel`) forwards straight to the job system's own `cancel`.
 5. **`call_sync_bounded`** (the plain-call fallback, ADR-0028) is not a fifth kind of reader: it
    calls the same `claim_and_spawn` as step 1, registers a real task id (plus a `slug → task_id`
-   reverse index, with the `chat` message recorded on the entry, so a retry with the same
+   reverse index, with the operation key — the `chat` message, the skill name, or the
+   comma-joined swarm angles — recorded on the entry, so a retry with the same
    arguments can find its own task whether it is still running or already finished), and loops
    on the same `observe()` terminal cache steps 2–3 use, for a fixed budget. Its result is built
    by the same helper as step 3. Once it has served a terminal outcome it drops the reverse-index
@@ -171,7 +176,10 @@ an inherent part of the Task↔Job bridge idea.
 A tiny static catalog (`continue-discussion`, `new-idea`) in the same declarative shape as tools:
 name, description, typed arguments, a text template with `{arg}` placeholders filled at `get`
 time. Prompts are pure text — no vault I/O — they just name which tools an MCP client's "/" picker
-should drive next.
+should drive next. Both make the client a **relay**: idea-vault's own model is the foil, a `chat`
+message is saved as the owner's turn, so the client sends the owner's words verbatim and offers
+moves (`list_skills` → `run_skill`/`run_swarm`) instead of arguing as the foil itself — which would
+put a second foil in the owner's voice (ADR-0029).
 
 ## Testing pattern (`tests/mcp_server.rs`)
 
@@ -209,19 +217,36 @@ defaulting to open.
 
 ## Scope: what's in, what's deferred
 
-**In (this pass):** `list_ideas`, `get_idea`, `search`, `create_idea`, `chat`, `store_idea`,
-`reopen_idea`, plus the two-prompt catalog. `chat`/`store_idea` are callable both as a task and
+**In:**
+
+| Tool | Shape | What it does |
+|---|---|---|
+| `list_ideas` | sync | Every idea, newest first |
+| `get_idea` | sync | The whole idea: frontmatter, body, conversation, memory facts with bodies, compacted summary, artifact list, `.html` report names |
+| `get_artifact` | sync | One markdown artifact (finding, synthesis, quarantine) by slug |
+| `search` | sync | FTS over titles, bodies, conversations, memory, artifacts |
+| `list_skills` | sync | The visible skill book (name, stage, role, use/avoid guidance, source) |
+| `create_idea` | sync | New Draft |
+| `reopen_idea` | sync | Stored → Reopened |
+| `chat` | long-running | One owner turn; the foil's reply is returned |
+| `run_skill` | long-running | One named move (R6's guards); its turn is returned |
+| `run_swarm` | long-running | Up to 8 angles, converged (R7's guards); the synthesis is returned |
+| `store_idea` | long-running | Consolidate + verified memory extraction; quarantine count as a notice |
+
+Plus the two-prompt catalog. The four long-running tools are callable both as a task and
 plainly (bounded wait, ADR-0028). A Task-unaware client cannot use the task path. Its plain call
 runs as a real task (`tasks::TaskRegistry::call_sync_bounded`), and when the turn outlives the
 3 s `SYNC_WAIT_BUDGET`, the "still running" note returns that task's id. `tasks/cancel`
 (`tasks::TaskRegistry::cancel`) accepts an id from either path, for any client that speaks that
 method.
 
-**Deferred:** skills/swarm/workflow/extract/compact tools, fork/tags/sources-management/delete-*
-tools, MCP `resources` (idea.md/conversation.md as `resources/read` + `resources/subscribe`
-push-on-update — `rmcp` supports this; it's additive and independent of the current tool set), a
-stdio transport variant, and multi-user/per-caller credential scoping (not needed while idea-vault
-is solo). Extending the tool catalog is mechanical — add an entry to `tools::catalog()` and a
-matching arm in `tools::call_sync` (or, for another long-running move, a case in
-`tasks::TaskRegistry::enqueue` alongside `chat`/`store_idea`) — but do it alongside an ADR-0024
-amendment noting the expanded scope, per that ADR's own consequence note.
+**Deferred:** workflow/extract/compact tools, chat queueing on a busy idea (MCP refuses instead),
+fork/tags/rename/sources-management/delete-* tools, MCP `resources` (idea.md/conversation.md as
+`resources/read` + `resources/subscribe` push-on-update — `rmcp` supports this; it's additive and
+independent of the current tool set), a stdio transport variant, a client-as-foil mode (a no-model
+`append_turn` and a client-authored store — ADR-0029's first rejected alternative), and
+multi-user/per-caller credential scoping (not needed while idea-vault is solo). Extending the tool
+catalog is mechanical — add an entry to `tools::catalog()` and a matching arm in `tools::call_sync`
+(or, for another long-running move, a `TaskKind` plus a `tasks::claim_and_spawn` arm that calls the
+web route's own `guard_*`/`spawn_*` fns) — but do it alongside an ADR amending ADR-0024's scope, as
+ADR-0029 did.

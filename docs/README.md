@@ -66,7 +66,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D32) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0028 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0029 | — |
 
 ## Locked decisions (at a glance)
 
@@ -95,6 +95,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Per-role call profiles:** swarm, workflow and skill calls run under their agent role's profile — an Ollama temperature plus an optional claude model and effort, blank inheriting the global — overlaid per call on the live settings via `ai::backend::LlmBackend::for_role`. On by default, switchable off on Settings; one Ollama model for every role; free chat, compaction and extraction keep the global settings ([ADR-0026](./adr/0026-per-role-call-profiles.md), amends ADR-0011).
 - **Cross-idea retrieval:** `[[idea#fact]]` resolves into `fact_links`, and reindex derives one `edges` graph (link 1.0, IDF-weighted exact tags, top-2 lexical word overlap ≤ 0.19) walked two hops by `index::queries::related_ideas`; a separately budgeted, leftover-only "Related ideas" block is pushed into chat, skill, swarm-angle and workflow-stage prompts (never audit, synthesis or extraction) and shown as a panel on the idea page; tag drift is surfaced, never merged; no vector/graph DB and no model call at reindex. Phase 2 (embeddings) was KILLED by its pre-registered criterion (margin 1 TP, needed 2) until ~30–50 ideas or a named real-use miss ([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
 - **MCP tasks are optional:** `chat`/`store_idea` accept either the Task lifecycle or a plain call that waits a short, fixed budget, so Task-unaware MCP clients can use them; the Task path is unchanged ([ADR-0028](./adr/0028-optional-task-support-bounded-wait.md), amends ADR-0024).
+- **MCP moves:** an MCP client can also list the skill book, run a skill or a swarm, and read the whole idea (fact bodies, artifacts) — with idea-vault's own model as the foil and the client as a relay; workflows, compact, extract, tags, fork and sources stay web-only ([ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md), amends ADR-0024).
 
 ## Beyond these docs
 
