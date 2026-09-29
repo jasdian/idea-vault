@@ -304,6 +304,11 @@ pub struct FactHit {
 /// query yields an empty list. Each matching fact row is one hit; if two facts of one idea
 /// share a slug, the hit carries the smaller of their titles.
 ///
+/// `bm25` is computed over a connection-local copy of the `search_fts` rows of kind `title`,
+/// `tags`, `idea_body` and `memory`: its IDF and average row length never include conversation
+/// or artifact rows, so transcripts cannot move a fact's score. Every call rebuilds that
+/// eligible-only copy, O(corpus) work per call, acceptable for an offline instrument.
+///
 /// This is an instrument for offline retrieval experiments. It is never registered as a model
 /// tool: context reaches the model by push, not pull.
 pub fn vault_search(
@@ -316,15 +321,16 @@ pub fn vault_search(
         return Ok(Vec::new());
     };
 
+    refresh_lexical_fts(conn)?;
     let mut stmt = conn.prepare(
         "SELECT i.slug, s.ref,
                 (SELECT MIN(mf.title) FROM memory_facts mf
                  WHERE mf.idea_id = s.idea_id AND mf.slug = s.ref),
-                bm25(search_fts),
+                bm25(lexical_fts),
                 (SELECT COUNT(*) FROM backlinks bl WHERE bl.target_idea_id = i.id)
-         FROM search_fts s
+         FROM temp.lexical_fts s
          JOIN ideas i ON i.id = s.idea_id
-         WHERE search_fts MATCH ?1
+         WHERE lexical_fts MATCH ?1
            AND s.kind = 'memory'
            AND (?2 IS NULL OR i.slug <> ?2)
            AND EXISTS (SELECT 1 FROM memory_facts mf
@@ -363,8 +369,36 @@ pub struct LexicalHit {
 const LEXICAL_KINDS: &str = "('title', 'tags', 'idea_body', 'memory')";
 const LEXICAL_MAX_TOKENS: usize = 20;
 const LEXICAL_MIN_TERM_CHARS: usize = 3;
-const LEXICAL_VOCAB_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS temp.search_fts_vocab \
-                                 USING fts5vocab(main, search_fts, instance);";
+const LEXICAL_FTS_DDL: &str = "DROP TABLE IF EXISTS temp.lexical_vocab;
+     DROP TABLE IF EXISTS temp.lexical_fts;
+     CREATE VIRTUAL TABLE temp.lexical_fts USING fts5(
+         idea_id UNINDEXED, kind UNINDEXED, content, ref UNINDEXED);
+     CREATE VIRTUAL TABLE temp.lexical_vocab USING fts5vocab(temp, lexical_fts, instance);";
+
+// Rebuilds the connection-local `temp.lexical_fts` from the eligible rows of the current
+// `search_fts` contents, same rowids, so every bm25 and vocab read that follows sees them.
+fn refresh_lexical_fts(conn: &Connection) -> Result<(), IndexError> {
+    conn.execute_batch(LEXICAL_FTS_DDL)?;
+    conn.execute(
+        &format!(
+            "INSERT INTO temp.lexical_fts (rowid, idea_id, kind, content, ref)
+             SELECT rowid, idea_id, kind, content, ref FROM main.search_fts
+             WHERE kind IN {LEXICAL_KINDS}"
+        ),
+        [],
+    )?;
+    Ok(())
+}
+
+fn lexical_idea_id(conn: &Connection, slug: &str) -> Result<Option<i64>, IndexError> {
+    match conn.query_row("SELECT id FROM ideas WHERE slug = ?1", [slug], |row| {
+        row.get(0)
+    }) {
+        Ok(id) => Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
 
 fn push_token(tokens: &mut Vec<String>, term: String) {
     if tokens.len() < LEXICAL_MAX_TOKENS && !tokens.contains(&term) {
@@ -387,37 +421,36 @@ fn push_token(tokens: &mut Vec<String>, term: String) {
 /// `idf = 0` (present in every idea), a pure-numeric term, or a term shorter than 3 characters is
 /// never chosen by TF-IDF. Title and tag tokens count toward the 20 and are truncated too.
 ///
-/// Term statistics come from an `fts5vocab` instance table created in the connection's `temp`
-/// schema on first call; the derived schema is untouched. An unknown slug yields an empty list.
+/// Term statistics come from an `fts5vocab` instance table over a copy of the eligible rows in
+/// the connection's `temp` schema; the derived schema is untouched. Every call rebuilds that
+/// eligible-only copy, O(corpus) work per call, acceptable for an offline instrument. An unknown
+/// slug yields an empty list.
 pub fn lexical_query_terms(conn: &Connection, slug: &str) -> Result<Vec<String>, IndexError> {
-    let idea_id: i64 = match conn.query_row("SELECT id FROM ideas WHERE slug = ?1", [slug], |row| {
-        row.get(0)
-    }) {
-        Ok(id) => id,
-        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
+    let Some(idea_id) = lexical_idea_id(conn, slug)? else {
+        return Ok(Vec::new());
     };
     Ok(LexicalCorpus::load(conn)?.query_terms(idea_id))
 }
 
 /// Term statistics of the `search_fts` rows of kind `title`, `tags`, `idea_body` and `memory`,
 /// loaded once so a caller that needs [`lexical_query_terms`] for many ideas pays one scan.
-pub(crate) struct LexicalCorpus {
+/// Loading rebuilds the connection's `temp.lexical_fts` copy of those rows, which
+/// [`LexicalCorpus::hits`] then scores against.
+pub(crate) struct LexicalCorpus<'c> {
+    conn: &'c Connection,
     ideas: i64,
     heads: BTreeMap<i64, Vec<(u8, i64, i64, String)>>,
     tf: BTreeMap<i64, BTreeMap<String, i64>>,
     df: BTreeMap<String, i64>,
 }
 
-impl LexicalCorpus {
-    /// One read of the eligible rows' `(rowid, idea, kind)` and one scan of the `fts5vocab`
-    /// instance table, filtered by rowid here rather than joined in SQL.
-    pub(crate) fn load(conn: &Connection) -> Result<Self, IndexError> {
-        conn.execute_batch(LEXICAL_VOCAB_DDL)?;
+impl<'c> LexicalCorpus<'c> {
+    /// Rebuilds `temp.lexical_fts`, then one read of its `(rowid, idea, kind)` and one scan of
+    /// its `fts5vocab` instance table, matched by rowid here rather than joined in SQL.
+    pub(crate) fn load(conn: &'c Connection) -> Result<Self, IndexError> {
+        refresh_lexical_fts(conn)?;
         let mut docs: HashMap<i64, (i64, Option<u8>)> = HashMap::new();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT rowid, idea_id, kind FROM search_fts WHERE kind IN {LEXICAL_KINDS}"
-        ))?;
+        let mut stmt = conn.prepare("SELECT rowid, idea_id, kind FROM temp.lexical_fts")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let head = match row.get::<_, String>(2)?.as_str() {
@@ -437,7 +470,7 @@ impl LexicalCorpus {
 
         let mut heads: BTreeMap<i64, Vec<(u8, i64, i64, String)>> = BTreeMap::new();
         let mut tf: BTreeMap<i64, BTreeMap<String, i64>> = BTreeMap::new();
-        let mut stmt = conn.prepare("SELECT term, doc, offset FROM temp.search_fts_vocab")?;
+        let mut stmt = conn.prepare("SELECT term, doc, offset FROM temp.lexical_vocab")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let doc: i64 = row.get(1)?;
@@ -463,6 +496,7 @@ impl LexicalCorpus {
             }
         }
         Ok(Self {
+            conn,
             ideas,
             heads,
             tf,
@@ -501,6 +535,56 @@ impl LexicalCorpus {
         tokens
     }
 
+    /// [`lexical_baseline`] for the idea `slug` with its query `terms` already computed by
+    /// [`LexicalCorpus::query_terms`], so a caller that also needs the terms runs one scan.
+    pub(crate) fn hits(
+        &self,
+        slug: &str,
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<LexicalHit>, IndexError> {
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let match_expr = terms
+            .iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let mut stmt = self.conn.prepare(
+            "SELECT i.slug, bm25(lexical_fts)
+             FROM temp.lexical_fts s
+             JOIN ideas i ON i.id = s.idea_id
+             WHERE lexical_fts MATCH ?1
+               AND i.slug <> ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![&match_expr, slug], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        let mut best: HashMap<String, f64> = HashMap::new();
+        for row in rows {
+            let (idea_slug, bm25) = row?;
+            best.entry(idea_slug)
+                .and_modify(|b| *b = b.min(bm25))
+                .or_insert(bm25);
+        }
+        let mut hits: Vec<LexicalHit> = best
+            .into_iter()
+            .map(|(idea_slug, bm25)| LexicalHit {
+                idea_slug,
+                score: -bm25,
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.idea_slug.cmp(&b.idea_slug))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     /// Whether `term` occurs in the eligible rows of every idea that has any, so its IDF is 0.
     pub(crate) fn in_every_idea(&self, term: &str) -> bool {
         self.df.get(term).is_some_and(|&df| df >= self.ideas)
@@ -518,12 +602,14 @@ impl LexicalCorpus {
 ///
 /// The query is [`lexical_query_terms`] (title words, tag words, top TF-IDF terms; at most 20
 /// tokens), each token quoted and OR-ed, run with FTS5 `bm25` against the `search_fts` rows of
-/// kind `title`, `tags`, `idea_body` and `memory` of every idea except `slug`; conversation
-/// and artifact rows never match, but FTS5 still computes the `bm25` corpus statistics (IDF,
-/// average row length) over every `search_fts` row, including them and `slug`'s own rows. The
-/// idea itself is excluded in SQL, so `limit` applies to the other ideas only. An idea's `score` is `-bm25` of
-/// its best-matching row. Results are ordered by `score` descending, then slug. An unknown slug,
-/// or an idea with no query tokens, yields an empty list.
+/// kind `title`, `tags`, `idea_body` and `memory` of every idea except `slug`. The `bm25`
+/// corpus (IDF, average row length) is exactly those eligible rows of every idea, `slug`'s own
+/// included, copied into a connection-local table; conversation and artifact rows neither match
+/// nor shape the statistics. Every call rebuilds that eligible-only copy, O(corpus) work per
+/// call, acceptable for an offline instrument. The idea itself is excluded in SQL, so
+/// `limit` applies to the other ideas only. An idea's `score` is `-bm25` of its best-matching
+/// row. Results are ordered by `score` descending, then slug. An unknown slug, or an idea with no
+/// query tokens, yields an empty list.
 ///
 /// This is an instrument for offline retrieval experiments, not a full-body OR-query. It is
 /// never registered as a model tool: context reaches the model by push, not pull.
@@ -532,59 +618,12 @@ pub fn lexical_baseline(
     slug: &str,
     limit: usize,
 ) -> Result<Vec<LexicalHit>, IndexError> {
-    let terms = lexical_query_terms(conn, slug)?;
-    lexical_hits(conn, slug, &terms, limit)
-}
-
-/// [`lexical_baseline`] for the idea `slug` with its query `terms` already computed by
-/// [`lexical_query_terms`], so a caller that also needs the terms runs that scan once.
-pub(crate) fn lexical_hits(
-    conn: &Connection,
-    slug: &str,
-    terms: &[String],
-    limit: usize,
-) -> Result<Vec<LexicalHit>, IndexError> {
-    if terms.is_empty() {
+    let Some(idea_id) = lexical_idea_id(conn, slug)? else {
         return Ok(Vec::new());
-    }
-    let match_expr = terms
-        .iter()
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-
-    let mut stmt = conn.prepare(&format!(
-        "SELECT i.slug, bm25(search_fts)
-         FROM search_fts s
-         JOIN ideas i ON i.id = s.idea_id
-         WHERE search_fts MATCH ?1
-           AND s.kind IN {LEXICAL_KINDS}
-           AND i.slug <> ?2"
-    ))?;
-    let rows = stmt.query_map(rusqlite::params![&match_expr, slug], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-    })?;
-    let mut best: HashMap<String, f64> = HashMap::new();
-    for row in rows {
-        let (idea_slug, bm25) = row?;
-        best.entry(idea_slug)
-            .and_modify(|b| *b = b.min(bm25))
-            .or_insert(bm25);
-    }
-    let mut hits: Vec<LexicalHit> = best
-        .into_iter()
-        .map(|(idea_slug, bm25)| LexicalHit {
-            idea_slug,
-            score: -bm25,
-        })
-        .collect();
-    hits.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.idea_slug.cmp(&b.idea_slug))
-    });
-    hits.truncate(limit);
-    Ok(hits)
+    };
+    let corpus = LexicalCorpus::load(conn)?;
+    let terms = corpus.query_terms(idea_id);
+    corpus.hits(slug, &terms, limit)
 }
 
 /// Inbound direction of D23: distinct slugs of ideas that link *to* `slug` via `[[slug]]`,
@@ -1755,5 +1794,210 @@ mod tests {
 
         assert!(lexical_query_terms(&conn, "nobody").unwrap().is_empty());
         assert!(lexical_baseline(&conn, "nobody", 5).unwrap().is_empty());
+    }
+
+    fn score_bits(hits: &[LexicalHit]) -> Vec<(String, u64)> {
+        hits.iter()
+            .map(|h| (h.idea_slug.clone(), h.score.to_bits()))
+            .collect()
+    }
+
+    fn fact_bits(hits: &[FactHit]) -> Vec<(String, String, u64, u64)> {
+        hits.iter()
+            .map(|h| {
+                (
+                    h.idea_slug.clone(),
+                    h.fact_slug.clone(),
+                    h.bm25.to_bits(),
+                    h.score.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    fn long_conversation(words: &str) -> String {
+        let mut transcript = String::new();
+        for n in 0..40 {
+            transcript.push_str(&format!(
+                "## user\nturn {n}: {words} and a lot of ordinary chatter besides\n\n"
+            ));
+        }
+        transcript
+    }
+
+    #[test]
+    fn lexical_baseline_bm25_ignores_conversation_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(
+            tmp.path(),
+            "anchor",
+            "Anchor",
+            &[],
+            "velmarch quintessor velmarch plans\n",
+            10,
+        );
+        write_fixture_idea(tmp.path(), "near", "Near", &[], "velmarch notes here\n", 11);
+        write_fixture_idea(
+            tmp.path(),
+            "far",
+            "Far",
+            &[],
+            "quintessor among many other filler words\n",
+            12,
+        );
+        write_fixture_idea(tmp.path(), "talker", "Talker", &[], "unrelated\n", 13);
+        let mut conn = reindexed(tmp.path());
+        let before = lexical_baseline(&conn, "anchor", 10).unwrap();
+        assert_eq!(hit_slugs(&before), ["near", "far"], "{before:?}");
+
+        store::append_conversation(
+            tmp.path(),
+            "talker",
+            &long_conversation("velmarch quintessor velmarch"),
+        )
+        .unwrap();
+        reindex(&mut conn, tmp.path()).unwrap();
+        let after = lexical_baseline(&conn, "anchor", 10).unwrap();
+
+        assert_eq!(
+            score_bits(&after),
+            score_bits(&before),
+            "conversation rows moved eligible bm25: before {before:?} after {after:?}"
+        );
+    }
+
+    #[test]
+    fn vault_search_bm25_ignores_conversation_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(tmp.path(), "asker", "Asker", &[], "Asker statement.\n", 10);
+        write_fixture_idea(tmp.path(), "beta", "Beta", &[], "Beta statement.\n", 11);
+        write_fixture_idea(tmp.path(), "gamma", "Gamma", &[], "Gamma statement.\n", 12);
+        write_fixture_idea(tmp.path(), "talker", "Talker", &[], "unrelated\n", 13);
+        write_fact(tmp.path(), "beta", "churn", "zorbicon retention drops\n");
+        write_fact(
+            tmp.path(),
+            "gamma",
+            "pricing",
+            "zorbicon pricing among many other filler words\n",
+        );
+        let mut conn = reindexed(tmp.path());
+        let before = vault_search(&conn, "zorbicon", Some("asker"), 10).unwrap();
+        assert_eq!(before.len(), 2, "{before:?}");
+
+        store::append_conversation(
+            tmp.path(),
+            "talker",
+            &long_conversation("zorbicon retention zorbicon"),
+        )
+        .unwrap();
+        reindex(&mut conn, tmp.path()).unwrap();
+        let after = vault_search(&conn, "zorbicon", Some("asker"), 10).unwrap();
+
+        assert_eq!(
+            fact_bits(&after),
+            fact_bits(&before),
+            "conversation rows moved fact bm25: before {before:?} after {after:?}"
+        );
+    }
+
+    #[test]
+    fn lexical_fts_refreshes_after_reindex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let db = tmp.path().join("index.db");
+        write_fixture_idea(
+            &vault,
+            "anchor",
+            "Anchor",
+            &[],
+            "brallowick tessermont brallowick\n",
+            10,
+        );
+        write_fixture_idea(&vault, "bystander", "Bystander", &[], "unrelated\n", 11);
+        write_fixture_idea(&vault, "other", "Other", &[], "filler text\n", 12);
+        let mut writer = crate::index::schema::open_or_create(&db).unwrap();
+        reindex(&mut writer, &vault).unwrap();
+        let reader = crate::index::schema::open_or_create(&db).unwrap();
+
+        let facts = vault_search(&reader, "quillomar", Some("anchor"), 10).unwrap();
+        assert!(facts.is_empty(), "{facts:?}");
+        let hits = lexical_baseline(&reader, "anchor", 10).unwrap();
+        assert!(hits.is_empty(), "{hits:?}");
+
+        write_fact(&vault, "bystander", "echo", "quillomar echo\n");
+        reindex(&mut writer, &vault).unwrap();
+        let facts = vault_search(&reader, "quillomar", Some("anchor"), 10).unwrap();
+        let got: Vec<_> = facts
+            .iter()
+            .map(|f| (f.idea_slug.as_str(), f.fact_slug.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [("bystander", "echo")],
+            "vault_search must see a fact another connection indexed: {facts:?}"
+        );
+
+        write_fixture_idea(
+            &vault,
+            "newcomer",
+            "Newcomer",
+            &[],
+            "brallowick tessermont notes\n",
+            13,
+        );
+        reindex(&mut writer, &vault).unwrap();
+        let hits = lexical_baseline(&reader, "anchor", 10).unwrap();
+        assert_eq!(
+            hit_slugs(&hits),
+            ["newcomer"],
+            "lexical_baseline must see an idea another connection indexed: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn lexical_baseline_bm25_ignores_artifact_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(
+            tmp.path(),
+            "anchor",
+            "Anchor",
+            &[],
+            "velmarch quintessor velmarch plans\n",
+            10,
+        );
+        write_fixture_idea(tmp.path(), "near", "Near", &[], "velmarch notes here\n", 11);
+        write_fixture_idea(
+            tmp.path(),
+            "far",
+            "Far",
+            &[],
+            "quintessor among many other filler words\n",
+            12,
+        );
+        write_fixture_idea(tmp.path(), "arti", "Arti", &[], "Nothing there.\n", 13);
+        let conn = reindexed(tmp.path());
+        let before = lexical_baseline(&conn, "anchor", 10).unwrap();
+        assert_eq!(hit_slugs(&before), ["near", "far"], "{before:?}");
+
+        for n in 0..40 {
+            conn.execute(
+                "INSERT INTO search_fts (idea_id, kind, ref, content) \
+                 VALUES (?1, 'artifact', ?2, ?3)",
+                rusqlite::params![
+                    idea_id(&conn, "arti"),
+                    format!("run-{n}"),
+                    "velmarch quintessor velmarch and a lot of ordinary chatter besides",
+                ],
+            )
+            .unwrap();
+        }
+        let after = lexical_baseline(&conn, "anchor", 10).unwrap();
+
+        assert_eq!(
+            score_bits(&after),
+            score_bits(&before),
+            "artifact rows moved eligible bm25: before {before:?} after {after:?}"
+        );
     }
 }

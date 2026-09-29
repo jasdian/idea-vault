@@ -558,8 +558,10 @@ const LEXICAL_EDGE_MAX_TERMS: usize = 5;
 // related-ideas floor. One row per unordered pair: the larger of the two directional weights,
 // and `detail` the union of both directions' shared terms, sorted, at most
 // `LEXICAL_EDGE_MAX_TERMS`. Everything is keyed by BTreeMap, so no weight or detail depends on
-// row, id or hash order. The vocabulary load scans every `search_fts` row, conversations
-// included, inside the reindex transaction, so its cost grows with transcript volume.
+// row, id or hash order. The corpus is loaded once, inside the reindex transaction, after every
+// `search_fts` row is written. Its bm25 weights and vocabulary cover only the eligible rows, so
+// neither depends on conversation or artifact volume; the copy's `INSERT … SELECT` still scans
+// every `search_fts` row.
 fn derive_lexical_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
     let mut ids: BTreeMap<String, i64> = BTreeMap::new();
     let mut stmt = tx.prepare("SELECT slug, id FROM ideas")?;
@@ -585,7 +587,7 @@ fn derive_lexical_edges(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError
     let mut pairs: BTreeMap<(i64, i64), (f64, BTreeSet<String>)> = BTreeMap::new();
     for (slug, &id) in &ids {
         let terms = corpus.query_terms(id);
-        let hits = queries::lexical_hits(tx, slug, &terms, LEXICAL_EDGE_TOP_K)?;
+        let hits = corpus.hits(slug, &terms, LEXICAL_EDGE_TOP_K)?;
         let Some(top) = hits.first().map(|hit| hit.score) else {
             continue;
         };
