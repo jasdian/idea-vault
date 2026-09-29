@@ -233,8 +233,11 @@ templates/
   _search_results.html   # partial — FTS results
   _related.html          # partial — the #related panel: related ideas (title, hop label, reasons,
                          #   latest fact titles) from memory::related::related_entries, then "Tag
-                         #   drift" near-duplicate tag pairs (domain::tag::near_duplicate; at most 5
-                         #   notes, 5 carrier slugs each, never merged), or an "unavailable" note
+                         #   drift" notes: only this idea's own tags that near-duplicate another
+                         #   vault tag (index::queries::own_tag_near_duplicates, judged by
+                         #   domain::tag::near_duplicate; web::routes::ideas::build_related_panel
+                         #   shows at most 5 notes, 5 carrier slugs each, never merged), or an
+                         #   "unavailable" note
                          #   when the index or its lock fails (web::templates::RelatedPanel)
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
   _settings.html          # partial — the settings form (re-rendered after a save)
