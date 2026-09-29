@@ -1,5 +1,7 @@
-//! `index::queries::vault_search` is an offline experiment instrument: context reaches the model
-//! by push, never by pull. Characterization: no model-facing tool list may mention it.
+//! `index::queries::vault_search` and `index::queries::turn_fact_hits` are offline experiment
+//! instruments (ADR-0027, ADR-0031): context reaches the model by push, never by pull, and the
+//! query-driven retriever was killed by its pre-registered experiment. Characterization: no
+//! model-facing tool list and no module outside `index` may mention either.
 
 mod support;
 
@@ -15,7 +17,7 @@ use support::web::{test_state, with_mcp_token};
 use tower::ServiceExt;
 
 const TOKEN: &str = "isolation-token";
-const NEEDLE: &str = "vault_search";
+const NEEDLES: [&str; 2] = ["vault_search", "turn_fact_hits"];
 
 async fn mcp_post(
     app: &axum::Router,
@@ -48,7 +50,9 @@ async fn mcp_post(
 #[tokio::test]
 async fn vault_search_is_not_model_exposed() {
     let web_defs = web::tool_definitions().to_string();
-    assert!(!web_defs.contains(NEEDLE), "web tool defs: {web_defs}");
+    for needle in NEEDLES {
+        assert!(!web_defs.contains(needle), "web tool defs: {web_defs}");
+    }
 
     let tmp = tempfile::tempdir().unwrap();
     let src = ResolvedSource {
@@ -56,10 +60,12 @@ async fn vault_search_is_not_model_exposed() {
         root: tmp.path().to_path_buf(),
     };
     let source_defs = sources::tool_definitions(&[src]).to_string();
-    assert!(
-        !source_defs.contains(NEEDLE),
-        "source tool defs: {source_defs}"
-    );
+    for needle in NEEDLES {
+        assert!(
+            !source_defs.contains(needle),
+            "source tool defs: {source_defs}"
+        );
+    }
 
     let (state, _vault) = test_state();
     let app = build_router(with_mcp_token(state, TOKEN));
@@ -82,13 +88,14 @@ async fn vault_search_is_not_model_exposed() {
         raw.contains("list_ideas"),
         "tools/list did not return the catalog: {raw}"
     );
-    assert!(!raw.contains(NEEDLE), "mcp tools/list: {raw}");
-
     let backend_src = include_str!("../src/ai/backend.rs");
-    assert!(
-        !backend_src.contains(NEEDLE),
-        "src/ai/backend.rs must not reference vault_search"
-    );
+    for needle in NEEDLES {
+        assert!(!raw.contains(needle), "mcp tools/list: {raw}");
+        assert!(
+            !backend_src.contains(needle),
+            "src/ai/backend.rs must not reference {needle}"
+        );
+    }
 }
 
 fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -112,7 +119,10 @@ fn vault_search_is_referenced_only_inside_the_index_module() {
     let offenders: Vec<_> = files
         .iter()
         .filter(|f| !f.starts_with(&index))
-        .filter(|f| std::fs::read_to_string(f).unwrap().contains(NEEDLE))
+        .filter(|f| {
+            let text = std::fs::read_to_string(f).unwrap();
+            NEEDLES.iter().any(|n| text.contains(n))
+        })
         .collect();
     assert!(offenders.is_empty(), "{offenders:?}");
 }

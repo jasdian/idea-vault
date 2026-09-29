@@ -626,6 +626,150 @@ pub fn lexical_baseline(
     corpus.hits(slug, &terms, limit)
 }
 
+/// Most distinct query terms [`turn_fact_hits`] keeps from a turn, highest IDF first.
+pub const TURN_QUERY_MAX_TERMS: usize = 12;
+/// Distinct query terms a fact must contain to qualify as a [`turn_fact_hits`] hit.
+pub const TURN_FACT_MIN_SHARED: usize = 2;
+/// Most facts [`turn_fact_hits`] returns; at most one per idea.
+pub const TURN_FACT_MAX_HITS: usize = 3;
+const TURN_SNIPPET_TOKENS: i64 = 16;
+
+/// One memory fact of another idea that matches a turn, returned by [`turn_fact_hits`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnFactHit {
+    pub idea_slug: String,
+    pub idea_title: String,
+    pub fact_slug: String,
+    pub fact_title: String,
+    /// FTS5 `snippet()` of the fact row around the matched terms, markers stripped.
+    pub snippet: String,
+    /// The query terms the fact contains, in query order.
+    pub shared: Vec<String>,
+    /// `-bm25` of the fact row; higher is better.
+    pub score: f64,
+}
+
+/// The query terms [`turn_fact_hits`] derives from `text`: tokens split like FTS5 `unicode61`
+/// (case-folded, split on non-alphanumerics), dropping tokens under 3 characters, pure numbers,
+/// tokens absent from the eligible corpus and tokens present in every idea (IDF 0); the
+/// [`TURN_QUERY_MAX_TERMS`] with the highest IDF, ties by term ascending.
+pub(crate) fn turn_query_terms(corpus: &LexicalCorpus<'_>, text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ranked: Vec<(f64, String)> = Vec::new();
+    for token in unicode_tokens(text) {
+        if token.chars().count() < LEXICAL_MIN_TERM_CHARS
+            || token.chars().all(char::is_numeric)
+            || !seen.insert(token.clone())
+        {
+            continue;
+        }
+        let Some(&df) = corpus.df.get(&token) else {
+            continue;
+        };
+        if df >= corpus.ideas {
+            continue;
+        }
+        ranked.push(((corpus.ideas as f64 / df as f64).ln(), token));
+    }
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked
+        .into_iter()
+        .take(TURN_QUERY_MAX_TERMS)
+        .map(|(_, t)| t)
+        .collect()
+}
+
+fn unicode_tokens(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_lowercase)
+}
+
+/// Query-driven fact retrieval: the memory facts of ideas other than `slug` that best match one
+/// turn's `text`, Google-style (the turn is the query, facts are the documents, bm25 ranks them,
+/// a snippet shows the matched passage).
+///
+/// Terms come from [`turn_query_terms`]; each is quoted and OR-ed against the `memory` rows of
+/// the eligible-only bm25 corpus [`lexical_baseline`] uses. A fact qualifies only if it contains
+/// at least [`TURN_FACT_MIN_SHARED`] distinct query terms. Hits are ordered by `score`
+/// descending, then idea slug, then fact slug, keep the best fact per idea, and stop at
+/// `limit.min(TURN_FACT_MAX_HITS)`. An unknown slug or a turn with fewer than
+/// [`TURN_FACT_MIN_SHARED`] usable terms yields an empty list. No model call; O(corpus) per call,
+/// since the eligible-only copy is rebuilt.
+pub fn turn_fact_hits(
+    conn: &Connection,
+    slug: &str,
+    text: &str,
+    limit: usize,
+) -> Result<Vec<TurnFactHit>, IndexError> {
+    let corpus = LexicalCorpus::load(conn)?;
+    let terms = turn_query_terms(&corpus, text);
+    if terms.len() < TURN_FACT_MIN_SHARED {
+        return Ok(Vec::new());
+    }
+    let match_expr = terms
+        .iter()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT i.slug, i.title, s.ref,
+                (SELECT MIN(mf.title) FROM memory_facts mf
+                 WHERE mf.idea_id = s.idea_id AND mf.slug = s.ref),
+                s.content,
+                snippet(lexical_fts, 2, '', '', '…', {TURN_SNIPPET_TOKENS}),
+                bm25(lexical_fts)
+         FROM temp.lexical_fts s
+         JOIN ideas i ON i.id = s.idea_id
+         WHERE lexical_fts MATCH ?1
+           AND s.kind = 'memory'
+           AND i.slug <> ?2"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![&match_expr, slug], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, f64>(6)?,
+        ))
+    })?;
+    let mut hits = Vec::new();
+    for row in rows {
+        let (idea_slug, idea_title, fact_slug, fact_title, content, snippet, bm25) = row?;
+        let words: HashSet<String> = unicode_tokens(&content).collect();
+        let shared: Vec<String> = terms
+            .iter()
+            .filter(|t| words.contains(*t))
+            .cloned()
+            .collect();
+        if shared.len() < TURN_FACT_MIN_SHARED {
+            continue;
+        }
+        hits.push(TurnFactHit {
+            fact_title: fact_title.unwrap_or_else(|| fact_slug.clone()),
+            idea_slug,
+            idea_title,
+            fact_slug,
+            snippet: snippet.split_whitespace().collect::<Vec<_>>().join(" "),
+            shared,
+            score: -bm25,
+        });
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.idea_slug.cmp(&b.idea_slug))
+            .then_with(|| a.fact_slug.cmp(&b.fact_slug))
+    });
+    let mut ideas = HashSet::new();
+    hits.retain(|h| ideas.insert(h.idea_slug.clone()));
+    hits.truncate(limit.min(TURN_FACT_MAX_HITS));
+    Ok(hits)
+}
+
 /// Inbound direction of D23: distinct slugs of ideas that link *to* `slug` via `[[slug]]`,
 /// sorted. Matches on `target_slug`, so it also answers "who links to this not-yet-created
 /// idea?" for forward references.
@@ -1999,5 +2143,106 @@ mod tests {
             score_bits(&before),
             "artifact rows moved eligible bm25: before {before:?} after {after:?}"
         );
+    }
+
+    fn turn_fixture() -> (tempfile::TempDir, Connection) {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture_idea(tmp.path(), "alpha", "Alpha", &[], "common words here\n", 10);
+        write_fixture_idea(
+            tmp.path(),
+            "beta",
+            "Beta orchard",
+            &[],
+            "common words\n",
+            11,
+        );
+        write_fixture_idea(tmp.path(), "gamma", "Gamma", &[], "common words\n", 12);
+        write_fixture_idea(tmp.path(), "delta", "Delta", &[], "common words\n", 13);
+        write_fixture_idea(tmp.path(), "epsilon", "Epsilon", &[], "common words\n", 14);
+        write_fact(tmp.path(), "alpha", "own-frost", "frost orchard pruning\n");
+        write_fact(
+            tmp.path(),
+            "beta",
+            "late-frost",
+            "A late frost kills orchard blossoms before pruning helps.\n",
+        );
+        write_fact(tmp.path(), "beta", "frost-again", "frost orchard notes\n");
+        write_fact(
+            tmp.path(),
+            "gamma",
+            "one-word",
+            "frost only, nothing else\n",
+        );
+        write_fact(
+            tmp.path(),
+            "delta",
+            "orchard-frost",
+            "orchard frost budget\n",
+        );
+        let conn = reindexed(tmp.path());
+        (tmp, conn)
+    }
+
+    #[test]
+    fn turn_fact_hits_rank_other_ideas_facts_with_a_snippet() {
+        let (_tmp, conn) = turn_fixture();
+        let hits = turn_fact_hits(&conn, "alpha", "Will a frost hurt the orchard?", 3).unwrap();
+        let ideas: Vec<&str> = hits.iter().map(|h| h.idea_slug.as_str()).collect();
+        assert!(!ideas.contains(&"alpha"), "own idea excluded: {hits:?}");
+        assert!(
+            !ideas.contains(&"gamma"),
+            "one shared term does not qualify: {hits:?}"
+        );
+        assert!(
+            ideas.contains(&"beta") && ideas.contains(&"delta"),
+            "{hits:?}"
+        );
+        assert_eq!(
+            ideas.iter().filter(|s| **s == "beta").count(),
+            1,
+            "one fact per idea"
+        );
+        let beta = hits.iter().find(|h| h.idea_slug == "beta").unwrap();
+        assert_eq!(beta.idea_title, "Beta orchard");
+        assert!(beta.snippet.contains("frost"), "{beta:?}");
+        assert!(beta.shared.len() >= TURN_FACT_MIN_SHARED, "{beta:?}");
+        assert!(
+            hits.windows(2).all(|w| w[0].score >= w[1].score),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn turn_fact_hits_drop_terms_every_idea_carries() {
+        let (_tmp, conn) = turn_fixture();
+        let corpus = LexicalCorpus::load(&conn).unwrap();
+        let terms = turn_query_terms(&corpus, "Common words about frost, 42 and an orchard");
+        assert!(!terms.contains(&"common".to_string()), "{terms:?}");
+        assert!(!terms.contains(&"42".to_string()) && !terms.contains(&"an".to_string()));
+        assert!(terms.contains(&"frost".to_string()) && terms.contains(&"orchard".to_string()));
+        assert!(
+            turn_fact_hits(&conn, "alpha", "common words", 3)
+                .unwrap()
+                .is_empty(),
+            "no usable terms"
+        );
+    }
+
+    #[test]
+    fn turn_fact_hits_cap_at_the_limit_and_the_max() {
+        let (_tmp, conn) = turn_fixture();
+        assert_eq!(
+            turn_fact_hits(&conn, "alpha", "frost orchard pruning", 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            turn_fact_hits(&conn, "alpha", "frost orchard pruning", 99)
+                .unwrap()
+                .len()
+                <= TURN_FACT_MAX_HITS
+        );
+        assert!(turn_fact_hits(&conn, "nobody", "", 3).unwrap().is_empty());
     }
 }
