@@ -911,3 +911,56 @@ fn premise_wired_a_premise_sharing_only_a_plain_word_is_not_wired() {
     }
     assert_eq!(report.tally.get("premises_wired"), None);
 }
+
+const GENERIC_PLAN: &str = "- [ ] T1: Return `None` from `main` in `src`\n  touches: `src/parser.rs`\n  accept: `cargo test` → exit 0\n\
+- [ ] T2: Cache the `HashMap` and `tokenize_all`\n  touches: `src/cache.rs`\n  accept: `cargo test` → exit 0";
+
+#[test]
+fn premise_wired_generic_one_word_spans_do_not_wire() {
+    let (plan, report) = gate(
+        "## user\nBuild the parser.\n",
+        Answer {
+            verify:
+                "- P1: Lookups may be empty `None` or `main` or `src`\n  check: `grep -rn None`",
+            plan: GENERIC_PLAN,
+            ..Answer::default()
+        },
+    );
+    for t in &plan.tasks {
+        assert!(t.depends_premises().is_empty(), "{:?}", t.fields);
+    }
+    assert_eq!(report.tally.get("premises_wired"), None);
+}
+
+#[test]
+fn premise_wired_identifier_shaped_one_word_spans_wire() {
+    let (plan, _) = gate(
+        "## user\nBuild the parser.\n",
+        Answer {
+            verify: "- P1: A `HashMap` is fast enough\n  check: `grep -rn tokenize_all`",
+            plan: GENERIC_PLAN,
+            ..Answer::default()
+        },
+    );
+    let t2 = with_text(&plan.tasks, "Cache");
+    assert_eq!(t2.depends_premises(), ["P1"], "{:?}", t2.fields);
+    let t1 = with_text(&plan.tasks, "Return");
+    assert!(t1.depends_premises().is_empty(), "{:?}", t1.fields);
+}
+
+#[test]
+fn premise_wired_a_directory_level_check_path_does_not_wire() {
+    let (plan, report) = gate(
+        "## user\nBuild the parser.\n",
+        Answer {
+            verify: "- P1: The parser dir is clean\n  check: `grep -rnF tokenize src/parser`",
+            plan: "- [ ] T1: Write the parser\n  touches: `src/parser.rs`\n  accept: `cargo test` → exit 0\n\
+- [ ] T2: Tune the parser\n  touches: `src/parser/lex.rs`\n  accept: `cargo test` → exit 0",
+            ..Answer::default()
+        },
+    );
+    for t in &plan.tasks {
+        assert!(t.depends_premises().is_empty(), "{:?}", t.fields);
+    }
+    assert_eq!(report.tally.get("premises_wired"), None);
+}

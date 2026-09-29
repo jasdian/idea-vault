@@ -214,12 +214,34 @@ fn backticked_tokens(text: &str) -> Vec<String> {
                     .filter(|w| path_like(w))
                     .map(norm_path),
             );
-        } else if span.len() >= 3 && !span.starts_with('-') {
+        } else if span.len() >= 3 && !span.starts_with('-') && (path_like(span) || identifier(span))
+        {
             out.push(norm_path(span));
         }
     }
     out.retain(|t| !t.is_empty());
     out
+}
+
+/// Whether a one-word span is identifier-shaped: `a::b`, snake_case with `_`, or CamelCase.
+fn identifier(word: &str) -> bool {
+    let camel = word
+        .chars()
+        .zip(word.chars().skip(1))
+        .any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase())
+        || (word.starts_with(|c: char| c.is_ascii_uppercase())
+            && word.chars().filter(char::is_ascii_uppercase).count() >= 2
+            && word.chars().any(|c| c.is_ascii_lowercase()));
+    word.contains("::")
+        || (word.contains('_') && word.chars().any(|c| c.is_ascii_alphabetic()))
+        || camel
+}
+
+/// Whether a path names a file (its last segment has an extension) rather than a directory.
+fn file_level(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|last| path_like(last) && !last.contains('/'))
 }
 
 fn path_like(word: &str) -> bool {
@@ -233,12 +255,21 @@ fn path_like(word: &str) -> bool {
             }))
 }
 
+/// Whether two tokens name the same thing: equal, or two overlapping file-level paths.
 fn same_token(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b) || (a.contains('/') && b.contains('/') && paths_overlap(a, b))
+    a.eq_ignore_ascii_case(b)
+        || (a.contains('/')
+            && b.contains('/')
+            && file_level(a)
+            && file_level(b)
+            && paths_overlap(a, b))
 }
 
 /// Add each Verify-first `P#` to the `depends` of every task whose `touches` or backticked text
-/// names one of the premise's backticked or path tokens, so the task waits for its bootstrap check.
+/// names one of the premise's backticked or path tokens. The edge is advisory for waves:
+/// `derive_waves` follows only `T#` edges, and the `@plan.md` projection orders a wired `P#`
+/// through its T0 bootstrap row. A one-word span wires only when path-like or identifier-shaped,
+/// and a directory-level path never wires by overlap.
 fn wire_premises(plan: &mut BuildPlan, report: &mut GateReport) {
     let premises: Vec<(String, Vec<String>)> = plan
         .verify

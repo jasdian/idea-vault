@@ -366,6 +366,36 @@ async fn audit_cap_swarm_turn_counts_the_findings_left_out() {
 }
 
 #[tokio::test]
+async fn audit_cap_swarm_off_turn_reports_the_findings_left_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let items = |prefix: &str| {
+        (0..12)
+            .map(|i| format!("- {prefix}{i}a {prefix}{i}b {prefix}{i}c"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::Tokens(vec![items("p")]),
+            ChatScript::Tokens(vec![items("q")]),
+            ChatScript::Tokens(vec!["converged view".into()]),
+        ],
+    )
+    .await;
+    run_swarm_audited(&mock, tmp.path(), 1, &["premortem", "constraints"], false)
+        .await
+        .unwrap();
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("4 further findings left out (cap 20)"),
+        "{convo}"
+    );
+    assert!(!convo.contains("not audited"), "{convo}");
+}
+
+#[tokio::test]
 async fn angles_answered_names_the_angle_that_failed() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");

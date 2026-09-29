@@ -326,10 +326,20 @@ pub async fn audit(
 /// The code-owned line naming findings the cap kept out of synthesis when no audit ran; empty
 /// when nothing was left out.
 pub fn unaudited_cap_note(dropped: usize) -> String {
-    match dropped {
-        0 => String::new(),
-        1 => format!("\n\n_1 further finding left out (cap {MAX_AUDIT_FINDINGS})_"),
-        n => format!("\n\n_{n} further findings left out (cap {MAX_AUDIT_FINDINGS})_"),
+    if dropped == 0 {
+        return String::new();
+    }
+    format!(
+        "\n\n_{} left out (cap {MAX_AUDIT_FINDINGS})_",
+        further(dropped)
+    )
+}
+
+fn further(n: usize) -> String {
+    if n == 1 {
+        "1 further finding".to_string()
+    } else {
+        format!("{n} further findings")
     }
 }
 
@@ -337,7 +347,10 @@ pub fn unaudited_cap_note(dropped: usize) -> String {
 /// and every refuted finding with the auditor's reason — downgraded, never dropped.
 pub fn appendix(findings: &[Finding], report: &AuditReport, dropped: usize) -> String {
     let cap_note = if dropped > 0 {
-        format!("\n\n_{dropped} further findings not audited (cap {MAX_AUDIT_FINDINGS})_")
+        format!(
+            "\n\n_{} not audited (cap {MAX_AUDIT_FINDINGS})_",
+            further(dropped)
+        )
     } else {
         String::new()
     };
@@ -439,6 +452,44 @@ mod tests {
             vec!["alpha".to_string(), "beta".to_string()]
         );
         assert_eq!(dropped, 2);
+    }
+
+    #[test]
+    fn findings_from_does_not_count_a_duplicate_of_a_left_out_finding_again() {
+        let a = result(
+            "alpha",
+            AgentRole::Critic,
+            "- kept one two\n- left out three four",
+        );
+        let b = result("beta", AgentRole::Critic, "- left out three four");
+        let c = result("gamma", AgentRole::Critic, "- left out three four");
+        let (kept, dropped) = findings_from(&[&a, &b, &c], 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn the_cap_lines_agree_on_singular_and_plural() {
+        assert_eq!(unaudited_cap_note(0), "");
+        assert_eq!(
+            unaudited_cap_note(1),
+            "\n\n_1 further finding left out (cap 20)_"
+        );
+        assert_eq!(
+            unaudited_cap_note(3),
+            "\n\n_3 further findings left out (cap 20)_"
+        );
+        let report = AuditReport::all_uncertain(0, "x");
+        let one = appendix(&[], &report, 1);
+        assert!(
+            one.contains("_1 further finding not audited (cap 20)_"),
+            "{one}"
+        );
+        let many = appendix(&[], &report, 2);
+        assert!(
+            many.contains("_2 further findings not audited (cap 20)_"),
+            "{many}"
+        );
     }
 
     #[test]

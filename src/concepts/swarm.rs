@@ -286,10 +286,10 @@ pub async fn swarm(
             "swarm synthesizer returned empty output; nothing persisted"
         );
     } else {
-        let appendix = report
-            .as_ref()
-            .map(|r| audit::appendix(&findings, r, dropped))
-            .unwrap_or_default();
+        let appendix = match report.as_ref() {
+            Some(r) => audit::appendix(&findings, r, dropped),
+            None => audit::unaudited_cap_note(dropped),
+        };
         // append_turn owns the heading grammar and escapes embedded "## " lines (no forged
         // turn boundaries from model output). The heading names the angles (unique, in order).
         let mut named: Vec<&str> = Vec::new();
