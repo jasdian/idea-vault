@@ -1,14 +1,15 @@
 # 10 — Testing Strategy
 
-> How the design's invariants are protected by tests once code exists. This is a strategy, not a test
-> suite — it names *what* must be tested and *how*, keyed to the invariants the other docs establish.
-> No test code is written yet (docs-first); this is the contract the tests will satisfy.
+> How the design's invariants are protected by tests. It names *what* must be tested and *how*,
+> keyed to the invariants the other docs establish. The suite exists: in-crate `#[cfg(test)]`
+> modules, the integration binaries under `tests/` (sharing `tests/support/`), and the unit tests
+> of the `xidea_bench` example. `cargo test` runs all of them.
 
 ## What must be true (the invariants under test)
 
 | Invariant | Source | How tested |
 |-----------|--------|------------|
-| Index is fully reconstructable from `vault/**` | [ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md), [D15](./03-data-model.md) | property test (below) |
+| Index is fully reconstructable from `vault/**` | [ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md), [D15](./03-data-model.md) | keystone fixture test (below) |
 | State is canonical in frontmatter; re-derivable | [ADR-0007](./adr/0007-state-in-frontmatter-not-db.md), [D9](./04-state-machine.md) | golden-vault + reindex test |
 | `conversation.md` is append-only | [D9](./04-state-machine.md) | store/reopen never shrink the file |
 | Memory only grows/merges on re-store | [D9](./04-state-machine.md), [D12](./06-concepts/memory.md) | re-store dedupe test |
@@ -17,20 +18,28 @@
 | Slugs are unique + stable | [D22](./03-data-model.md) | collision + rename test |
 | `[[slug]]` backlinks resolve (incl. forward refs) | [D23](./06-concepts/memory.md) | reindex resolution test |
 
-## The keystone: reindex invariant (property test)
+## The keystone: reindex invariant (fixture test)
 
 The single most important test, protecting [ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md):
 
 ```text
-property: for any vault V,
-  reindex(V) == reindex(reindex(V))            # idempotent
-  and  drop(index); reindex(V)  ==  index(V)   # rebuildable from disk alone
+for the fixture vault V:
+  reindex(V) == reindex(reindex(V))                  # idempotent
+  and  reindex(V) on a fresh index  ==  index(V)     # rebuildable from disk alone
 ```
 
-Approach: generate randomized vaults (arbitrary ideas, states, tags, memory facts, `[[slug]]`
-links — including dangling and forward refs), reindex, snapshot the DB (normalized), reindex again,
-and assert equality. Then delete `index.db`, rebuild, and assert the same snapshot. Use the counts
-returned by `index::reindex` ([D15](./03-data-model.md)) as a first-line assertion.
+It is `index::reindex::tests::keystone_reindex_is_idempotent_and_rebuildable_from_disk_alone`, a
+deterministic fixture test, not a randomized property test (there is no proptest dependency).
+`build_fixture_vault` writes ideas in several states with tags, memory facts, and `[[slug]]` /
+`[[slug#fact]]` links, including dangling and forward refs. The test reindexes into an in-memory
+connection, snapshots the DB (normalized, id-free), reindexes again on the same connection and
+asserts equal counts from `index::reindex` ([D15](./03-data-model.md)) and an equal snapshot. It
+then reindexes into a fresh in-memory connection, standing in for a deleted `index.db`, and asserts
+the same snapshot. The snapshot covers every derived table: ideas, tags, memory facts, backlinks,
+`fact_links`, `edges` and the FTS rows.
+
+`tests/golden_vault.rs` re-asserts the keystone against the checked-in `tests/fixtures/golden-vault`
+and compares its ideas, tags, memory facts, backlinks and FTS rows with `golden-vault.snap`.
 
 ## Layered tests
 
@@ -38,7 +47,7 @@ returned by `index::reindex` ([D15](./03-data-model.md)) as a first-line asserti
   frontmatter round-trip (D8), `IdeaState` ↔ serialized string mapping, `[[slug]]` parsing.
 - **Storage (`vault`)** — against a temp dir: create/read/write `idea.md`, append-only
   `conversation.md`, memory file emit + `MEMORY.md` rebuild. Assert truth-first write order.
-- **Index (`index`)** — the reindex property test above, plus query correctness (FTS search, tag
+- **Index (`index`)** — the keystone reindex test above, plus query correctness (FTS search, tag
   filter, backlink both-directions) on fixture vaults.
 - **AI (`ai`) with a mock Ollama** — a stub HTTP server standing in for `:11434`:
   - the model call (D11) returns a complete reply that the caller persists only on success — no
@@ -82,6 +91,6 @@ returned by `index::reindex` ([D15](./03-data-model.md)) as a first-line asserti
 
 ## Related
 
-- [03-data-model](./03-data-model.md) — D15 and the truth/derived contract the property test guards.
+- [03-data-model](./03-data-model.md) — D15 and the truth/derived contract the keystone test guards.
 - [05-ai-integration](./05-ai-integration.md) — D20/D24 behaviors the AI tests assert.
 - [06-concepts/swarm](./06-concepts/swarm.md) — D21 limits the concurrency test enforces.
