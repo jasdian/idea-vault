@@ -370,12 +370,26 @@ fn read_only(check: &str) -> bool {
         })
 }
 
-// Separators and `>` inside single or double quotes are data; an unquoted `>` is a write.
+// Separators and `>` inside quotes are data; an unquoted `>`, an unclosed quote, or a command
+// substitution outside single quotes makes the check not read-only.
 fn unquoted_segments(command: &str) -> Option<Vec<String>> {
     let mut out = vec![String::new()];
     let mut quote: Option<char> = None;
-    for ch in command.chars() {
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
         match (quote, ch) {
+            (Some('\''), '\'') => quote = None,
+            (Some('\''), _) => {}
+            (_, '\\') => {
+                out.last_mut().expect("seeded").push(ch);
+                if let Some(next) = chars.next() {
+                    out.last_mut().expect("seeded").push(next);
+                }
+                continue;
+            }
+            // Command substitution still runs outside single quotes.
+            (_, '`') => return None,
+            (_, '$') if chars.peek() == Some(&'(') => return None,
             (Some(q), c) if c == q => quote = None,
             (None, '\'' | '"') => quote = Some(ch),
             (None, '>') => return None,
@@ -387,7 +401,7 @@ fn unquoted_segments(command: &str) -> Option<Vec<String>> {
         }
         out.last_mut().expect("seeded").push(ch);
     }
-    Some(out)
+    quote.is_none().then_some(out)
 }
 
 fn runnable_accept(accept: &str) -> bool {
@@ -997,6 +1011,9 @@ mod tests {
             "`ls && lsof`",
             "`grep 'x' f | xargs touch`",
             "`grep \"a|b\" f > out`",
+            "`grep \\\"x f | xargs touch y`",
+            "`grep 'x f | xargs touch y`",
+            "`grep \"$(touch y; ls)\" f`",
         ]
         .iter()
         .enumerate()
@@ -1020,10 +1037,11 @@ mod tests {
                 .push(item(&format!("Q{n}"), "Check", &[("check", check)]));
         }
         run(&mut plan);
-        for p in &plan.verify[..7] {
+        let writes = plan.verify.iter().filter(|i| i.id.starts_with('P')).count();
+        for p in &plan.verify[..writes] {
             assert!(has_marker(p, "check is not read-only"), "{p:?}");
         }
-        for q in &plan.verify[7..] {
+        for q in &plan.verify[writes..] {
             assert!(q.markers.is_empty(), "{q:?}");
         }
     }
