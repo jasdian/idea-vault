@@ -10,22 +10,39 @@ avoid_when: "No attack move has run yet — you would be handing an untested ide
 
 Fold the ENTIRE discussion below into a BUILD PLAN a coding agent can execute. Extract what was settled; do not transcribe the chat.
 
-Answer ONLY with these sections, in this order:
-## Goal — one sentence naming the deliverable.
-## Settled — decisions already made: S1: <claim>, then quote: "<verbatim words from the discussion>". Only quote words actually said; a claim with no such words belongs in Open questions.
-## Verify first — premises to confirm before building: P1: <premise>, then check: `<read-only command>`.
-## Open questions — Q1: <question only the owner can answer>.
-## Plan — ordered tasks: - [ ] T1: <task>, then depends: T…, touches: `<path>`, accept: `<command>` → <expected result>.
-## Kill criteria — K1: <result that stops the build>, then checked by: T… and gates: T….
-## Fence (optional) — what must not be touched.
-Backtick every tool, file and command. Write "- none" under an empty section.
+Answer ONLY with these sections in this order. Each heading sits alone on its line; its content starts on the next line. Write one field per line, never joined with a dot or comma. Backtick every path and command. Write "- none" under an empty section.
+## Goal
+One sentence naming the deliverable.
+## Settled
+S1: a decision already made, then on the next line quote: a verbatim 5-12 word span from a user turn. No such words means it belongs in Open questions.
+## Verify first
+Optional. P1: a premise to confirm first, then check: a read-only command.
+## Open questions
+Q1: a question only the owner can answer, including any unsettled approach.
+## Plan
+- [ ] T1: one commit subject, then one line each for depends: (T# or none), touches: (paths, "(new)" after a new file), accept: (`one command` → pass condition, with a passed count when tests are named).
+## Kill criteria
+Optional. K1: a result that stops the build, then checked by: T#.
+
+Leaf rule: a task title is one commit subject with no "and"; a task is one diff under one top-level directory with at most 3 non-test files. At most 8 tasks.
 
 Example:
+## Goal
+Add a reindex command.
 ## Settled
 - S1: Markdown stays the source of truth.
-  quote: "the index is only a cache"
+  quote: "the index is only a cache we can rebuild"
+## Open questions
+- Q1: Should reindex run on boot?
 ## Plan
 - [ ] T1: Add the reindex command
-  depends: none · touches: `src/index.rs`
-  accept: `cargo test reindex` → exit 0
+  depends: none
+  touches: `src/index/reindex.rs` (new)
+  accept: `cargo test reindex` → exit 0, 3 passed
+- [ ] T2: Document the reindex command
+  depends: T1
+  touches: `docs/index.md`
+  accept: `grep -c reindex docs/index.md` → 1 or more
+
+Discussion:
 {context}

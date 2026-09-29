@@ -772,6 +772,71 @@ Run the cheapest disproof before any Rust exists.
   checked by: T2
   gates: T3";
 
+    const TEMPLATE: &str = include_str!("../skills/build-prompt.md");
+
+    const SECTION_NAMES: [&str; 6] = [
+        "Goal",
+        "Settled",
+        "Verify first",
+        "Open questions",
+        "Plan",
+        "Kill criteria",
+    ];
+
+    fn template_body() -> &'static str {
+        TEMPLATE.splitn(3, "---\n").nth(2).unwrap_or(TEMPLATE)
+    }
+
+    fn template_example() -> &'static str {
+        let after = template_body().split("\nExample:\n").nth(1).unwrap_or("");
+        let end = after
+            .find("\nDiscussion:")
+            .or_else(|| after.find("{context}"))
+            .unwrap_or(after.len());
+        &after[..end]
+    }
+
+    #[test]
+    fn template_example_round_trips_every_field() {
+        let plan = parse(template_example()).expect("the template example must parse");
+        assert_eq!(plan.missing, ["## Verify first", "## Kill criteria"]);
+        assert!(!plan.goal.is_empty(), "the example's goal was lost");
+        assert!(plan.settled.iter().all(|s| s.field("quote").is_some()));
+        assert!(!plan.open.is_empty());
+        assert!(plan.tasks.len() >= 2);
+        for task in &plan.tasks {
+            assert!(!task.list("touches").is_empty(), "{} lost touches", task.id);
+            assert!(task.field("accept").is_some(), "{} lost accept", task.id);
+            assert!(
+                task.fields.contains_key("depends"),
+                "{} lost depends",
+                task.id
+            );
+        }
+        assert_eq!(plan.tasks[1].list("depends"), ["T1"]);
+    }
+
+    #[test]
+    fn template_headings_stand_alone() {
+        for line in template_body().lines().filter(|l| l.starts_with("## ")) {
+            let name = line.trim_start_matches("## ");
+            assert!(
+                SECTION_NAMES.contains(&name),
+                "heading with extra text: {line:?}"
+            );
+        }
+        assert!(template_body().contains("\n## Goal\n"));
+    }
+
+    #[test]
+    fn template_stays_under_its_byte_cap() {
+        let bytes = template_body().len();
+        assert!(
+            bytes <= 1800,
+            "template body is {bytes} bytes; the cap is 1800"
+        );
+    }
+
     #[test]
     fn parse_reads_the_line_grammar() {
         let plan = parse(PLAN).unwrap();
