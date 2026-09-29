@@ -85,7 +85,10 @@ impl IntoResponse for WebError {
                 format!("bad request: unknown skill/workflow: {name}"),
             )
                 .into_response(),
-            WebError::Concept(e @ crate::concepts::ConceptError::PlanUnusable) => {
+            WebError::Concept(
+                e @ (crate::concepts::ConceptError::PlanUnusable
+                | crate::concepts::ConceptError::NothingHarvested),
+            ) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response()
             }
             WebError::Ai(_)

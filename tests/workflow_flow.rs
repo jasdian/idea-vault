@@ -638,10 +638,26 @@ async fn an_empty_harvest_fails_the_same_way_with_the_audit_on_or_off() {
 }
 
 #[tokio::test]
+async fn ready_to_build_mode_empty_harvest_answers_422_with_the_owner_hint() {
+    use axum::response::IntoResponse;
+    let (_, err, _, _) = empty_harvest_run(true).await;
+    let response = idea_vault::web::WebError::from(err).into_response();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&body), NOTHING_HARVESTED);
+}
+
+#[tokio::test]
 async fn ready_to_build_mode_errors_when_every_harvester_failed() {
     for audit in [true, false] {
         let (_, err, convo, artifacts) = empty_harvest_run(audit).await;
-        assert!(err.to_string().contains(NOTHING_HARVESTED), "{err}");
+        assert!(matches!(err, ConceptError::NothingHarvested), "{err:?}");
+        assert_eq!(err.to_string(), NOTHING_HARVESTED);
         assert!(!convo.contains("Build plan"), "nothing persisted: {convo}");
         assert_eq!(artifacts, 0);
     }
@@ -709,6 +725,74 @@ async fn ready_to_build_preamble_maps_verdicts_to_sections() {
         let line = preamble.lines().find(|l| l.starts_with(lead)).unwrap();
         assert!(line.contains(needle), "{lead} line lacks {needle}: {line}");
     }
+}
+
+#[tokio::test]
+async fn ready_to_build_preamble_routes_an_unaudited_finding_by_kind() {
+    let chain = chained_step_body("I cannot judge these.").await;
+    let pre = chain.find(PREAMBLE_HEADING).unwrap();
+    let findings = chain.find("## Prior stage: findings").unwrap();
+    let preamble = &chain[pre..findings];
+    let line = preamble
+        .lines()
+        .find(|l| l.starts_with("- A finding with no verdict label"))
+        .unwrap();
+    assert!(
+        line.contains("next action becomes a task candidate marked unchecked")
+            && line.contains("verbatim owner quote"),
+        "{line}"
+    );
+    assert!(!line.contains("unchecked: treat it as UNCERTAIN"), "{line}");
+    let uncertain = preamble
+        .lines()
+        .find(|l| l.starts_with("- An UNCERTAIN"))
+        .unwrap();
+    assert!(!uncertain.contains("fact"), "{uncertain}");
+    let fact = preamble
+        .lines()
+        .find(|l| l.starts_with("- A fact"))
+        .unwrap();
+    assert!(fact.contains("whatever its verdict"), "{fact}");
+}
+
+#[tokio::test]
+async fn ready_to_build_mode_audit_off_leaves_next_actions_as_task_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mut scripts: Vec<ChatScript> = [
+        "- Ship solo first",
+        "- Agencies pay monthly",
+        "",
+        "- risk: churn",
+        "- Call three agencies",
+    ]
+    .iter()
+    .map(|h| tokens(h))
+    .collect();
+    scripts.push(tokens(PLAN));
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    run(&mock, tmp.path(), "ready-to-build", false).await;
+    let chain = mock.chat_bodies().pop().unwrap().replace("\\n", "\n");
+    let line = findings_block_of(&chain)
+        .lines()
+        .find(|l| l.contains("Call three agencies"))
+        .unwrap();
+    assert!(line.starts_with("- next action · "), "{line}");
+    assert!(
+        !line.contains('['),
+        "an unaudited line has no verdict: {line}"
+    );
+    let pre = chain.find(PREAMBLE_HEADING).unwrap();
+    let findings = chain.find("## Prior stage: findings").unwrap();
+    assert!(
+        chain[pre..findings].contains("no verdict label was not audited"),
+        "the preamble routes unlabelled findings by kind"
+    );
+    let convo = store::read_conversation(tmp.path(), "i").unwrap();
+    assert!(
+        convo.contains("audit skipped (audit off in Settings)"),
+        "{convo}"
+    );
 }
 
 #[tokio::test]
@@ -861,7 +945,7 @@ async fn ready_to_build_preamble_keeps_the_whole_preamble_at_a_tiny_budget() {
     let pre = chain.find(PREAMBLE_HEADING).unwrap();
     let findings = chain.find("## Prior stage: findings").unwrap();
     assert!(
-        chain[pre..findings].contains("treat it as UNCERTAIN."),
+        chain[pre..findings].contains("next action becomes a task candidate marked unchecked."),
         "the preamble is never clipped"
     );
     let block = findings_block_of(&chain);

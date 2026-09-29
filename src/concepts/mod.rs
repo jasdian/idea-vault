@@ -30,6 +30,10 @@ pub enum ConceptError {
     /// (degrade-don't-abort stops at the point where there is no signal left, D14).
     #[error("swarm produced no usable agent results to synthesize")]
     NothingToSynthesize,
+    /// A build-plan workflow's every harvester failed, so the planner has no findings to fold
+    /// (docs/adr/0030); nothing was persisted.
+    #[error("harvest produced nothing; use the quick build prompt")]
+    NothingHarvested,
     /// The planner's answer named neither a goal nor a task, so no build plan was persisted
     /// (docs/adr/0030).
     #[error("the model's answer had neither a goal nor a task — nothing was saved; try again")]

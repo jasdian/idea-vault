@@ -15,13 +15,14 @@ use std::path::Path;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::{related_allowance, ContextBudget};
-use crate::ai::AiError;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{build_prompt, AgentResult, AgentRole, AgentTask};
 use crate::concepts::audit::{self, AuditReport, Finding};
-use crate::concepts::build_plan::finish::{finish_as, Finished, PlanInputs, PlanMode};
+use crate::concepts::build_plan::finish::PlanMode;
 use crate::concepts::build_plan::gates::AuditView;
-use crate::concepts::skills::{ask_on_contract, hydrate_context, RelatedProvider, SkillRegistry};
+use crate::concepts::skills::{
+    ask_on_contract, hydrate_context, persist_plan, RelatedProvider, SkillRegistry,
+};
 use crate::concepts::swarm::{fan_out, judge, synthesize};
 use crate::concepts::ConceptError;
 use crate::domain::OutputContract;
@@ -164,9 +165,9 @@ Each finding line starts with its kind (decision, open question, risk, next acti
 - An open question that is not REFUTED goes to Open questions (Q#).\n\
 - A risk that is not REFUTED goes to Verify first (P# with a read-only check) or to Kill criteria (K#).\n\
 - A CONFIRMED next action becomes a task candidate, keeping any paths or commands it named.\n\
-- An UNCERTAIN decision, next action or fact goes to Open questions (Q#).\n\
-- A fact is background only, never a task.\n\
-- A finding with no verdict label is unchecked: treat it as UNCERTAIN.";
+- An UNCERTAIN decision or next action goes to Open questions (Q#).\n\
+- A fact is background only, whatever its verdict: never a task, never Settled.\n\
+- A finding with no verdict label was not audited, so do not treat it as UNCERTAIN. Route it by kind: a decision is Settled only with a verbatim owner quote, otherwise it goes to Open questions (Q#); a next action becomes a task candidate marked unchecked.";
 
 /// Divisor of the stage budget the planner's preamble and findings block may take together, so
 /// quotable discussion survives. The cap holds only while `budget / divisor` covers the preamble,
@@ -333,55 +334,6 @@ fn discussion_turns(vault_dir: &Path, idea_slug: &str) -> Result<usize, ConceptE
 /// Why the plan's mode label says the audit was skipped when the Settings toggle is off.
 const AUDIT_OFF_REASON: &str = "audit off in Settings";
 
-/// The error text of a build-plan workflow whose every harvester failed.
-const NOTHING_HARVESTED: &str = "harvest produced nothing; use the quick build prompt";
-
-/// Gate and persist the planner's answer on the blocking pool, labelled as the multi-step
-/// pipeline; no permit is held.
-async fn persist_ready_to_build(
-    llm: &LlmBackend,
-    vault_dir: &Path,
-    idea_slug: &str,
-    answer: String,
-    workflow: &str,
-    audit: Option<AuditView>,
-    skipped: Option<&str>,
-) -> Result<Finished, ConceptError> {
-    let vault_dir = vault_dir.to_path_buf();
-    let idea_slug = idea_slug.to_string();
-    let turn_role = format!("assistant (workflow: {workflow})");
-    let lens = workflow.to_string();
-    let skipped = skipped.map(str::to_string);
-    let model = llm.model();
-    let probe = llm.source_probe();
-    let joined = tokio::task::spawn_blocking(move || {
-        finish_as(
-            PlanInputs {
-                vault_dir: &vault_dir,
-                idea_slug: &idea_slug,
-                answer: &answer,
-                turn_role: &turn_role,
-                lens: &lens,
-                model,
-                audit: audit.as_ref(),
-                probe: &probe,
-                now: chrono::Utc::now(),
-            },
-            PlanMode::ReadyToBuild {
-                skipped: skipped.as_deref(),
-            },
-        )
-    })
-    .await;
-    match joined {
-        Ok(result) => result,
-        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-        Err(e) => Err(ConceptError::Vault(crate::vault::VaultError::Io(
-            std::io::Error::other(format!("build-plan task did not finish: {e}")),
-        ))),
-    }
-}
-
 /// Run a named workflow against `idea_slug` (D19/D32): execute its stages in order, holding no
 /// semaphore permit of its own (every model call takes one), and append the final stage's output
 /// — plus the audit appendix, if an audit ran — as one assistant turn. Deterministic control
@@ -391,14 +343,15 @@ async fn persist_ready_to_build(
 /// per such stage against that stage's own leftover budget; audit and synthesis stages never see
 /// it.
 ///
-/// A build-plan workflow whose every harvester failed errors with nothing persisted, pointing at
-/// the quick build prompt; the plan's mode label names an audit that was skipped or failed and an
+/// A build-plan workflow whose every harvester failed errors with
+/// [`ConceptError::NothingHarvested`] and nothing persisted; the plan's mode label names an audit that was skipped or failed and an
 /// audit that confirmed everything.
 ///
 /// Degradation: failed fan-out agents are skipped; a failed middle chained step is skipped with
 /// nothing carried forward; a failed final stage, or a fan-out with no usable result before an
 /// synthesis, fails the run with nothing persisted; an empty harvest skips the audit without a
-/// model call, exactly as when the audit is off.
+/// model call, exactly as when the audit is off, unless the final stage is the build-plan planner,
+/// which errors with [`ConceptError::NothingHarvested`] instead.
 ///
 /// A workflow whose last stage chains a [`OutputContract::BuildPlan`] skill persists through the
 /// build-plan gates instead: the audited harvest (when the audit ran) is carried into them, the
@@ -472,7 +425,7 @@ pub async fn run_workflow(
                         findings = gather(&step_results).ok();
                     }
                     if planner && findings.is_none() {
-                        return Err(ConceptError::Ai(AiError::Backend(NOTHING_HARVESTED.into())));
+                        return Err(ConceptError::NothingHarvested);
                     }
                     if let Some(f) = &findings {
                         carried.extend(findings_carry(f, report.as_ref(), budget, planner));
@@ -581,14 +534,14 @@ pub async fn run_workflow(
             _ => None,
         };
         let skipped = (!audit_findings).then_some(AUDIT_OFF_REASON);
-        let finished = persist_ready_to_build(
+        let finished = persist_plan(
             &ollama.for_role(role.as_str()),
             vault_dir,
             idea_slug,
             output,
             workflow.name,
             audit,
-            skipped,
+            PlanMode::ReadyToBuild { skipped },
         )
         .await?;
         output = finished.pointer;

@@ -862,6 +862,57 @@ async fn audited_plan_pointer_names_the_workflow() {
     );
 }
 
+#[tokio::test]
+async fn both_persist_callers_share_one_gated_path() {
+    let (quick_dir, _mock, quick) = quick_plan(&[PLANNER_ANSWER]).await;
+    quick.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let mut scripts = vec![support::ChatScript::Tokens(vec!["- Ship solo first".to_string()]); 5];
+    scripts.push(support::ChatScript::Tokens(
+        vec![PLANNER_ANSWER.to_string()],
+    ));
+    let mock = support::spawn_sequence(&["llama3.2"], scripts).await;
+    idea_vault::concepts::workflows::run_workflow(
+        &mock_backend(&mock),
+        &tokio::sync::Semaphore::new(1),
+        &idea_vault::concepts::skills::SkillRegistry::builtin(),
+        dir.path(),
+        SLUG,
+        "ready-to-build",
+        idea_vault::ai::budget::ContextBudget::new(8192),
+        false,
+        &|_| String::new(),
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+    let quick_plan = plan_artifacts(quick_dir.path()).remove(0);
+    let flow_plan = plan_artifacts(dir.path()).remove(0);
+    assert_eq!(quick_plan.frontmatter.lens.as_deref(), Some("build-prompt"));
+    assert_eq!(
+        flow_plan.frontmatter.lens.as_deref(),
+        Some("ready-to-build")
+    );
+    assert!(quick_plan.body.contains("_quick · unaudited · llama3.2"));
+    assert!(flow_plan
+        .body
+        .contains("_ready-to-build · audit skipped (audit off in Settings) · llama3.2"));
+    let tail = |d: &Path| {
+        store::split_turns(&store::read_conversation(d, SLUG).unwrap())
+            .pop()
+            .unwrap()
+    };
+    assert!(tail(quick_dir.path()).starts_with("## assistant (skill: build-prompt)\n"));
+    assert!(tail(dir.path()).starts_with("## assistant (workflow: ready-to-build)\n"));
+    let goal = |b: &str| b.split("## Settled").next().unwrap().to_string();
+    assert_eq!(
+        goal(&quick_plan.body).lines().skip(2).collect::<Vec<_>>(),
+        goal(&flow_plan.body).lines().skip(2).collect::<Vec<_>>(),
+        "the same answer is gated identically on both paths"
+    );
+}
+
 #[test]
 fn an_unusable_plan_answers_422_with_the_retry_hint() {
     use axum::response::IntoResponse;

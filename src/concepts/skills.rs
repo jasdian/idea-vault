@@ -15,7 +15,7 @@ use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::AgentRole;
 use crate::concepts::build_plan;
-use crate::concepts::build_plan::finish::{finish, Finished, PlanInputs};
+use crate::concepts::build_plan::finish::{finish_as, Finished, PlanInputs, PlanMode};
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::ConceptError;
 use crate::domain::frontmatter::parse_skill;
@@ -400,6 +400,7 @@ fn plan_score(answer: &str) -> Option<(usize, usize)> {
     Some((plan.tasks.len(), plan.settled.len()))
 }
 
+/// Whether a [`plan_score`] holds at least one task.
 fn plan_usable(score: Option<(usize, usize)>) -> bool {
     score.is_some_and(|(tasks, _)| tasks >= 1)
 }
@@ -409,8 +410,7 @@ fn plan_usable(score: Option<(usize, usize)>) -> bool {
 /// retry still misses (or fails), the best answer is kept and a warning logged: a wrong-shaped
 /// answer beats none. For [`OutputContract::BuildPlan`] a validated answer with no parsed task also
 /// counts as a violation; the first answer is then kept only on a strictly higher
-/// (tasks, settled) score, a tie goes to the retry, and a retry with no task is not accepted as
-/// usable. Used by single interactive skill calls and by a workflow's chained step;
+/// (tasks, settled) score and a tie goes to the retry. Used by single interactive skill calls and by a workflow's chained step;
 /// fan-out agents never retry (`agents::run_agent` repairs only). Callers must NOT hold a permit.
 pub(crate) async fn ask_on_contract(
     llm: &LlmBackend,
@@ -443,17 +443,14 @@ pub(crate) async fn ask_on_contract(
     progress(&format!("{label} · reshaping the answer"));
     tracing::info!(label, %violation, "contract violated; retrying once");
     let retried = ask(format!("{prompt}{}", contract::retry_note(&violation))).await;
-    let first_wins = |second: &str| first_score.is_some_and(|first| first > plan_score(second));
+    let first_wins = |second: &str| first_score.is_some_and(|before| before > plan_score(second));
     let outcome = retried.as_deref().map(|r| contract::validate(contract, r));
     if let Ok(Ok(repaired)) = &outcome {
-        let usable = !plan_contract || plan_usable(plan_score(repaired));
-        if usable {
-            return Ok(if first_wins(repaired) {
-                first.trim().to_string()
-            } else {
-                repaired.clone()
-            });
-        }
+        return Ok(if first_wins(repaired) {
+            first.trim().to_string()
+        } else {
+            repaired.clone()
+        });
     }
     tracing::warn!(
         label,
@@ -470,35 +467,55 @@ pub(crate) async fn ask_on_contract(
 }
 
 /// Gate a planner's answer and persist it as a build-plan artifact plus a pointer turn
-/// ([`finish`](crate::concepts::build_plan::finish::finish)) on the blocking pool. Called after the
-/// model call returned, so no permit is held; the probe and model label come from `llm`, the
-/// turn- and role-scoped backend that produced `answer`.
+/// ([`finish_as`]) on the blocking pool. Called after the model call returned, so no permit is
+/// held; the probe and model label come from `llm`, the turn- and role-scoped backend that
+/// produced `answer`. `lens` names the skill (quick) or workflow (ready-to-build) that ran, and
+/// with `mode` decides the pointer turn's role.
 pub(crate) async fn persist_plan(
     llm: &LlmBackend,
     vault_dir: &Path,
     idea_slug: &str,
     answer: String,
-    turn_role: String,
     lens: &str,
     audit: Option<AuditView>,
+    mode: PlanMode<'_>,
 ) -> Result<Finished, ConceptError> {
     let vault_dir = vault_dir.to_path_buf();
     let idea_slug = idea_slug.to_string();
+    let turn_role = match mode {
+        PlanMode::Quick => format!("assistant (skill: {lens})"),
+        PlanMode::ReadyToBuild { .. } => format!("assistant (workflow: {lens})"),
+    };
     let lens = lens.to_string();
+    let skipped = match mode {
+        PlanMode::ReadyToBuild { skipped } => skipped.map(str::to_string),
+        PlanMode::Quick => None,
+    };
+    let quick = mode == PlanMode::Quick;
     let model = llm.model();
     let probe = llm.source_probe();
     let joined = tokio::task::spawn_blocking(move || {
-        finish(PlanInputs {
-            vault_dir: &vault_dir,
-            idea_slug: &idea_slug,
-            answer: &answer,
-            turn_role: &turn_role,
-            lens: &lens,
-            model,
-            audit: audit.as_ref(),
-            probe: &probe,
-            now: Utc::now(),
-        })
+        let mode = if quick {
+            PlanMode::Quick
+        } else {
+            PlanMode::ReadyToBuild {
+                skipped: skipped.as_deref(),
+            }
+        };
+        finish_as(
+            PlanInputs {
+                vault_dir: &vault_dir,
+                idea_slug: &idea_slug,
+                answer: &answer,
+                turn_role: &turn_role,
+                lens: &lens,
+                model,
+                audit: audit.as_ref(),
+                probe: &probe,
+                now: Utc::now(),
+            },
+            mode,
+        )
     })
     .await;
     match joined {
@@ -557,9 +574,9 @@ pub async fn invoke(
             vault_dir,
             idea_slug,
             output,
-            format!("assistant (skill: {})", skill.name),
             &skill.name,
             None,
+            PlanMode::Quick,
         )
         .await?;
         return Ok(finished.pointer);
