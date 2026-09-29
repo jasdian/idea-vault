@@ -269,8 +269,15 @@ fn accept_condition(accept: &str) -> &str {
     accept.splitn(3, '`').nth(2).unwrap_or_default()
 }
 
-/// L3: the command chains or pipes outside quotes, or a later backticked span is a command with
-/// its own arrow; a span after an arrow is expected output (`test result: ok. 3 passed`).
+/// Words that, right after a backticked command, say it is run and judged on its own.
+const RESULT_VERBS: &[&str] = &[
+    "exit", "exits", "pass", "passes", "return", "returns", "succeed", "succeeds", "print",
+    "prints", "fail", "fails", "output", "outputs",
+];
+
+/// L3: the command chains or pipes outside quotes, or a later backticked span is a command
+/// followed by its own arrow or a result verb (`exits 0`); a span that is merely printed is
+/// expected output (`test result: ok. 3 passed`).
 fn is_compound(accept: &str, command: &str) -> bool {
     if chains_unquoted(command) {
         return true;
@@ -284,10 +291,13 @@ fn is_compound(accept: &str, command: &str) -> bool {
         .any(|(i, span)| {
             let span = span.to_lowercase();
             let after = parts.get(i + 1).map_or("", |t| t.trim_start());
+            let verb = words(&after.to_lowercase())
+                .next()
+                .is_some_and(|w| RESULT_VERBS.contains(&w));
             unprefixed(&span)
                 .first()
                 .is_some_and(|w| COMMAND_STARTS.contains(w))
-                && (after.starts_with('→') || after.starts_with("->"))
+                && (after.starts_with('→') || after.starts_with("->") || verb)
         })
 }
 
@@ -455,5 +465,9 @@ mod tests {
         assert!(!is_compound(accept, &accept_command(accept)));
         let accept = "`cargo test a` → prints `ok`, 2 passed";
         assert!(!is_compound(accept, &accept_command(accept)));
+        let accept = "`cargo test a` → 2 passed, and `cargo clippy --all` exits 0";
+        assert!(is_compound(accept, &accept_command(accept)));
+        let accept = "`cargo test a` → 2 passed, then `test -f out.txt` succeeds";
+        assert!(is_compound(accept, &accept_command(accept)));
     }
 }

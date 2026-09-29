@@ -602,6 +602,47 @@ fn leaf_gate_expected_output_in_backticks_is_not_a_second_command() {
 }
 
 #[test]
+fn leaf_gate_a_second_command_judged_by_a_result_verb_is_compound() {
+    let plan_section = [
+        task(
+            "T1",
+            "Add the parser",
+            &[
+                ("touches", "`src/a.rs`"),
+                (
+                    "accept",
+                    "`cargo test a` → 2 passed, and `cargo clippy --all` exits 0",
+                ),
+            ],
+        ),
+        task(
+            "T2",
+            "Add the reader",
+            &[
+                ("touches", "`src/b.rs`"),
+                (
+                    "accept",
+                    "`cargo test x` → exit 0, prints `test result: ok. 3 passed`",
+                ),
+            ],
+        ),
+        filler(),
+    ]
+    .concat();
+    let (plan, _) = gate_plan(&plan_section);
+    assert!(
+        marked(by_id(&plan, "T1"), COMPOUND_ACCEPT),
+        "a command followed by `exits 0` is a second command: {:?}",
+        by_id(&plan, "T1")
+    );
+    assert!(
+        !marked(by_id(&plan, "T2"), COMPOUND_ACCEPT),
+        "{:?}",
+        by_id(&plan, "T2")
+    );
+}
+
+#[test]
 fn leaf_gate_an_env_prefixed_runner_is_a_test_runner() {
     let plan_section = [
         task(
