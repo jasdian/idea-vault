@@ -462,34 +462,115 @@ const RUNNERS: &[&str] = &[
     "docker compose",
 ];
 
-const PROSE_SECOND_WORDS: &[&str] = &[
-    "sure", "to", "the", "a", "an", "it", "that", "this", "your", "you",
+const GO_SUBCOMMANDS: &[&str] = &[
+    "test", "build", "run", "vet", "fmt", "mod", "generate", "install", "get", "list",
 ];
 
-/// An accept that opens with a known runner command and carries `→`/`->` and a condition, but no
-/// backticks, as the backticked form. Anything else is left for the runnable-accept gate.
+const MAKE_TARGETS: &[&str] = &[
+    "test", "check", "build", "lint", "fmt", "all", "clean", "ci", "install", "run", "dev",
+];
+
+const PROSE_WORDS: &[&str] = &[
+    "the", "is", "are", "should", "then", "that", "it", "this", "you", "your",
+];
+
+const COMMAND_WORDS: usize = 12;
+
+// Quote-aware scan: the byte offset of the first `→`/`->` outside quotes, or None when there is
+// none or a quote is left open.
+fn unquoted_arrow(text: &str) -> Option<(usize, usize)> {
+    let mut quote: Option<char> = None;
+    let mut found = None;
+    for (at, ch) in text.char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '→') if found.is_none() => found = Some((at, '→'.len_utf8())),
+            (None, '-') if found.is_none() && text[at..].starts_with("->") => {
+                found = Some((at, 2));
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    found
+}
+
+fn without_quoted(text: &str) -> String {
+    let mut quote: Option<char> = None;
+    let mut out = String::new();
+    for ch in text.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(ch),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn target_shaped(token: &str) -> bool {
+    token.starts_with('-') || token.contains(['-', '_', '.', '/', ':', '='])
+}
+
+// A word closed by sentence punctuation after a letter or digit; `./...` and `--` are paths.
+fn sentence_end(token: &str) -> bool {
+    let mut rev = token.chars().rev();
+    rev.next()
+        .is_some_and(|c| matches!(c, '.' | '!' | '?' | ',' | ';'))
+        && rev.next().is_some_and(char::is_alphanumeric)
+}
+
+fn command_shaped(command: &str, runner: &str) -> bool {
+    let bare = without_quoted(command);
+    let tokens: Vec<&str> = bare.split_whitespace().collect();
+    if command.split_whitespace().count() > COMMAND_WORDS
+        || tokens.iter().any(|t| sentence_end(t))
+        || tokens
+            .iter()
+            .any(|t| PROSE_WORDS.contains(&t.to_lowercase().as_str()))
+    {
+        return false;
+    }
+    let subs = match runner {
+        "go" => GO_SUBCOMMANDS,
+        "make" | "just" => MAKE_TARGETS,
+        _ => return true,
+    };
+    let mut rest = tokens.iter().skip(runner.split_whitespace().count());
+    let first_ok = rest
+        .next()
+        .is_some_and(|t| subs.contains(t) || target_shaped(t));
+    first_ok
+        && rest
+            .all(|t| target_shaped(t) || t.chars().any(|c| c.is_uppercase() || c.is_ascii_digit()))
+}
+
+/// An accept that opens with a known runner command and carries `→`/`->` (outside quotes) and a
+/// condition, but no backticks, as the backticked form. Anything that is not command-shaped, and
+/// any destructive command, is left for the runnable-accept and destructive gates.
 fn repaired_accept(accept: &str) -> Option<String> {
     let text = accept.trim();
-    if text.contains('`') {
+    if text.contains('`') || is_destructive(text) {
         return None;
     }
     let runner = RUNNERS.iter().find(|r| {
         text.strip_prefix(**r)
             .is_some_and(|rest| rest.starts_with(char::is_whitespace))
     })?;
-    let arrow = [
-        text.find('→').map(|at| (at, '→'.len_utf8())),
-        text.find("->").map(|at| (at, 2)),
-    ]
-    .into_iter()
-    .flatten()
-    .min_by_key(|(at, _)| *at)?;
-    let (command, condition) = (text[..arrow.0].trim(), text[arrow.0 + arrow.1..].trim());
-    let second = command[runner.len()..].split_whitespace().next()?;
-    if condition.is_empty() || PROSE_SECOND_WORDS.contains(&second.to_lowercase().as_str()) {
+    let (at, width) = unquoted_arrow(text)?;
+    let (command, condition) = (text[..at].trim(), text[at + width..].trim());
+    if condition.is_empty()
+        || command[runner.len()..].trim().is_empty()
+        || !command_shaped(command, runner)
+    {
         return None;
     }
-    let written = &text[arrow.0..arrow.0 + arrow.1];
+    let written = &text[at..at + width];
     Some(format!("`{command}` {written} {condition}"))
 }
 
@@ -524,9 +605,6 @@ fn executable_tasks(plan: &mut BuildPlan, report: &mut GateReport) {
         if OWNER_WORK.iter().any(|p| everything.contains(p)) {
             mark(task, "needs you");
             need_owner(task, report);
-        }
-        if task.text.contains(" and ") {
-            mark(task, "split: one task per commit");
         }
     }
     for item in &mut plan.verify {
@@ -842,6 +920,30 @@ mod tests {
     }
 
     #[test]
+    fn g8_an_annotated_question_id_still_blocks_the_task() {
+        let mut plan = BuildPlan::default();
+        let mut q = Item::new("Q1", "Which spread?");
+        q.id = "Q1".to_string();
+        plan.open.push(q);
+        for (n, entry) in ["Q1 (which spread)", "Q1 — which spread", "Q1: which spread"]
+            .into_iter()
+            .enumerate()
+        {
+            plan.tasks.push(item(
+                &format!("T{}", n + 1),
+                "A",
+                &[("depends", entry), ("accept", RUNNABLE)],
+            ));
+        }
+        run(&mut plan);
+        for t in &plan.tasks {
+            assert!(has_marker(t, "blocked by Q1"), "{:?}", t.markers);
+            assert!(t.needs_owner, "{t:?}");
+            assert!(!has_marker(t, "unknown dependency"), "{:?}", t.markers);
+        }
+    }
+
+    #[test]
     fn g8_a_task_depending_on_an_open_question_is_blocked() {
         let mut plan = BuildPlan::default();
         plan.open.push(item("Q1", "Which spread?", &[]));
@@ -951,7 +1053,7 @@ mod tests {
         run(&mut plan);
         assert!(plan.tasks[0].needs_owner);
         assert!(has_marker(&plan.tasks[0], "needs you"));
-        assert!(has_marker(&plan.tasks[0], "split: one task per commit"));
+        assert!(!has_marker(&plan.tasks[0], "split: one task per commit"));
     }
 
     fn kill_plan() -> BuildPlan {

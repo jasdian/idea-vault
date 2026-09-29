@@ -103,21 +103,34 @@ impl Item {
         self.depends_refs('Q')
     }
 
-    /// The `depends` entries that cite no id at all, kept verbatim when the ids are rewritten.
+    /// The `depends` entries that are not ids, kept when the ids are rewritten: free-text entries
+    /// verbatim, and the annotation of an annotated `P#`/`Q#` entry (`Q1 (which spread)`). A `T#`
+    /// entry's annotation is dropped on rewrite (`T1 (scaffold)` becomes `T1`).
     pub fn depends_free(&self) -> Vec<String> {
-        self.field("depends")
-            .map(|v| {
-                v.split(',')
-                    .map(str::trim)
-                    .filter(|e| {
-                        !e.is_empty()
-                            && !is_none(e)
-                            && ['T', 'P', 'Q'].iter().all(|l| refs_of(e, *l).is_empty())
-                    })
-                    .map(String::from)
-                    .collect()
-            })
+        let mut out = Vec::new();
+        for entry in self
+            .field("depends")
             .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|e| !e.is_empty() && !is_none(e))
+        {
+            let (head, annotation) = split_annotation(entry);
+            if is_id_head(head) {
+                let note = annotation
+                    .trim_matches(|c: char| c.is_whitespace() || "()[]:-—–".contains(c))
+                    .to_string();
+                if !note.is_empty() && refs_of(head, 'T').is_empty() {
+                    out.push(note);
+                }
+            } else if ['T', 'P', 'Q']
+                .iter()
+                .all(|l| refs_of(entry, *l).is_empty())
+            {
+                out.push(entry.to_string());
+            }
+        }
+        out
     }
 
     fn depends_refs(&self, letter: char) -> Vec<String> {
@@ -164,20 +177,35 @@ fn is_id_word(word: &str) -> bool {
         && rest.chars().all(|c| c.is_ascii_digit())
 }
 
+fn split_annotation(entry: &str) -> (&str, &str) {
+    let at = entry
+        .char_indices()
+        .find(|(i, c)| matches!(c, '(' | '[' | ':' | '—' | '–') || entry[*i..].starts_with(" - "))
+        .map_or(entry.len(), |(i, _)| i);
+    (entry[..at].trim(), &entry[at..])
+}
+
+fn is_id_head(head: &str) -> bool {
+    let mut words = head.split_whitespace().peekable();
+    words.peek().is_some() && words.all(is_id_word)
+}
+
 /// Every `<letter><digits>` id in `text` (any case), uppercased and deduplicated. A `T#` may sit
-/// anywhere in prose; a `P#` or `Q#` counts only in a comma-separated entry made of nothing but
-/// ids, so `P95 latency` or `Q4 planning` stay free text.
+/// anywhere in prose; a `P#` or `Q#` counts only in a comma-separated entry whose lead is nothing
+/// but ids, optionally followed by an annotation (`Q1 (which spread)`, `P1 — scaler`,
+/// `T2: parser`), so `P95 latency` or `Q4 planning` stay free text.
 pub fn refs_of(text: &str, letter: char) -> Vec<String> {
     let letter = letter.to_ascii_uppercase();
     if letter == 'T' {
         return scan_ids(text, letter);
     }
     let mut out: Vec<String> = Vec::new();
-    for entry in text.split(',').filter(|e| {
-        let mut words = e.split_whitespace().peekable();
-        words.peek().is_some() && words.all(is_id_word)
-    }) {
-        for id in scan_ids(entry, letter) {
+    for entry in text.split(',') {
+        let (head, _) = split_annotation(entry);
+        if !is_id_head(head) {
+            continue;
+        }
+        for id in scan_ids(head, letter) {
             if !out.contains(&id) {
                 out.push(id);
             }

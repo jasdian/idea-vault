@@ -17,17 +17,23 @@ const IDEA: &str = "A local vault for ideas.";
 const TASK: &str = "- [ ] T1: Write the parser\n  accept: `cargo test` → exit 0";
 
 #[derive(Default)]
-struct Answer {
-    settled: &'static str,
-    verify: &'static str,
-    fence: &'static str,
-    plan: &'static str,
-    kills: &'static str,
+struct Answer<'a> {
+    settled: &'a str,
+    verify: &'a str,
+    fence: &'a str,
+    plan: &'a str,
+    kills: &'a str,
 }
 
-impl Answer {
+impl Answer<'_> {
     fn render(&self) -> String {
-        let or_none = |s: &'static str| if s.is_empty() { "- none" } else { s };
+        fn or_none(s: &str) -> &str {
+            if s.is_empty() {
+                "- none"
+            } else {
+                s
+            }
+        }
         let fence = if self.fence.is_empty() {
             String::new()
         } else {
@@ -667,7 +673,7 @@ fn bp3_prose_acceptance_needs_the_owner() {
     assert_eq!(report.tally.get("needs_owner"), Some(&1));
 }
 
-fn accept_of(plan_line: &'static str) -> (BuildPlan, GateReport) {
+fn accept_of(plan_line: &str) -> (BuildPlan, GateReport) {
     gate(
         "## user\nBuild the parser.\n",
         Answer {
@@ -692,10 +698,16 @@ fn accept_repair_wraps_an_unbackticked_runner_command_and_keeps_the_task() {
             "docker compose config → exits 0",
             "`docker compose config` → exits 0",
         ),
+        (
+            "rg \"fn .*->\" src → 3 matches",
+            "`rg \"fn .*->\" src` → 3 matches",
+        ),
+        ("rg 'a → b' src -> 0 hits", "`rg 'a → b' src` -> 0 hits"),
+        ("go test ./... → ok", "`go test ./...` → ok"),
+        ("make test → exit 0", "`make test` → exit 0"),
+        ("just build-all → exit 0", "`just build-all` → exit 0"),
     ] {
-        let line: &'static str =
-            Box::leak(format!("- [ ] T1: Parse\n  accept: {written}").into_boxed_str());
-        let (plan, report) = accept_of(line);
+        let (plan, report) = accept_of(&format!("- [ ] T1: Parse\n  accept: {written}"));
         let task = only(&plan.tasks, "Plan");
         assert_eq!(task.field("accept"), Some(fixed));
         assert!(!task.needs_owner, "{written}: {}", markers(task));
@@ -717,10 +729,14 @@ fn accept_repair_leaves_prose_and_conditionless_accepts_owner_bound() {
         "cargo test →",
         "terraform apply → exit 0",
         "cargo test passes",
+        "go through the flow → works",
+        "just check that it builds → ok",
+        "make each test pass → ok",
+        "cargo test passes and the parser is fast → yes",
+        "cargo test finishes. Then check the output → ok",
+        "rg \"fn .*→ src → 3 matches",
     ] {
-        let line: &'static str =
-            Box::leak(format!("- [ ] T1: Parse\n  accept: {written}").into_boxed_str());
-        let (plan, _) = accept_of(line);
+        let (plan, _) = accept_of(&format!("- [ ] T1: Parse\n  accept: {written}"));
         let task = only(&plan.tasks, "Plan");
         assert!(task.needs_owner, "{written}");
         assert!(markers(task).contains("no runnable accept"), "{written}");
@@ -741,6 +757,11 @@ fn accept_repair_does_not_launder_a_destructive_command() {
         markers(task)
     );
     assert_eq!(report.tally.get("needs_owner"), Some(&1));
+    assert_eq!(
+        task.field("accept"),
+        Some("docker compose down -v → volumes gone")
+    );
+    assert!(!markers(task).contains("accept repaired"));
 }
 
 const GATE_SOURCES: [(&str, &str); 6] = [
