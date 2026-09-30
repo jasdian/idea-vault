@@ -292,17 +292,18 @@ pub async fn swarm(
 
     let report = if audit_findings {
         progress(&format!("swarm · auditing {} findings", findings.len()));
+        // A swarm has no call budget: its one re-ask is always fundable (ADR-0023 amendment).
+        let target = audit::AuditTarget {
+            vault_dir,
+            idea_slug,
+            findings: &findings,
+            budget,
+            may_reask: true,
+        };
         Some(
-            audit::audit(
-                ollama,
-                ai_semaphore,
-                registry,
-                vault_dir,
-                idea_slug,
-                &findings,
-                budget,
-            )
-            .await?,
+            audit::audit(ollama, ai_semaphore, registry, target)
+                .await?
+                .report,
         )
     } else {
         None

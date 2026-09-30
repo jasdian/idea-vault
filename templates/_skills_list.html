@@ -37,6 +37,7 @@
         <div class="mcp__row-line1">
           <span class="mcp__name">{{ s.name }}</span>
           <span class="mcp__pill{% if s.source != "built-in" %} mcp__pill--on{% endif %}">{{ s.source }}</span>
+          <code class="book__digest" title="digest of its markdown — an artifact recipe records it">@{{ s.digest }}</code>
         </div>
         <p class="book__desc">{{ s.description }}</p>
         {% if !s.use_when.is_empty() %}<p class="book__when"><span class="book__label">use when</span> {{ s.use_when }}</p>{% endif %}
@@ -80,6 +81,7 @@
         <div class="mcp__row-line1">
           <a class="mcp__name book__link" href="/skills/workflow/{{ w.name }}">{{ w.name }}</a>
           <span class="mcp__pill{% if w.source != "built-in" %} mcp__pill--on{% endif %}">{{ w.source }}</span>
+          <code class="book__digest" title="digest of its markdown — an artifact recipe records it">@{{ w.digest }}</code>
         </div>
         <p class="book__desc">{{ w.description }}</p>
         {% if !w.use_when.is_empty() %}<p class="book__when"><span class="book__label">use when</span> {{ w.use_when }}</p>{% endif %}

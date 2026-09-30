@@ -23,8 +23,10 @@ pub mod registry;
 pub mod rounds;
 pub mod run;
 
+use crate::ai::provenance::{self, PromptTemplate};
 use crate::concepts::agents::AgentRole;
 use crate::domain::workflow::{CriterionSpec, GroundSpec, StageKind};
+use crate::domain::Recipe;
 
 pub use registry::{Book, LiveWorkflows, WorkflowRegistry};
 pub use run::{run_workflow, RunCtx, WorkflowOutcome};
@@ -137,7 +139,9 @@ impl Stage {
     }
 
     /// This stage's exact worst-case model calls, repair retries included (ADR-0034): a chained
-    /// step may be asked once more on a contract violation, as may each Ground reader.
+    /// step may be asked once more on a contract violation, as may each Ground reader. An
+    /// audit's one re-ask is not in its ceiling: it runs only on slack an earlier stage left
+    /// unspent (ADR-0023 amendment), so the ceiling stays the run's true worst case.
     pub fn call_ceiling(&self) -> u32 {
         let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
         match self {
@@ -193,6 +197,10 @@ pub struct Workflow {
     pub capstone: bool,
     /// The file as read, for the book's source view.
     pub raw: String,
+    /// [`digest12`] of `raw` — what a workflow artifact's recipe records (ADR-0040).
+    ///
+    /// [`digest12`]: crate::ai::provenance::digest12
+    pub digest: String,
 }
 
 impl Workflow {
@@ -214,6 +222,16 @@ impl Workflow {
     /// Whether a run does its best work with sources attached (it has a Ground stage).
     pub fn needs_sources(&self) -> bool {
         self.stages.iter().any(|s| matches!(s, Stage::Ground(_)))
+    }
+
+    /// The recipe of an artifact this workflow's run wrote: its name and digest, this build, and
+    /// the parse-coupled `templates` the run used.
+    pub fn recipe(&self, templates: &[PromptTemplate]) -> Recipe {
+        Recipe {
+            workflow: Some(self.name.clone()),
+            workflow_digest: Some(self.digest.clone()),
+            ..provenance::recipe(templates)
+        }
     }
 
     /// Every skill a step names, in stage order.

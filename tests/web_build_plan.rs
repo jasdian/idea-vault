@@ -73,6 +73,7 @@ fn seed(vault: &std::path::Path, kind: ArtifactKind, body: &str) -> String {
                 revises: None,
                 version: None,
                 answered: Vec::new(),
+                recipe: None,
             },
             body: body.into(),
         },

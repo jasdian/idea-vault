@@ -97,6 +97,7 @@ fn seed(vault: &Path) {
         answer: PLAN,
         turn_role: "assistant (skill: build-prompt)",
         lens: "build-prompt",
+        recipe: None,
         model: "llama3.2".into(),
         audit: None,
         probe: &SourceProbe::default(),

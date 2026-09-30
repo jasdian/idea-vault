@@ -6,6 +6,7 @@ pub mod ideas;
 pub mod mcp;
 pub mod memory;
 pub mod plans;
+pub mod runs;
 pub mod settings;
 pub mod skills;
 pub mod sources;

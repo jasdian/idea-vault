@@ -41,6 +41,15 @@ fn tokens(text: &str) -> ChatScript {
     ChatScript::Tokens(vec![text.to_string()])
 }
 
+/// The auditor's scripted answers for `n` findings: `reply`, then — when it leaves a finding
+/// without a verdict and the run can fund it — the same reply again for the one targeted re-ask
+/// (ADR-0023 amendment), which then adds nothing and leaves the first report as it was.
+fn auditor_scripts(reply: &str, n: usize) -> Vec<ChatScript> {
+    let partial = idea_vault::concepts::audit::parse_audit(reply, n).answered < n;
+    let times = if partial { 2 } else { 1 };
+    (0..times).map(|_| tokens(reply)).collect()
+}
+
 const PLAN: &str = "## Goal\nBuild the agency tool.\n\n## Settled\n- none\n\n## Verify first\n- none\n\n## Open questions\n- none\n\n## Plan\n- [ ] T1: Build it\n  accept: `cargo test` → exit 0\n\n## Kill criteria\n- none";
 
 #[tokio::test]
@@ -518,7 +527,8 @@ async fn chained_step_body_with(
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path(), "i");
     let mut scripts: Vec<ChatScript> = harvest.iter().map(|h| tokens(h)).collect();
-    scripts.push(tokens(auditor_reply));
+    let findings = harvest.iter().filter(|h| !h.is_empty()).count();
+    scripts.extend(auditor_scripts(auditor_reply, findings));
     scripts.push(tokens(PLAN));
     let mock = spawn_sequence(&["llama3.2"], scripts).await;
     run_at(&mock, tmp.path(), "ready-to-build", true, max_bytes).await;
@@ -992,7 +1002,7 @@ async fn ready_to_build_mode_run(audit: bool, auditor_reply: &str) -> (String, S
     .map(|h| tokens(h))
     .collect();
     if audit {
-        scripts.push(tokens(auditor_reply));
+        scripts.extend(auditor_scripts(auditor_reply, 4));
     }
     scripts.push(tokens(PLAN));
     let mock = spawn_sequence(&["llama3.2"], scripts).await;
@@ -1217,4 +1227,70 @@ async fn angles_answered_has_no_line_when_every_angle_answered() {
     run(&mock, tmp.path(), "interrogate", false).await;
     let convo = store::read_conversation(tmp.path(), "i").unwrap();
     assert!(!convo.contains("angles answered"), "{convo}");
+}
+
+#[tokio::test]
+async fn audit_reask_charges_call_budget() {
+    // ready-to-build's Ground is skipped with no sources, which leaves slack in the budget: the
+    // garbled audit is asked once more, and both calls are charged (ADR-0023 amendment).
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mut scripts: Vec<ChatScript> = [
+        "- Ship solo first",
+        "- Agencies pay monthly",
+        "- Hire later",
+        "- risk: churn",
+        "- Call three agencies",
+    ]
+    .iter()
+    .map(|h| tokens(h))
+    .collect();
+    scripts.push(tokens("These all look plausible to me."));
+    scripts.push(tokens(
+        "F1: CONFIRMED — ok\nF2: UNCERTAIN — maybe\nF3: REFUTED — no\nF4: CONFIRMED — ok\nF5: CONFIRMED — ok",
+    ));
+    scripts.push(tokens(PLAN));
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let notes = std::sync::Mutex::new(Vec::<String>::new());
+    let progress = |n: &str| notes.lock().unwrap().push(n.to_string());
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    let semaphore = Arc::new(Semaphore::new(1));
+    let outcome = run_workflow(
+        &RunCtx {
+            llm: &client,
+            sem: &semaphore,
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(8192),
+            audit_on: true,
+            related: &|_| String::new(),
+            progress: &progress,
+        },
+        "ready-to-build",
+    )
+    .await
+    .unwrap();
+
+    let bodies = mock.chat_bodies();
+    assert_eq!(
+        bodies.len(),
+        8,
+        "5 harvesters, the audit and its re-ask, the planner"
+    );
+    assert!(bodies[6].contains("Your previous answer gave no usable verdict for F1, F2"));
+    let report = outcome.audit.expect("the audit ran");
+    assert!(!report.failed);
+    assert_eq!(report.answered, 5, "the re-ask filled every verdict");
+    let notes = notes.into_inner().unwrap();
+    let before = notes
+        .iter()
+        .find(|n| n.contains("auditing 5 findings"))
+        .expect("audit note");
+    assert!(before.contains("calls 5/"), "{before}");
+    let after = notes
+        .iter()
+        .find(|n| n.contains(" chain:"))
+        .expect("planner note");
+    assert!(after.contains("calls 7/"), "the audit charged 2: {after}");
 }

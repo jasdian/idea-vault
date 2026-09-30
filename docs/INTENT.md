@@ -78,3 +78,21 @@ expectation changes are red.
 - journal_flow::skill_job_writes_started_llmcall_contract_finished: the journaled sequence gains the
   `verdict` entry P2 writes beside each contract-checked call (ADR-0038); every other assertion
   stays.
+- tests/fixtures/prompt-goldens/: new goldens for the parse-coupled prompts (ADR-0040): the audit
+  prompt for a fixed input, its targeted re-ask suffix, the contract retry note, the fact-extraction
+  instruction, and `build_prompt` over a fixed test skill; each written by hand from the source.
+- swarm call counts (tests/web_concepts.rs `run_swarm_defaults_…` 6→7 and `run_swarm_custom_angles…`
+  3→4; tests/swarm_flow.rs `keystone_…` 8→9 and `related_block_reaches_every_angle…` angles+2→+3
+  with two auditor bodies): the mock's non-verdict audit answer now earns the one targeted re-ask
+  (owner decision 2026-09-30 §7.4, ADR-0023 amendment); a swarm has no call budget to refuse it.
+- tests/swarm_flow.rs scripts (`a_garbled_audit_…`, `audit_cap_swarm_turn_…`) and the
+  tests/workflow_flow.rs auditor scripts (`auditor_scripts`): a malformed or partial scripted audit
+  is followed by the same reply for the re-ask, so every existing assertion keeps its meaning; the
+  garbled-audit test reads the synthesizer at body 3 instead of 2.
+- test struct literals (tests/build_plan_flow.rs, tests/web_build_plan.rs, tests/plan_workbench.rs
+  and the src unit fixtures): `ArtifactFrontmatter` and `PlanInputs` gain `recipe: None`
+  (ADR-0040); no assertion changes.
+- regrade_flow::swarm_journals_lens_contracts_and_the_audit_verdict: audit verdicts 1→2 and
+  regraded-same 5→6 once P2 and P3 meet: the mock's non-verdict audit answer earns P3's one
+  targeted re-ask, and every audit call journals its own verdict line (ADR-0038, ADR-0023
+  amendment); the four lens contracts are unchanged.

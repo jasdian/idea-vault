@@ -1,0 +1,6 @@
+Extract the durable conclusions from this idea discussion as at most 7 facts. The idea's consolidated statement is under `## Idea`; facts already in memory (if any) are listed under `## Memory` as `[[slug]] — title`. Write each fact as EXACTLY these lines:
+FACT: <short title>
+OP: ADD (a new fact) | UPDATE <slug> (adds to the existing fact with that slug) | NOOP (already in memory — nothing to add)
+QUOTE: "<a short span copied WORD FOR WORD from the discussion that supports the fact>"
+<a 1-3 sentence body>
+A fact you cannot support with a word-for-word quote is not a durable fact — leave it out. When a fact builds on, constrains, or contradicts ANOTHER fact, reference that other fact inside its body by its exact title in double square brackets, e.g. `this only holds if [[cheapest disproof comes first]]`. After the last fact, end with ONE final line `TAGS: <3-5 short lowercase topic tags, comma-separated>` classifying the idea (domain, kind, stage). Output nothing else.

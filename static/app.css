@@ -1088,3 +1088,26 @@ a.srcchip:hover { border-color: var(--accent); color: var(--accent); }
 .chip--plan::before { content: "§ "; }
 .chip--plan-open { border-color: var(--accent); color: var(--accent); }
 .artifacts__row--superseded { opacity: .55; }
+
+/* ---- recipe provenance (ADR-0040): what made an artifact ------------------ */
+.book__digest { font-family: var(--mono); font-size: .7rem; color: var(--faint); }
+.recipe { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; margin: .35rem 0 .8rem; }
+.recipe__line { font-family: var(--mono); font-size: .72rem; color: var(--faint); overflow-wrap: anywhere; }
+.recipe__changed, .recipe__off {
+  font-family: var(--mono); font-size: .72rem; color: var(--warn);
+  padding: .1rem .5rem; border-left: 2px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: var(--warn-soft);
+}
+.recipe__off { margin: 0 0 .5rem; }
+
+/* ---- run inspector (R50, ADR-0037) --------------------------------------- */
+.run__intro { font-family: var(--serif); font-style: italic; font-size: .85rem; color: var(--faint); margin: .5rem 0 1rem; }
+.run__calls { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .9rem; }
+.run__call { border-top: 1px solid var(--rule); padding-top: .7rem; display: flex; flex-direction: column; gap: .35rem; }
+.run__call .recipe__off { margin: 0; }
+.run__tools { margin: 0; padding-left: 1.1rem; font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+.run__response summary { font-family: var(--mono); font-size: .72rem; color: var(--faint); cursor: pointer; }
+.run__response pre {
+  margin: .4rem 0 0; padding: .6rem .75rem; border-radius: 6px; font-size: .8rem; font-family: var(--mono);
+  white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--rule);
+}

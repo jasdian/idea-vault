@@ -1002,6 +1002,11 @@ pub async fn idea_page(
         tags_html,
         sources_html,
         related_html,
+        // Diagnostics only: an unreadable `.runs/` loses the link, never the page.
+        last_run: store::latest_run_id(vault_dir, &slug).unwrap_or_else(|e| {
+            tracing::warn!(slug, error = %e, "run journals unreadable; no last-run link");
+            None
+        }),
     })
 }
 

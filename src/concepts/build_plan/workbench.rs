@@ -15,6 +15,7 @@ use std::sync::{Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
 
+use crate::ai::provenance;
 use crate::ai::sources::SourceProbe;
 use crate::concepts::build_plan::finish::{
     artifact_body, excluded_turns, latest_open_questions, mode_label, write_plan, NewPlan,
@@ -31,7 +32,7 @@ use crate::concepts::ConceptError;
 use crate::domain::evidence::{
     content_overlap, normalize_for_match, MIN_QUOTE_WORDS, POINTER_PREFIX,
 };
-use crate::domain::{Artifact, ArtifactKind};
+use crate::domain::{Artifact, ArtifactKind, Recipe};
 use crate::vault::{store, VaultError};
 
 /// Serialises the head check and the writes of every answer, so two submissions on one plan
@@ -606,6 +607,12 @@ pub fn answer(req: AnswerRequest) -> Result<Versioned, WorkbenchError> {
         idea_slug: req.idea_slug,
         idea_title: &idea.frontmatter.title,
         lens: base.frontmatter.lens.clone(),
+        // The version is the base's plan with the owner's answers folded in by code: it keeps
+        // the base's recipe, stamped with the build that folded them (ADR-0040).
+        recipe: base.frontmatter.recipe.clone().map(|r| Recipe {
+            build: provenance::build_id(),
+            ..r
+        }),
         model: base.frontmatter.model.clone(),
         now: req.now,
         revises: Some(req.base.to_string()),
@@ -725,6 +732,7 @@ Ship the zone snapshot tool.
             answer: PLAN,
             turn_role: "assistant (skill: build-prompt)",
             lens: "build-prompt",
+            recipe: None,
             model: "llama3.2".into(),
             audit: None,
             probe: &probe,

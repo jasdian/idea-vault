@@ -78,6 +78,7 @@ fn card(skill: &Skill) -> SkillCard {
         role: role_str(skill.role),
         contract: contract_str(skill.contract),
         source: skill.source.as_str(),
+        digest: skill.digest.clone(),
         hidden: skill.hidden,
     }
 }
@@ -210,6 +211,7 @@ fn workflow_card(workflow: &Workflow, k: usize) -> WorkflowCard {
         use_when: workflow.use_when.clone(),
         avoid_when: workflow.avoid_when.clone(),
         source: workflow.source.as_str(),
+        digest: workflow.digest.clone(),
         hidden: workflow.hidden,
         capstone: workflow.capstone,
         cost: cost_line(workflow, k),

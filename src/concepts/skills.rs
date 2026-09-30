@@ -13,6 +13,7 @@ use crate::ai::budget::{
 use crate::ai::call::CallMeta;
 use crate::ai::contract::{self, ContractOutcome};
 use crate::ai::ollama::ChatMessage;
+use crate::ai::provenance::{self, digest12};
 use crate::ai::verdict::ParserKind;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::AgentRole;
@@ -21,7 +22,7 @@ use crate::concepts::build_plan::finish::{finish_as, Finished, PlanInputs, PlanM
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::ConceptError;
 use crate::domain::frontmatter::parse_skill;
-use crate::domain::{slug, OutputContract, SkillRole, SkillStage};
+use crate::domain::{slug, OutputContract, Recipe, SkillRole, SkillStage};
 use crate::vault::store;
 
 /// Largest skill file the loader accepts. A skill is a prompt template; anything bigger is a
@@ -117,6 +118,33 @@ pub struct Skill {
     pub internal: bool,
     pub prompt: String,
     pub source: SkillSource,
+    /// [`digest12`] of the skill file's raw bytes, before `{context}` is filled — what an
+    /// artifact's recipe records and the skill book shows (ADR-0040).
+    pub digest: String,
+}
+
+impl Skill {
+    /// The recipe of an artifact this skill wrote: its name, digest and source, this build, and
+    /// the lens's contract note when `content` breaks the skill's output contract.
+    pub fn recipe(&self, content: &str) -> Recipe {
+        Recipe {
+            skill: Some(self.name.clone()),
+            skill_digest: Some(self.digest.clone()),
+            skill_source: Some(self.source.as_str().to_string()),
+            contract: off_contract_note(&self.name, self.contract, content)
+                .into_iter()
+                .collect(),
+            ..provenance::recipe(&[])
+        }
+    }
+}
+
+/// `<lens>: off-contract: <violation>` when `content` as kept breaks `contract` — the
+/// recipe's record of a lens that degraded to its raw answer (ADR-0040). `None` when it holds.
+pub fn off_contract_note(lens: &str, contract: OutputContract, content: &str) -> Option<String> {
+    contract::validate(contract, content)
+        .err()
+        .map(|violation| format!("{lens}: off-contract: {violation}"))
 }
 
 /// A skill file that failed to load. The registry keeps running on everything else; the skill
@@ -162,6 +190,7 @@ fn parse_skill_doc(raw: &str, source: SkillSource) -> Result<Skill, String> {
         internal,
         prompt,
         source,
+        digest: digest12(raw.as_bytes()),
     })
 }
 
@@ -571,13 +600,13 @@ pub(crate) async fn ask_on_contract(
 /// ([`finish_as`]) on the blocking pool. Called after the model call returned, so no permit is
 /// held; the probe and model label come from `llm`, the turn- and role-scoped backend that
 /// produced `answer`. `lens` names the skill (quick) or workflow (ready-to-build) that ran, and
-/// with `mode` decides the pointer turn's role.
+/// with `mode` decides the pointer turn's role; `recipe` is stamped on the plan (ADR-0040).
 pub(crate) async fn persist_plan(
     llm: &LlmBackend,
     vault_dir: &Path,
     idea_slug: &str,
     answer: String,
-    lens: &str,
+    (lens, recipe): (&str, Recipe),
     audit: Option<AuditView>,
     mode: PlanMode<'_>,
 ) -> Result<Finished, ConceptError> {
@@ -618,6 +647,7 @@ pub(crate) async fn persist_plan(
                 answer: &answer,
                 turn_role: &turn_role,
                 lens: &lens,
+                recipe: Some(recipe),
                 model,
                 audit: audit.as_ref(),
                 probe: &probe,
@@ -701,12 +731,13 @@ pub async fn invoke(
     .await?;
 
     if skill.contract == OutputContract::BuildPlan {
+        let recipe = skill.recipe(&output);
         let finished = persist_plan(
             &llm,
             vault_dir,
             idea_slug,
             output,
-            &skill.name,
+            (&skill.name, recipe),
             None,
             PlanMode::Quick,
         )
@@ -733,6 +764,36 @@ pub async fn invoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_is_of_raw_file_not_filled_prompt() {
+        let raw = include_str!("skills/premortem.md");
+        let registry = SkillRegistry::builtin();
+        let skill = registry.get("premortem").unwrap();
+        assert_eq!(skill.digest, digest12(raw.as_bytes()));
+        assert_ne!(skill.digest, digest12(skill.prompt.as_bytes()));
+        let filled = skill.prompt.replace("{context}", "an idea");
+        assert_ne!(skill.digest, digest12(filled.as_bytes()));
+
+        // One byte more in an override moves the digest, and the recipe says where it came from.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("premortem.md"), format!("{raw}\n")).unwrap();
+        let (owned, issues) = SkillRegistry::load(tmp.path());
+        assert!(issues.is_empty(), "{issues:?}");
+        let over = owned.get("premortem").unwrap();
+        assert_ne!(over.digest, skill.digest);
+        let recipe = over.recipe("1. a cause");
+        assert_eq!(recipe.skill_digest.as_deref(), Some(over.digest.as_str()));
+        assert_eq!(recipe.skill_source.as_deref(), Some("vault override"));
+        assert!(recipe.contract.is_empty(), "a numbered list holds");
+        assert_eq!(
+            over.recipe("just prose").contract,
+            [format!(
+                "premortem: off-contract: {}",
+                contract::Violation::NoNumberedList
+            )]
+        );
+    }
 
     #[test]
     fn builtin_registry_contains_premortem_and_get_finds_it() {

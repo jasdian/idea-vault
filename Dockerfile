@@ -49,6 +49,11 @@ COPY --from=planner /app/recipe.json recipe.json
 # static musl target so the emitted binary carries no glibc dependency.
 RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path recipe.json
 COPY . .
+# Recipe provenance (ADR-0040): the commit an artifact's `recipe.build` names as `<version>+<sha>`.
+# A build arg is in the environment of this stage's RUN, where option_env! reads it at compile
+# time; left empty it stamps the crate version alone, as `cargo run` does. Declared after the
+# dependency cook so a new sha never invalidates the cached deps layer.
+ARG IDEA_VAULT_BUILD_SHA=
 RUN cargo build --release --target x86_64-unknown-linux-musl --bin idea-vault
 
 # ---- runtime: minimal, non-root -------------------------------------------

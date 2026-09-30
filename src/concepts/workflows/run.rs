@@ -17,13 +17,15 @@ use chrono::Utc;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::{related_allowance, ContextBudget};
+use crate::ai::provenance::PromptTemplate;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{build_prompt, AgentResult, AgentTask};
 use crate::concepts::audit::{self, AuditReport, Finding};
 use crate::concepts::build_plan::finish::PlanMode;
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::skills::{
-    ask_on_contract, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
+    ask_on_contract, hydrate_context, off_contract_note, persist_plan, prior_plan_block,
+    RelatedProvider,
 };
 use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize_brief, Brief};
 use crate::concepts::workflows::ground::{self, GroundMap, GROUND_DIVISOR};
@@ -32,7 +34,7 @@ use crate::concepts::workflows::rounds;
 use crate::concepts::workflows::{Book, Stage, Workflow};
 use crate::concepts::ConceptError;
 use crate::domain::workflow::StageKind;
-use crate::domain::{slug, Artifact, ArtifactFrontmatter, ArtifactKind, OutputContract};
+use crate::domain::{slug, Artifact, ArtifactFrontmatter, ArtifactKind, OutputContract, Recipe};
 use crate::vault::store;
 
 /// Everything one workflow run reads, borrowed for the run's lifetime. `book` is the job's one
@@ -701,16 +703,17 @@ async fn run_stage(
                 Err(e) => return Err(e),
             };
             note(&format!("auditing {} findings", findings.len()));
-            let report = audit::audit(
-                ctx.llm,
-                ctx.sem,
-                registry,
-                ctx.vault_dir,
-                ctx.idea_slug,
-                &findings,
-                ctx.budget,
-            )
-            .await?;
+            // The re-ask is funded only from slack: the audit call plus one more must fit while
+            // every later stage keeps its ceiling (ADR-0023 amendment, ADR-0034).
+            let target = audit::AuditTarget {
+                vault_dir: ctx.vault_dir,
+                idea_slug: ctx.idea_slug,
+                findings: &findings,
+                budget: ctx.budget,
+                may_reask: calls.can_fund(2),
+            };
+            let audit::AuditRun { report, .. } =
+                audit::audit(ctx.llm, ctx.sem, registry, target).await?;
             let detail = format!(
                 "{} findings · {}",
                 findings.len(),
@@ -794,7 +797,7 @@ async fn run_stage(
         }
         Stage::Refine(spec) => match state.findings.as_mut() {
             Some(findings) => {
-                rounds::run_refine(ctx, spec, findings, &mut state.report, note).await
+                rounds::run_refine(ctx, spec, findings, &mut state.report, calls, note).await
             }
             None => {
                 note("nothing to refine — refine skipped");
@@ -844,6 +847,30 @@ fn run_record(
     out
 }
 
+/// The recipe every artifact of this run carries (ADR-0040): the workflow's digest, the audit
+/// templates when an audit ran, and each step whose kept answer is off its skill's contract.
+fn run_recipe(ctx: &RunCtx<'_>, workflow: &Workflow, state: &RunState) -> Recipe {
+    let templates: &[PromptTemplate] = if state.report.is_some() {
+        &[audit::AUDIT_TEMPLATE, audit::REASK_TEMPLATE]
+    } else {
+        &[]
+    };
+    let contract = state
+        .fanned
+        .1
+        .iter()
+        .flatten()
+        .filter_map(|r| {
+            let skill = ctx.book.skills.get(r.lens.as_deref()?)?;
+            off_contract_note(&skill.name, skill.contract, &r.content)
+        })
+        .collect();
+    Recipe {
+        contract,
+        ..workflow.recipe(templates)
+    }
+}
+
 /// The stage artifacts and the run record, slugged and ready to write, and the trailing turn
 /// line that names them. Empty when no stage staged an artifact: a workflow of the classic kinds,
 /// or one whose Ground found no sources, leaves exactly the vault it always did. Pure over the
@@ -861,6 +888,7 @@ fn staged_artifacts(
     let now = Utc::now();
     let stamp = now.format("%Y%m%d-%H%M%S").to_string();
     let model = ctx.llm.model();
+    let recipe = run_recipe(ctx, workflow, state);
     let taken = |candidate: &str| {
         store::artifact_exists(ctx.vault_dir, ctx.idea_slug, candidate).unwrap_or(false)
     };
@@ -875,6 +903,7 @@ fn staged_artifacts(
             revises: None,
             version: None,
             answered: vec![],
+            recipe: Some(recipe.clone()),
         },
         body,
     };
@@ -940,12 +969,13 @@ async fn persist(
             _ => None,
         };
         let skipped = (!ctx.audit_on).then_some(AUDIT_OFF_REASON);
+        let recipe = run_recipe(ctx, workflow, &state);
         let finished = persist_plan(
             &ctx.llm.for_role(role.as_str()),
             ctx.vault_dir,
             ctx.idea_slug,
             std::mem::take(&mut state.output),
-            &workflow.name,
+            (&workflow.name, recipe),
             audit,
             PlanMode::ReadyToBuild { skipped },
         )

@@ -6,6 +6,7 @@
 <div class="idea-subhead">
   <span id="idea-state" class="state state--{{ state }}">{{ state }}</span>
   <a class="btw-link" href="/idea/{{ slug }}/history" title="See the full thread; fork it into a new idea">btw — history &amp; fork ↗</a>
+  {% if let Some(run) = last_run %}<a class="btw-link" href="/idea/{{ slug }}/runs/{{ run }}" title="What the last AI run called, and how each answer came back">last run ↗</a>{% endif %}
 </div>
 {{ tags_html|safe }}
 {{ sources_html|safe }}

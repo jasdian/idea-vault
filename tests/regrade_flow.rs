@@ -133,9 +133,11 @@ async fn swarm_journals_lens_contracts_and_the_audit_verdict() {
 
     let entries = finished_run(&vault, "swarmed").await;
     let families = verdicts(&entries);
-    assert_eq!(families.iter().filter(|f| **f == "audit").count(), 1);
+    // The mock's non-verdict audit answer earns the one targeted re-ask (ADR-0023 amendment), and
+    // each audit call journals its own verdict (ADR-0038): two audit verdicts.
+    assert_eq!(families.iter().filter(|f| **f == "audit").count(), 2);
     assert_eq!(families.iter().filter(|f| **f == "contract").count(), 4);
-    assert_eq!(regrade_all(&vault).same, 5);
+    assert_eq!(regrade_all(&vault).same, 6);
 }
 
 #[tokio::test]

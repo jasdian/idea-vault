@@ -23,6 +23,9 @@ pub enum VaultError {
     /// mapped to 404 by `web`.
     #[error("artifact not found: {0}")]
     ArtifactNotFound(String),
+    /// No such run journal under `vault/<slug>/.runs/` (ADR-0037), mapped to 404 by `web`.
+    #[error("run not found: {0}")]
+    RunNotFound(String),
     /// A slug that fails `domain::slug::is_valid` — rejected before any path join so a malformed
     /// or hostile slug (`../`, separators) can never escape the vault directory.
     #[error("invalid slug: {0:?}")]

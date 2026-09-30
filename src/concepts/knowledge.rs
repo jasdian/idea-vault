@@ -13,13 +13,14 @@ use chrono::Utc;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::ContextBudget;
+use crate::ai::provenance;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::{AgentRole, AgentTask};
 use crate::concepts::audit;
 use crate::concepts::skills::{hydrate_context, SkillRegistry};
 use crate::concepts::swarm::{fan_out, judge, synthesize};
 use crate::concepts::ConceptError;
-use crate::domain::{slug, Artifact, ArtifactFrontmatter, ArtifactKind};
+use crate::domain::{slug, Artifact, ArtifactFrontmatter, ArtifactKind, Recipe};
 use crate::vault::store;
 
 /// The built-in extraction lenses — the default angle set for `extract_knowledge`, all
@@ -155,11 +156,16 @@ pub async fn extract_knowledge(
         |candidate: &str| store::artifact_exists(vault_dir, idea_slug, candidate).unwrap_or(false);
 
     let mut findings = Vec::new();
+    let mut off_contract = Vec::new();
     for (lens, result) in lenses.iter().zip(&agent_results) {
         let Some(result) = result else { continue };
         if result.content.is_empty() {
             continue;
         }
+        // Each lens artifact carries its own skill's recipe (ADR-0040); the synthesis collects
+        // every lens that fell off its contract.
+        let recipe = registry.get(lens).map(|s| s.recipe(&result.content));
+        off_contract.extend(recipe.iter().flat_map(|r| r.contract.iter().cloned()));
         let file_slug = slug::disambiguate(&format!("{run_stamp}-{}", lens_short(lens)), taken);
         store::write_artifact(
             vault_dir,
@@ -175,6 +181,7 @@ pub async fn extract_knowledge(
                     revises: None,
                     version: None,
                     answered: Vec::new(),
+                    recipe,
                 },
                 body: result.content.clone(),
             },
@@ -209,6 +216,10 @@ pub async fn extract_knowledge(
                     revises: None,
                     version: None,
                     answered: Vec::new(),
+                    recipe: Some(Recipe {
+                        contract: off_contract,
+                        ..provenance::recipe(&[])
+                    }),
                 },
                 body: synthesis.clone(),
             },

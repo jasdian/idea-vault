@@ -74,6 +74,48 @@ async fn a_broken_owner_file_is_listed_and_never_breaks_the_page() {
 }
 
 #[tokio::test]
+async fn override_digest_shown() {
+    let (state, vault_dir) = test_state();
+    let builtin = state
+        .skills
+        .snapshot()
+        .get("premortem")
+        .unwrap()
+        .digest
+        .clone();
+    let (_, page) = get(state.clone(), "/skills").await;
+    assert!(
+        page.contains(&format!("@{builtin}")),
+        "built-in digest shown"
+    );
+
+    let dir = vault_dir.join(".skills");
+    std::fs::create_dir_all(&dir).unwrap();
+    let edited = format!(
+        "{}\nName the first domino.\n",
+        include_str!("../src/concepts/skills/premortem.md").trim_end()
+    );
+    std::fs::write(dir.join("premortem.md"), edited).unwrap();
+    let (status, book) = post_form(state.clone(), "/skills/reload", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let over = state
+        .skills
+        .snapshot()
+        .get("premortem")
+        .unwrap()
+        .digest
+        .clone();
+    assert_ne!(over, builtin);
+    assert!(book.contains(&format!("@{over}")), "the override's digest");
+    assert!(
+        !book.contains(&format!("@{builtin}")),
+        "the built-in's is gone"
+    );
+    let row = &book[book.find(&format!("@{over}")).unwrap().saturating_sub(400)..];
+    assert!(row.contains("vault override"), "the override is marked");
+}
+
+#[tokio::test]
 async fn reload_makes_an_owner_skill_a_runnable_move() {
     let mock = spawn(
         &["llama3.2"],

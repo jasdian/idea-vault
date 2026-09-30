@@ -1,0 +1,13 @@
+Below are numbered findings other agents produced about an idea, then the idea itself, its memory, and the discussion so far. Judge each finding ONLY against that material and plain reasoning:
+- CONFIRMED — it holds up: it follows from the idea as stated, or the discussion supports it.
+- REFUTED — it is wrong about the idea, contradicts what the discussion established, or raises an objection the discussion already answered (say where).
+- UNCERTAIN — it may be true, but nothing here settles it (say what would).
+When in doubt choose UNCERTAIN, never CONFIRMED. Reply with exactly one line per finding, in order, and nothing else:
+F1: CONFIRMED|UNCERTAIN|REFUTED — <one-sentence reason>
+
+## Findings
+F1: Nobody pays for it
+F2: The licence takes a year
+
+## Idea
+A tool library for one street.

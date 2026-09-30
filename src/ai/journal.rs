@@ -329,14 +329,6 @@ pub fn cap_tool_result(text: &str) -> String {
     text.chars().take(TOOL_RESULT_CAP).collect()
 }
 
-/// This binary's build: the crate version, plus the commit when the build injected one.
-fn build_id() -> String {
-    match option_env!("IDEA_VAULT_BUILD_SHA") {
-        Some(sha) if !sha.is_empty() => format!("{}+{sha}", env!("CARGO_PKG_VERSION")),
-        _ => env!("CARGO_PKG_VERSION").to_string(),
-    }
-}
-
 /// A run id: UTC time to the millisecond, then the kind, so ids sort by start time.
 fn mint_run_id(kind: RunKind) -> String {
     format!(
@@ -369,7 +361,7 @@ pub fn open_run(vault: &Path, slug: &str, kind: RunKind) -> Option<JournalHandle
         run_id: run_id.clone(),
         slug: slug.to_string(),
         kind,
-        build: build_id(),
+        build: crate::ai::provenance::build_id(),
         ts_ms: chrono::Utc::now().timestamp_millis(),
     };
     let opened = std::fs::create_dir_all(&dir)

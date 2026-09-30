@@ -17,6 +17,8 @@
 //! - [`journal`] — the per-job run journal under `vault/<slug>/.runs/` (docs/adr/0037, D39):
 //!   diagnostics only, never read back into a prompt or the index.
 //! - [`contract`] — pure output-shape checks + repair for skill answers (docs/adr/0023).
+//! - [`provenance`] — the digests, prompt-template refs and build id an artifact's `recipe:` is
+//!   stamped with (ADR-0040).
 //! - [`untrusted`] — the fence every tool result passes through before it reaches the Ollama
 //!   tool loop as a `role: "tool"` message (ADR-0039).
 //! - [`verdict`] — the parser kind and evidence reference a journaled verdict names, which the
@@ -40,6 +42,7 @@ pub mod contract;
 pub mod journal;
 pub mod mcp;
 pub mod ollama;
+pub mod provenance;
 pub mod sources;
 pub mod stream;
 pub mod untrusted;

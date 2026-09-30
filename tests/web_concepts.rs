@@ -133,8 +133,9 @@ async fn run_swarm_defaults_to_the_canonical_angles_and_persists_only_synthesis(
     let body = support::web::poll_until(state, "/idea/movable/pending", "foil · swarm").await;
     assert!(body.contains("converged finding"));
 
-    // Canonical D14 set: 4 angles + 1 auditor (on by default) + 1 synthesizer = 6 model calls.
-    assert_eq!(mock.chat_bodies().len(), 6);
+    // Canonical D14 set: 4 angles + 1 auditor (on by default) + its one re-ask ("converged
+    // finding" is no verdict, ADR-0023 amendment) + 1 synthesizer = 7 model calls.
+    assert_eq!(mock.chat_bodies().len(), 7);
     // Only the synthesis persisted, exactly one swarm turn, headed by its angles.
     let convo = store::read_conversation(&vault_dir, "movable").unwrap();
     assert_eq!(
@@ -224,8 +225,8 @@ async fn run_swarm_custom_angles_and_unknown_angle_400() {
     support::web::poll_until(state.clone(), "/idea/movable/pending", "foil · swarm").await;
     assert_eq!(
         mock.chat_bodies().len(),
-        3,
-        "1 angle + 1 auditor + 1 synthesizer"
+        4,
+        "1 angle + 1 auditor + its re-ask (\"out\" is no verdict) + 1 synthesizer"
     );
 
     // Unknown angle is rejected synchronously (validated in the handler before any job starts).
@@ -416,5 +417,172 @@ async fn related_block_reaches_the_model_through_skill_swarm_and_workflow_routes
                 .all(|b| !b.contains("Frost alarm for growers")),
             "{route}: the audit saw another idea"
         );
+    }
+}
+
+/// Harvest `movable` with every lens answering `answer`; returns the state and vault.
+async fn extracted(answer: &str) -> (idea_vault::web::state::AppState, std::path::PathBuf) {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![answer.into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion);
+    let (status, _) = post_form(state.clone(), "/idea/movable/extract", "").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state.clone(), "/idea/movable/pending", "foil · knowledge").await;
+    (state, vault_dir)
+}
+
+fn lens_artifact(vault: &std::path::Path, lens: &str) -> idea_vault::domain::Artifact {
+    store::read_artifacts(vault, "movable")
+        .unwrap()
+        .into_iter()
+        .find(|a| a.frontmatter.lens.as_deref() == Some(lens))
+        .unwrap_or_else(|| panic!("no {lens} artifact"))
+}
+
+#[tokio::test]
+async fn skill_artifact_stamps_recipe() {
+    let (state, vault_dir) = extracted("- a decision").await;
+    let artifact = lens_artifact(&vault_dir, "extract-key-decisions");
+    let recipe = artifact
+        .frontmatter
+        .recipe
+        .expect("a skill artifact carries its recipe");
+    let live = state.skills.snapshot();
+    let skill = live.get("extract-key-decisions").unwrap();
+    assert_eq!(recipe.skill.as_deref(), Some("extract-key-decisions"));
+    assert_eq!(recipe.skill_digest.as_deref(), Some(skill.digest.as_str()));
+    assert_eq!(recipe.skill_source.as_deref(), Some("built-in"));
+    assert!(recipe.build.starts_with(env!("CARGO_PKG_VERSION")));
+    assert!(recipe.contract.is_empty(), "a bullet answer is on contract");
+
+    let page = format!("/idea/movable/artifact/{}.md", artifact.frontmatter.slug);
+    let (status, body) = support::web::get(state, &page).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!(
+            "skill extract-key-decisions @ {} (built-in)",
+            skill.digest
+        )),
+        "{body}"
+    );
+    assert!(!body.contains("recipe changed since"));
+    assert!(!body.contains("provenance unknown"));
+}
+
+#[tokio::test]
+async fn editing_vault_skill_shows_recipe_changed_badge() {
+    let (state, vault_dir) = extracted("- a decision").await;
+    let artifact = lens_artifact(&vault_dir, "extract-key-decisions");
+    let page = format!("/idea/movable/artifact/{}.md", artifact.frontmatter.slug);
+
+    let dir = state.skills.dir().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    let edited = format!(
+        "{}\nAlso name who decided.\n",
+        include_str!("../src/concepts/skills/extract-key-decisions.md").trim_end()
+    );
+    std::fs::write(dir.join("extract-key-decisions.md"), edited).unwrap();
+    let (_, before) = support::web::get(state.clone(), &page).await;
+    assert!(
+        !before.contains("recipe changed since"),
+        "the live book changes on reload, not on a file write"
+    );
+    let (status, _) = post_form(state.clone(), "/skills/reload", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, after) = support::web::get(state.clone(), &page).await;
+    assert!(after.contains("recipe changed since"), "{after}");
+
+    // An artifact from before recipes is "provenance unknown", never stale.
+    let mut legacy = artifact.clone();
+    legacy.frontmatter.slug = "legacy-finding".into();
+    legacy.frontmatter.recipe = None;
+    store::write_artifact(&vault_dir, "movable", &legacy).unwrap();
+    let (_, old) = support::web::get(state, "/idea/movable/artifact/legacy-finding.md").await;
+    assert!(old.contains("provenance unknown"));
+    assert!(!old.contains("recipe changed since"));
+}
+
+#[tokio::test]
+async fn extraction_artifact_shows_off_contract_badge() {
+    let (state, vault_dir) = extracted("plain prose, no bullets").await;
+    let artifact = lens_artifact(&vault_dir, "extract-open-questions");
+    let recipe = artifact.frontmatter.recipe.unwrap();
+    assert_eq!(recipe.contract.len(), 1, "{:?}", recipe.contract);
+    assert!(recipe.contract[0].starts_with("extract-open-questions: off-contract: "));
+    let page = format!("/idea/movable/artifact/{}.md", artifact.frontmatter.slug);
+    let (_, body) = support::web::get(state.clone(), &page).await;
+    assert!(body.contains(r#"class="recipe__off""#), "{body}");
+    assert!(body.contains("extract-open-questions: off-contract: "));
+
+    // The synthesis names every lens that fell off its contract.
+    let synthesis = store::read_artifacts(&vault_dir, "movable")
+        .unwrap()
+        .into_iter()
+        .find(|a| a.frontmatter.kind == idea_vault::domain::ArtifactKind::Synthesis)
+        .unwrap();
+    assert_eq!(
+        synthesis.frontmatter.recipe.unwrap().contract.len(),
+        idea_vault::concepts::knowledge::LENSES.len()
+    );
+}
+
+const RUN_ID: &str = "20260930T120000123Z-skill";
+
+#[tokio::test]
+async fn run_inspector_renders_calls_r50() {
+    let (state, vault_dir) = support::web::test_state();
+    seed(&vault_dir, IdeaState::InDiscussion);
+    let (_, page) = support::web::get(state.clone(), "/idea/movable").await;
+    assert!(!page.contains("last run"), "no journal, no link");
+
+    let runs = vault_dir.join("movable").join(store::RUNS_DIR);
+    std::fs::create_dir_all(&runs).unwrap();
+    let journal = concat!(
+        r#"{"type":"run_started","format_version":1,"run_id":"20260930T120000123Z-skill","slug":"movable","kind":"skill","build":"0.1.0","ts_ms":1}"#,
+        "\n",
+        r#"{"type":"llm_call","seq":0,"role":"critic","backend":"ollama","model":"llama3.2","temperature_milli":900,"request_sha256":"ab","response_text":"VERBATIM-ANSWER <b>","meta":{"usage":{"prompt_tokens":812,"output_tokens":64,"api_calls":1},"stop_reason":"length","num_ctx":4096,"ms":930}}"#,
+        "\n",
+        r#"{"type":"contract","call_seq":0,"contract":"ranked_list","outcome":{"status":"retried"}}"#,
+        "\n",
+        r#"{"type":"run_finished","outcome":"done","llm_calls":1,"ts_ms":2}"#,
+        "\n",
+    );
+    std::fs::write(runs.join(format!("{RUN_ID}.jsonl")), journal).unwrap();
+    std::fs::write(runs.join("20260101T000000000Z-chat.jsonl"), "").unwrap();
+
+    let (_, page) = support::web::get(state.clone(), "/idea/movable").await;
+    assert!(
+        page.contains(&format!("/idea/movable/runs/{RUN_ID}")),
+        "the last-run link names the newest journal"
+    );
+
+    let (status, body) =
+        support::web::get(state.clone(), &format!("/idea/movable/runs/{RUN_ID}")).await;
+    assert_eq!(status, StatusCode::OK);
+    for needle in [
+        "critic",
+        "ollama · llama3.2",
+        "ranked_list · retried",
+        "tokens in 812 · out 64",
+        "stop · length",
+        "output truncated",
+        "<details",
+        "VERBATIM-ANSWER &#60;b&#62;",
+    ] {
+        assert!(body.contains(needle), "missing {needle}: {body}");
+    }
+    assert!(
+        !body.contains("VERBATIM-ANSWER <b>"),
+        "the response is escaped"
+    );
+
+    // Documented failures: an unknown run, a hostile run id, a missing idea.
+    for uri in [
+        "/idea/movable/runs/20990101T000000000Z-chat",
+        "/idea/movable/runs/..%2Fidea",
+        "/idea/nope/runs/20260930T120000123Z-skill",
+    ] {
+        let (status, _) = support::web::get(state.clone(), uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
     }
 }
