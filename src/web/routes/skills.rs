@@ -66,6 +66,7 @@ fn contract_str(contract: OutputContract) -> &'static str {
         OutputContract::GroundClaims => "anchored claims",
         OutputContract::Proposal => "one proposal",
         OutputContract::Scorecard => "rubric scores",
+        OutputContract::SkillDraft => "skill draft + evidence",
     }
 }
 
@@ -80,6 +81,7 @@ fn card(skill: &Skill) -> SkillCard {
         source: skill.source.as_str(),
         digest: skill.digest.clone(),
         hidden: skill.hidden,
+        origin: skill.origin.clone(),
     }
 }
 

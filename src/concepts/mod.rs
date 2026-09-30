@@ -6,6 +6,7 @@ pub mod audit;
 pub mod build_plan;
 pub mod coverage;
 pub mod knowledge;
+pub mod make_skill;
 pub mod skills;
 pub mod swarm;
 pub mod workflows;
@@ -38,4 +39,10 @@ pub enum ConceptError {
     /// (docs/adr/0030).
     #[error("the model's answer had neither a goal nor a task — nothing was saved; try again")]
     PlanUnusable,
+    /// The distiller's kept answer held no skill file the loader accepts (docs/adr/0042), even
+    /// after the one contract retry; no draft was written.
+    #[error(
+        "the model's answer was not a usable skill draft ({0}) — nothing was saved; try again"
+    )]
+    DraftUnusable(String),
 }

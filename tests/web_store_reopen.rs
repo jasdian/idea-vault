@@ -335,3 +335,43 @@ async fn a_quarantined_fact_is_announced_and_searchable_but_not_remembered() {
     let (_, hits) = support::web::get(state, "/search?q=zebracorn").await;
     assert!(hits.contains("vaulted"), "quarantine not indexed:\n{hits}");
 }
+
+#[tokio::test]
+async fn make_skill_on_stored_shows_a_visible_indicator_and_lands_the_draft() {
+    let draft = "~~~skill\n---\nname: churn-probe\ndescription: \"Ask when the paying customer leaves.\"\nstage: attack\n---\n\nFind the quarter the customer stops paying.\n~~~\n\n## Evidence\n- \"the core bet is that agencies pay monthly\"\n";
+    let mock = support::spawn(
+        &["llama3.2"],
+        ChatScript::TokensAfterDelay {
+            tokens: vec![draft.to_string()],
+            delay_ms: 300,
+        },
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::Stored, true);
+    store::append_turn(
+        &vault_dir,
+        "vaulted",
+        "assistant (skill: premortem)",
+        "1. Churn.",
+    )
+    .unwrap();
+    store::append_turn(&vault_dir, "vaulted", "user", "so when do they leave?").unwrap();
+
+    let (status, body) = post_form(state.clone(), "/idea/vaulted/make-skill", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // D1: the stored view carries a visible thinking indicator, not a silent poll.
+    assert!(body.contains("foil-pending"), "{body}");
+    assert!(body.contains("make skill"), "{body}");
+    assert!(body.contains("hx-target=\"#discussion\""), "{body}");
+    assert!(!body.contains("queue-poll"), "{body}");
+
+    let done = poll_until(state.clone(), "/idea/vaulted/pending", "skill draft ready").await;
+    assert!(
+        done.contains("skill-draft-churn-probe"),
+        "artifacts panel OOB: {done}"
+    );
+    assert!(done.contains("stored · dormant"), "{done}");
+    let idea = store::read_idea(&vault_dir, "vaulted").unwrap();
+    assert_eq!(idea.frontmatter.state, IdeaState::Stored, "no state change");
+}

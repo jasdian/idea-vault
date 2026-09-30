@@ -7,7 +7,9 @@
 //! fan-out's cost). Compaction uses the heading helpers warn-only.
 
 use crate::ai::provenance::PromptTemplate;
-use crate::domain::OutputContract;
+use crate::domain::evidence::MIN_QUOTE_WORDS;
+use crate::domain::frontmatter::parse_skill;
+use crate::domain::{slug, OutputContract, SkillStage};
 
 /// Why an answer failed its contract — phrased so it can be read back to the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,12 @@ pub enum Violation {
     NoClaims,
     /// A Panel scorer's answer held no `C<i>: <0|1|2>` line.
     NoScores,
+    /// A make-skill draft (docs/adr/0042) had no `~~~skill` block the skill loader would accept;
+    /// the loader's own error is read back to the model.
+    NotASkillFile(String),
+    /// A make-skill draft had no `## Evidence` bullet carrying a quote of at least
+    /// `MIN_QUOTE_WORDS` words.
+    NoEvidence,
     /// The call ran out of room (docs/adr/0037): `output` when generation hit its length limit,
     /// so the answer's tail is missing; `input` when the prompt filled the window, so its head was
     /// dropped. Only an output truncation earns the retry — the same window would drop the same
@@ -102,6 +110,15 @@ impl std::fmt::Display for Violation {
             ),
             Violation::NoScores => f.write_str(
                 "the answer must be one line per criterion of the form C1: 0|1|2 — reason",
+            ),
+            Violation::NotASkillFile(why) => write!(
+                f,
+                "the answer must hold one skill file between a line `~~~skill` and a line `~~~`, \
+                 and that file was not valid: {why}"
+            ),
+            Violation::NoEvidence => f.write_str(
+                "the answer must end with a `## Evidence` heading over bullets, each holding a \
+                 double-quoted passage of at least three words copied from the discussion",
             ),
             // An input truncation is never read back to the model (it earns no retry), so its
             // wording is the short label the run journal and the off-contract badge show.
@@ -476,7 +493,130 @@ pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation
                 Ok(scored.join("\n"))
             }
         }
+        OutputContract::SkillDraft => {
+            if text.is_empty() {
+                return Err(Violation::Empty);
+            }
+            let (file, evidence) = split_skill_draft(text)?;
+            check_drafted_skill(&file).map_err(Violation::NotASkillFile)?;
+            let quotes = evidence_quotes(&evidence);
+            if quotes.is_empty() {
+                return Err(Violation::NoEvidence);
+            }
+            let bullets: Vec<String> = quotes
+                .iter()
+                .take(MAX_STAGE_LINES)
+                .map(|q| format!("- \"{q}\""))
+                .collect();
+            Ok(format!(
+                "~~~skill\n{file}\n~~~\n\n{EVIDENCE_HEADING}\n{}",
+                bullets.join("\n")
+            ))
+        }
     }
+}
+
+/// The heading a make-skill draft's evidence list sits under (docs/adr/0042).
+pub const EVIDENCE_HEADING: &str = "## Evidence";
+
+/// The contracts a drafted skill may promise: the owner-facing shapes only. The engine-only ones
+/// are parsed by a workflow stage's code, and `skill_draft` would make the draft a distiller.
+const DRAFTABLE_CONTRACTS: [OutputContract; 4] = [
+    OutputContract::Free,
+    OutputContract::BulletsOrEmpty,
+    OutputContract::RankedList,
+    OutputContract::FencedMarkdown,
+];
+
+/// Split a make-skill answer into the skill file inside its `~~~skill` fence and the text after
+/// the `## Evidence` heading. The fence closes at the last bare `~~~` line before that heading,
+/// so a stray tilde line inside the drafted prompt cannot cut it short.
+pub fn split_skill_draft(text: &str) -> Result<(String, String), Violation> {
+    let lines: Vec<&str> = text.lines().collect();
+    let is_open = |l: &str| {
+        l.trim()
+            .strip_prefix("~~~")
+            .is_some_and(|rest| rest.trim().eq_ignore_ascii_case("skill"))
+    };
+    let Some(open) = lines.iter().position(|l| is_open(l)) else {
+        return Err(Violation::NotASkillFile(
+            "there is no line `~~~skill` opening the file (a backtick fence does not count)".into(),
+        ));
+    };
+    let heading = lines
+        .iter()
+        .skip(open + 1)
+        .position(|l| is_evidence_heading(l))
+        .map(|i| i + open + 1);
+    let end = heading.unwrap_or(lines.len());
+    let Some(close) = lines[open + 1..end]
+        .iter()
+        .rposition(|l| l.trim() == "~~~")
+        .map(|i| i + open + 1)
+    else {
+        return Err(Violation::NotASkillFile(
+            "there is no line `~~~` closing the file".into(),
+        ));
+    };
+    let file = lines[open + 1..close].join("\n").trim().to_string();
+    let evidence = heading
+        .map(|h| lines[h + 1..].join("\n"))
+        .unwrap_or_default();
+    Ok((file, evidence))
+}
+
+fn is_evidence_heading(line: &str) -> bool {
+    let t = line.trim().trim_end_matches(':');
+    t.eq_ignore_ascii_case(EVIDENCE_HEADING)
+}
+
+/// The skill-loader rules a drafted file must already meet, minus the `{context}` slot, which
+/// code places (docs/adr/0042): it parses with no unknown key, has a slug name, a prompt, an
+/// owner-facing stage and contract, is not hidden and carries no `origin` (code sets it).
+fn check_drafted_skill(file: &str) -> Result<(), String> {
+    let (fm, prompt) = parse_skill(file).map_err(|e| e.to_string())?;
+    if !slug::is_valid(&fm.name) {
+        return Err(format!(
+            "name {:?} must use only lowercase letters, digits and '-'",
+            fm.name
+        ));
+    }
+    if fm.stage == SkillStage::Extract {
+        return Err("stage must be steelman, attack, consequence, converge or capstone".into());
+    }
+    if !DRAFTABLE_CONTRACTS.contains(&fm.contract) {
+        return Err(
+            "contract must be free, bullets_or_empty, ranked_list or fenced_markdown".into(),
+        );
+    }
+    if fm.hidden {
+        return Err("a drafted skill must not be hidden".into());
+    }
+    if fm.origin.is_some() {
+        return Err("leave out origin; it is filled in automatically".into());
+    }
+    if prompt.replace("{context}", "").trim().is_empty() {
+        return Err("the prompt under the frontmatter is empty".into());
+    }
+    Ok(())
+}
+
+/// The quoted passage of each bullet in a make-skill `## Evidence` list, in order: the text
+/// between the first opening quote (straight or curly) and the last closing one, kept only when
+/// it holds at least [`MIN_QUOTE_WORDS`] words. Shared by the contract and by
+/// `concepts::make_skill`, which grounds each quote against the discussion.
+pub fn evidence_quotes(evidence_md: &str) -> Vec<String> {
+    evidence_md
+        .lines()
+        .filter(|l| is_bullet(l))
+        .filter_map(|l| {
+            let open = l.find(['"', '“'])?;
+            let after = &l[open + l[open..].chars().next()?.len_utf8()..];
+            let close = after.rfind(['"', '”'])?;
+            let quote = after[..close].trim();
+            (quote.split_whitespace().count() >= MIN_QUOTE_WORDS).then(|| quote.to_string())
+        })
+        .collect()
 }
 
 /// The canonical verdict line for `raw` checked against `contract` (docs/adr/0038): `pass=1` with
@@ -815,6 +955,83 @@ mod tests {
         assert_eq!(
             validate(OutputContract::Scorecard, "all good"),
             Err(Violation::NoScores)
+        );
+    }
+
+    const DRAFT_FILE: &str = "---\nname: hostile-regulator\ndescription: \"Attack an idea as a regulator who wants it dead.\"\nstage: attack\nrole: critic\ncontract: ranked_list\n---\n\nAssume a regulator hates the idea below.\n```sh\nnot a fence of ours\n```";
+
+    fn draft(file: &str, evidence: &str) -> String {
+        format!("Here is the draft:\n\n~~~skill\n{file}\n~~~\n\n## Evidence\n{evidence}\n\nHope it helps!")
+    }
+
+    #[test]
+    fn skill_draft_accepts_a_tilde_fenced_file_with_quoted_evidence() {
+        let raw = draft(
+            DRAFT_FILE,
+            "- \"now assume a regulator hates it\" — the owner's move\n- “walk every hostile rule like that”\n- no quote here",
+        );
+        assert_eq!(
+            validate(OutputContract::SkillDraft, &raw).unwrap(),
+            format!(
+                "~~~skill\n{DRAFT_FILE}\n~~~\n\n## Evidence\n- \"now assume a regulator hates it\"\n- \"walk every hostile rule like that\""
+            )
+        );
+    }
+
+    #[test]
+    fn skill_draft_without_quoted_evidence_is_no_evidence() {
+        let no_heading = format!("~~~skill\n{DRAFT_FILE}\n~~~\n");
+        assert_eq!(
+            validate(OutputContract::SkillDraft, &no_heading),
+            Err(Violation::NoEvidence)
+        );
+        let short = draft(DRAFT_FILE, "- \"too short\"\n- unquoted words only here");
+        assert_eq!(
+            validate(OutputContract::SkillDraft, &short),
+            Err(Violation::NoEvidence)
+        );
+    }
+
+    #[test]
+    fn skill_draft_rejects_what_the_skill_loader_or_the_engine_would() {
+        let ev = "- \"now assume a regulator hates it\"";
+        let unknown = DRAFT_FILE.replace("role: critic", "role: critic\nmood: grim");
+        let engine = DRAFT_FILE.replace("contract: ranked_list", "contract: scorecard");
+        let extract = DRAFT_FILE.replace("stage: attack", "stage: extract");
+        let hidden = DRAFT_FILE.replace("role: critic", "role: critic\nhidden: true");
+        let origin = DRAFT_FILE.replace("role: critic", "role: critic\norigin: other-idea");
+        let bad_name = DRAFT_FILE.replace("hostile-regulator", "Hostile Regulator");
+        let empty = DRAFT_FILE.split("\n---\n").next().unwrap().to_string() + "\n---\n";
+        for file in [unknown, engine, extract, hidden, origin, bad_name, empty] {
+            assert!(
+                matches!(
+                    validate(OutputContract::SkillDraft, &draft(&file, ev)),
+                    Err(Violation::NotASkillFile(_))
+                ),
+                "accepted:\n{file}"
+            );
+        }
+        let backticks = format!("```skill\n{DRAFT_FILE}\n```\n\n## Evidence\n{ev}");
+        assert!(matches!(
+            validate(OutputContract::SkillDraft, &backticks),
+            Err(Violation::NotASkillFile(_))
+        ));
+        assert_eq!(
+            validate(OutputContract::SkillDraft, " "),
+            Err(Violation::Empty)
+        );
+        let note = retry_note(&Violation::NotASkillFile("unknown field `mood`".into()));
+        assert!(
+            note.contains("unknown field `mood`") && note.contains("~~~skill"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn evidence_quotes_reads_straight_and_curly_quotes_per_bullet() {
+        assert_eq!(
+            evidence_quotes("- \"one two three\" (owner)\n* “four five six”\n- none\n- \"a b\""),
+            ["one two three", "four five six"].map(String::from)
         );
     }
 

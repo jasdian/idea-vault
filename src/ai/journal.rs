@@ -49,6 +49,8 @@ pub enum RunKind {
     Store,
     BuildPlan,
     Replan,
+    /// A make-skill distil (docs/adr/0042): its calls write a draft artifact, never a turn.
+    MakeSkill,
 }
 
 impl RunKind {
@@ -64,6 +66,7 @@ impl RunKind {
             RunKind::Store => "store",
             RunKind::BuildPlan => "build-plan",
             RunKind::Replan => "replan",
+            RunKind::MakeSkill => "make-skill",
         }
     }
 }
@@ -652,6 +655,18 @@ mod tests {
         assert_eq!(left.len(), KEEP_RUNS);
         assert!(!left.contains(&"20000101T000000000Z-chat.jsonl".to_string()));
         assert_eq!(left.last().unwrap(), &format!("{run_id}.jsonl"));
+    }
+
+    #[test]
+    fn make_skill_run_kind_spelling() {
+        assert_eq!(RunKind::MakeSkill.as_str(), "make-skill");
+        assert_eq!(
+            serde_json::to_value(RunKind::MakeSkill).unwrap(),
+            serde_json::json!("make_skill")
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = open_run(tmp.path(), "idea", RunKind::MakeSkill).unwrap();
+        assert!(handle.lock().unwrap().run_id().ends_with("Z-make-skill"));
     }
 
     #[test]

@@ -1,9 +1,15 @@
 {# The consolidated writeup is NOT repeated here — it IS the idea body, already rendered in the
    page's top .statement (the store-completion swap refreshes that block out-of-band). This panel
-   is only the dormant marker + the way back in. #}
+   is only the dormant marker + the way back in, and the one move a stored idea still runs:
+   distilling a skill from its discussion without reopening it (docs/adr/0042, D1). #}
 <div class="stored" data-slug="{{ slug }}">
   <p class="stored__label">stored · dormant</p>
   <form hx-post="/idea/{{ slug }}/reopen" hx-target="#discussion" hx-swap="innerHTML">
     <button type="submit" class="btn">Reopen &amp; carry memory forward</button>
+  </form>
+  <form hx-post="/idea/{{ slug }}/make-skill" hx-target="#discussion" hx-swap="innerHTML"
+        hx-disabled-elt="find button">
+    <button type="submit" class="chip chip--make-skill"{% if busy %} disabled{% endif %}
+            title="1–2 model calls: distils the move that worked here into a draft skill for you to review; nothing is saved until you press Save. The idea stays stored.">✎ make skill</button>
   </form>
 </div>

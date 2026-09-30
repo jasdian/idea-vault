@@ -1,6 +1,6 @@
 # ADR-0010 — AI turns run as detached background jobs, not SSE streams
 
-- **Status:** Accepted (**supersedes** [ADR-0004](./0004-sse-token-streaming.md))
+- **Status:** Accepted (**supersedes** [ADR-0004](./0004-sse-token-streaming.md)) — amended by [ADR-0042](./0042-make-skill-distil-owner-skills.md) (make-skill is a second job that may run on a Stored idea, and the stored view shows its thinking indicator)
 - **Date:** 2026-07-07
 - **Deciders:** owner
 

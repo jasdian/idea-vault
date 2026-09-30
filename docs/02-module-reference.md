@@ -81,6 +81,7 @@ flowchart TB
             C_KNOW["knowledge.rs — extraction: fan-out lenses + persist artifacts (D30, ADR-0015)"]
             C_AUDIT["audit.rs — factored audit: findings, Auditor call, parse, appendix (ADR-0023)"]
             C_COVER["coverage.rs — spine coverage + next-move + chat skill book (docs/06-concepts/skills.md)"]
+            C_MAKESKILL["make_skill.rs — make skill: move trace, distil into a skill_draft artifact, finalize, placement, diff, save rules (ADR-0042, D42)"]
             C_PLAN["build_plan/plan.rs — BuildPlan: tolerant parse + canonical render of the capstone's plan,\nPROMPT.md and plan.md projections (docs/adr/0030)"]
             C_GATES["build_plan/gates/ — mod.rs (runs G1–G14 in order), claims.rs, sources.rs, tasks.rs: deterministic gates G1–G12, no model call (docs/adr/0030)"]
             C_LEAF["build_plan/gates/leaf.rs — G13 leaf gate: markers and tally only, never a demotion (docs/adr/0030)"]
@@ -91,7 +92,7 @@ flowchart TB
         end
 
         subgraph web["web/ (HTTP surface)"]
-            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources, plans, runs"]
+            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources, plans, runs, make_skill"]
             W_RUNS["routes/runs.rs — the run inspector R50: read-only view of one run journal (ADR-0037)"]
             W_PLANS["routes/plans.rs — the plan workbench routes R46–R48: answer, latest, re-plan (docs/adr/0032)"]
             W_MCPSRV["mcp_server/ — auth.rs, handler.rs, tools.rs, tasks.rs, idempotency.rs, prompts.rs: the inbound MCP\nserver at POST /api/mcp (rmcp ServerHandler + Bearer AuthLayer, ADR-0024)"]
@@ -263,7 +264,8 @@ flowchart TD
   Refine stages — [ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md),
   [ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md)), the swarm
   orchestrator, knowledge extraction (`knowledge.rs`, [D30](./06-concepts/swarm.md)), the factored
-  audit (`audit.rs`, [ADR-0023](./adr/0023-verification-layer.md)), and spine coverage (`coverage.rs`)
+  audit (`audit.rs`, [ADR-0023](./adr/0023-verification-layer.md)), spine coverage (`coverage.rs`)
+  and the make-skill distiller (`make_skill.rs`, [ADR-0042](./adr/0042-make-skill-distil-owner-skills.md))
   ([06-concepts](./06-concepts/)).
 - **`web`** — axum router, handlers, Askama rendering, and the background job registry (`web::jobs`,
   [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) that every AI-driven route (including

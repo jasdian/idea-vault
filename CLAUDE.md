@@ -80,7 +80,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D41), and ADRs 0001–0041. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D42), and ADRs 0001–0042. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -115,7 +115,10 @@ When implementing these, keep the mental model close to a real agent harness:
   "find the cheapest disproof", "market-size it", "devil's advocate"). Each is a markdown file
   (built-ins in `src/concepts/skills/*.md`, owner overrides in `vault/.skills/`) with a spine
   stage, role, output contract and use-when guidance, browsed on the `/skills` skill book
-  ([ADR-0022](docs/adr/0022-skills-as-markdown-and-the-skill-book.md)).
+  ([ADR-0022](docs/adr/0022-skills-as-markdown-and-the-skill-book.md)). The **make skill** button
+  distils a discussion into a `skill_draft` artifact (a job, never a turn); the owner edits and saves
+  it into `vault/.skills/` with no model call, never over a built-in
+  ([ADR-0042](docs/adr/0042-make-skill-distil-owner-skills.md), D42, R51–R52).
 - **Agents** — specialized subagent roles (critic, researcher, advocate, harvester, synthesizer,
   auditor) with scoped prompts.
 - **Workflows** — deterministic staged orchestrations over an idea, as opposed to free-form chat.

@@ -36,10 +36,11 @@ post-mortem. …
 | `description` | yes | free text |
 | `stage` | yes | `steelman` · `attack` · `consequence` · `converge` · `capstone` · `extract` |
 | `role` | no, default `critic` | `critic` · `researcher` · `advocate` · `harvester` · `synthesizer` |
-| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` · `build_plan` (ADR-0030) · `ground_claims` · `proposal` · `scorecard` (the last three are the workflow engine's, ADR-0034) |
+| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` · `build_plan` (ADR-0030) · `ground_claims` · `proposal` · `scorecard` (the last three are the workflow engine's, ADR-0034) · `skill_draft` (the make-skill distiller's, ADR-0042) |
 | `use_when` | no | free text |
 | `avoid_when` | no | free text |
 | `hidden` | no, default `false` | `true` keeps the skill registered but off the move chips |
+| `origin` | no | the idea slug a skill was distilled from by the make-skill button (ADR-0042); set by code, shown on the skill book as "distilled from" |
 
 Unknown keys are rejected, so a typo is reported rather than silently defaulted.
 
@@ -237,6 +238,11 @@ scorer's call role to `AgentRole::Auditor` in code. An internal skill is never a
 angle (a `400`) — an owner override of one stays hidden even if its frontmatter omits `hidden: true` — never an interactive skill run (`404`), and a workflow file that names one as a
 step is rejected ([ADR-0035](../adr/0035-workflows-as-markdown-and-the-workflow-book.md)).
 
+A third internal built-in, `distill-skill` (stage `extract`, role `harvester`, contract
+`skill_draft`), is the make-skill distiller ([Make skill](#make-skill-d42),
+[ADR-0042](../adr/0042-make-skill-distil-owner-skills.md)); the same rules keep it off every
+owner-facing surface.
+
 ### Orchestrator-only lenses (`extract-*`)
 
 Five more built-ins carry the reserved `extract-` prefix. They have stage `extract`, role
@@ -334,6 +340,61 @@ every path and command. It also carries a leaf rule: a task title is one commit 
 page derives a `PROMPT.md` run protocol and an `/attack`-style `plan.md` from the stored plan
 ([09-web-ui](../09-web-ui.md)).
 
+## Make skill (D42)
+
+The **make skill** button ([ADR-0042](../adr/0042-make-skill-distil-owner-skills.md)) distils the
+move that did the work in one discussion, often one the owner improvised in chat, into a draft
+owner skill. It sits on the idea page's capstones row and on the stored panel: a Stored idea is
+distilled without reopening it (owner decision D1).
+
+- **Precheck (sync, `400`):** at least 2 owner turns and 1 named move (skill, swarm, workflow or
+  knowledge turn), so a paid call never runs on an empty idea.
+- **The job (R51, ≤ 2 model calls, one permit):** the internal `distill-skill` prompt over the idea's
+  budgeted context plus two fixed blocks: a code-built **move trace** (every non-capstone turn's
+  heading, first line and CONFIRMED/UNCERTAIN/REFUTED counts, ≤ 1500 bytes, labelled *not evidence*)
+  and the skill book's names (≤ 1024 bytes). The answer is held to the `skill_draft` contract: one
+  `~~~skill` tilde-fenced file the loader accepts (no unknown key, a slug name, an owner-facing stage
+  and contract, not hidden, no `origin`) and a `## Evidence` list of quotes, with the one retry.
+  Artifacts and the run journal are never read into the prompt.
+- **Finalize (code):** every `{context}` the model wrote is stripped and one is appended (a literal
+  slot in the distiller's own prompt would be filled with the discussion), `origin: <idea-slug>` is
+  set, and the file is checked by the loader's own rules (`concepts::skills::check_candidate`).
+  Each evidence quote is grounded against the non-capstone turns: **✓ owner** (found in a `## user`
+  turn), **✓** (found elsewhere) or **✗** (not found).
+- **Output:** one `skill_draft` artifact (`skill-draft-<name>`, recipe of `distill-skill`) and a
+  one-shot notice. No transcript turn: model text written as a turn would become evidence for later
+  quotes.
+- **Review and Save (R52, sync, no model call):** the artifact page shows an editable textarea, the
+  placement (**ADD**; **UPDATE** an owner skill of that name, with a line diff and a digest stale
+  check; **RENAME REQUIRED** for a built-in or engine-only name, which this path never overwrites),
+  similar skills (token overlap ≥ 0.5, hints only) and the evidence marks. An ✗ quote is warned about
+  and never blocks Save (owner decision D3). Save writes `vault/.skills/<name>.md` atomically and
+  reloads the skills and workflows; the skill book then shows "distilled from <idea>". The artifact is
+  never modified. Over MCP, `make_skill` drafts only; there is no save tool (D5).
+
+```mermaid
+flowchart TD
+    BTN["make skill button (capstones row or stored panel)"] --> R51["R51 POST /idea/:slug/make-skill"]
+    R51 --> GUARD{"guard_make_skill: not Draft; >= 2 owner turns and >= 1 move"}
+    GUARD -- no --> E400["400 nothing to distil yet"]
+    GUARD -- yes --> CLAIM{"jobs::try_claim"}
+    CLAIM -- lost --> VIEW["re-render transcript or stored view (HND-6)"]
+    CLAIM -- won --> JOB["spawn_make_skill_job (RunKind::MakeSkill)"]
+    JOB --> DISTILL["make_skill::distill: trace + book + hydrated context, ask_on_contract skill_draft (<= 2 calls)"]
+    DISTILL --> FIN["finalize: code-placed {context}, origin, check_candidate; check_evidence"]
+    FIN -- unusable --> FAIL["mark_failed: nothing written"]
+    FIN --> ART["write skill_draft artifact (no turn)"]
+    ART --> NOTICE["mark_notice: skill draft ready"]
+    NOTICE --> R19["R19 artifact page: review panel"]
+    R19 --> R52["R52 POST .../artifact/:name/save-skill"]
+    R52 --> CHECK{"save_check: loads? built-in or internal name? stale digest?"}
+    CHECK -- invalid or reserved name --> E422["422 panel re-rendered"]
+    CHECK -- stale --> E409["409 superseded"]
+    CHECK -- ok --> WRITE["vault::store::write_owner_skill"]
+    WRITE --> RELOAD["workflows.reload(skills)"]
+    RELOAD --> BOOK["skill book: distilled from idea"]
+```
+
 ## Provenance: the skill digest and the recipe
 
 Every skill carries a **digest**: 12 hex digits of the SHA-256 of its raw markdown file, computed at
@@ -365,6 +426,8 @@ owner-editable data, so they are digested, never frozen
 - **Registry and invocation:** `concepts::skills` (`SkillRegistry`, `LiveSkills`, `invoke`, `ask_on_contract`).
 - **Output contracts:** `ai::contract`.
 - **Spine coverage and the chat skill book:** `concepts::coverage`.
+- **Make skill:** `concepts::make_skill` (distil, finalize, placement, save rules); routes
+  `web::routes::make_skill` (R51, R52); owner-file writes `vault::store::write_owner_skill`.
 - **Skill book page:** `web::routes::skills`.
 - **Context hydration:** `ai::budget`.
 - **Output persistence:** `vault::store` (append to `conversation.md`); a `build_plan` skill
@@ -386,3 +449,4 @@ owner-editable data, so they are digested, never frozen
 - [ADR-0037](../adr/0037-run-journal-diagnostics-only-call-record.md) — `ContractOutcome`, truncation, the run journal (D39).
 - [ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md) — the skill digest and the artifact recipe.
 - [ADR-0032](../adr/0032-plan-workbench-answers-and-versions.md) — the plan workbench and lineage (D33).
+- [ADR-0042](../adr/0042-make-skill-distil-owner-skills.md) — make skill: distil an owner skill from a discussion (D42).

@@ -1,5 +1,5 @@
 //! The Task↔Job bridge (docs/adr/0024): maps the long-running tools' (`chat`, `store_idea`,
-//! `run_skill`, `run_swarm`, `build_plan`, `run_workflow`) MCP-task lifecycle
+//! `run_skill`, `run_swarm`, `build_plan`, `run_workflow`, `make_skill`) MCP-task lifecycle
 //! (`tasks/get`/`tasks/result`/`tasks/cancel`, SEP-1686) onto idea-vault's existing
 //! slug-keyed background-job machinery (`web::jobs`, ADR-0010), without any change to `jobs.rs`
 //! itself — every job-state read/write below goes through its existing public functions.
@@ -52,6 +52,7 @@ use crate::domain::IdeaState;
 use crate::vault::store;
 use crate::web::jobs::{self, Pending};
 use crate::web::routes::chat::spawn_chat_turn;
+use crate::web::routes::make_skill::{guard_make_skill, spawn_make_skill_job};
 use crate::web::routes::memory::{
     guard_can_store, guard_skill, guard_swarm, guard_workflow, run_store_work, skill_run_kind,
     spawn_skill_job, spawn_swarm_job, spawn_workflow_job,
@@ -93,6 +94,9 @@ enum TaskKind {
     /// `run_workflow` (docs/adr/0036): a non-capstone workflow — one turn, plus the stage
     /// artifacts and run record it names.
     Workflow,
+    /// `make_skill` (docs/adr/0042): a distil that writes one `skill_draft` artifact and no turn,
+    /// finishing with a notice that names it.
+    MakeSkill,
 }
 
 fn kind_for(name: &str) -> Result<TaskKind, McpError> {
@@ -103,6 +107,7 @@ fn kind_for(name: &str) -> Result<TaskKind, McpError> {
         "run_swarm" => Ok(TaskKind::Swarm),
         "build_plan" => Ok(TaskKind::Plan),
         "run_workflow" => Ok(TaskKind::Workflow),
+        "make_skill" => Ok(TaskKind::MakeSkill),
         _ => Err(McpError::invalid_params(
             format!("'{name}' does not support task-based invocation"),
             None,
@@ -120,6 +125,7 @@ fn tool_name(kind: TaskKind) -> &'static str {
         TaskKind::Swarm => "run_swarm",
         TaskKind::Plan => "build_plan",
         TaskKind::Workflow => "run_workflow",
+        TaskKind::MakeSkill => "make_skill",
     }
 }
 
@@ -606,6 +612,11 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
         (Terminal::Completed, TaskKind::Store) if !is_stored(state, &entry.slug) => {
             Terminal::Failed(CONSUMED_ELSEWHERE.to_string())
         }
+        // A distil always ends in a notice naming its draft; `Idle` means another reader took
+        // that notice (or its failure), so there is nothing of this task's to serve.
+        (Terminal::Completed, TaskKind::MakeSkill) => {
+            Terminal::Failed(CONSUMED_ELSEWHERE.to_string())
+        }
         (terminal, _) => terminal,
     };
     entry.is_replayable = match (&terminal, entry.kind) {
@@ -613,6 +624,7 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
         (Terminal::Completed | Terminal::Notice(_), TaskKind::Store) => {
             is_stored(state, &entry.slug)
         }
+        (Terminal::Completed | Terminal::Notice(_), TaskKind::MakeSkill) => true,
         (
             Terminal::Completed | Terminal::Notice(_),
             TaskKind::Chat
@@ -692,7 +704,8 @@ fn claim_counted(
         | TaskKind::Skill
         | TaskKind::Swarm
         | TaskKind::Plan
-        | TaskKind::Workflow => before,
+        | TaskKind::Workflow
+        | TaskKind::MakeSkill => before,
     };
     Ok(Claimed {
         key,
@@ -710,6 +723,7 @@ fn op_key(kind: TaskKind, args: &Value) -> Result<Option<String>, McpError> {
         TaskKind::Skill | TaskKind::Workflow => Ok(Some(required_str(args, "name")?.to_string())),
         TaskKind::Swarm => Ok(Some(swarm_angles(args)?.join(","))),
         TaskKind::Store => Ok(Some("store".to_string())),
+        TaskKind::MakeSkill => Ok(Some("make-skill".to_string())),
         TaskKind::Plan => Ok(Some(
             if plan_audited(args)? {
                 "audited"
@@ -881,6 +895,19 @@ fn claim_and_spawn(
             spawn_workflow_job(state, slug, name.clone(), book, RunKind::Workflow);
             Ok(Some(name))
         }
+        // R51's guard and job (HND-10); a Stored idea is admitted like on the web (D1).
+        TaskKind::MakeSkill => {
+            let key = op_key(kind, args)?;
+            let conversation = store::read_conversation(&state.config.vault_dir, slug)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            guard_make_skill(&idea, &conversation)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            if !jobs::try_claim(&state.jobs, slug) {
+                return Err(busy_error(slug));
+            }
+            spawn_make_skill_job(state, slug);
+            Ok(key)
+        }
     }
 }
 
@@ -958,6 +985,12 @@ fn finish_result(
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
         },
         TaskKind::Plan => plan_result(state, slug, own_turn),
+        // A distil appends no turn: its notice names the draft artifact (docs/adr/0042).
+        TaskKind::MakeSkill => CallToolResult::success(vec![Content::text(format!(
+            "{} — read it with get_artifact; the owner saves it into the skill book from the \
+             artifact page (there is no save tool)",
+            notice.unwrap_or_else(|| "skill draft written".to_string())
+        ))]),
         // A non-capstone workflow also appends exactly one turn; its stage artifacts are listed
         // beside it so the client can read them without scanning get_idea (docs/adr/0036).
         TaskKind::Workflow => match own_turn_text(state, slug, own_turn) {

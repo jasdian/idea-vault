@@ -107,12 +107,16 @@ pub enum OutputContract {
     /// A Panel scorer's rubric answer (ADR-0034): one `C<i>: <0|1|2> — reason` line per
     /// criterion.
     Scorecard,
+    /// The make-skill distiller's draft (ADR-0042): one `~~~skill` tilde-fenced skill file plus a
+    /// `## Evidence` list of verbatim quotes. The fence is tilde so a drafted skill whose own
+    /// prompt holds backtick fences cannot close it early.
+    SkillDraft,
 }
 
 impl OutputContract {
     /// Every contract, in declaration order; the skills doc's field table is held to it
     /// (tests/doc_examples.rs).
-    pub const ALL: [OutputContract; 8] = [
+    pub const ALL: [OutputContract; 9] = [
         OutputContract::Free,
         OutputContract::BulletsOrEmpty,
         OutputContract::RankedList,
@@ -121,5 +125,6 @@ impl OutputContract {
         OutputContract::GroundClaims,
         OutputContract::Proposal,
         OutputContract::Scorecard,
+        OutputContract::SkillDraft,
     ];
 }

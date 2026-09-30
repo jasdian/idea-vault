@@ -40,6 +40,8 @@ vault/
       <run-stamp>-<workflow>-<n>-<stage>.md  # a workflow stage's artifact: ground_map, scorecard, or a
                                         #   Loop's finding (ADR-0034)
       <run-stamp>-<workflow>-run.md     # a workflow's run record (kind: workflow_run; ADR-0034)
+      skill-draft-<name>.md             # a make-skill draft awaiting the owner's review and Save
+                                        #   (kind: skill_draft; ADR-0042)
 index.db             # derived index (may be deleted + rebuilt)
 .idea-vault-root     # vault-root marker — its presence says "this is the real vault" (ADR-0019)
 .mcp-servers.json    # owner-global MCP server registry — APP CONFIG, not vault truth (ADR-0018)
@@ -70,7 +72,10 @@ index.db             # derived index (may be deleted + rebuilt)
 > **`.skills/` is app configuration too.** Each file is one ideation move — frontmatter + prompt
 > template ([skills](./06-concepts/skills.md)) — that adds to or overrides a built-in. Like the
 > registries below, it is invisible to reindex (no `idea.md`, so `vault::walk` never enters it) and
-> never indexed; deleting it restores the built-ins. Path: `IDEA_VAULT_SKILLS_DIR`.
+> never indexed; deleting it restores the built-ins. Path: `IDEA_VAULT_SKILLS_DIR`. A file saved from
+> a make-skill draft carries `origin: <idea-slug>`, and is written only by
+> `vault::store::write_owner_skill` on the owner's Save, never under a built-in's name
+> ([ADR-0042](./adr/0042-make-skill-distil-owner-skills.md)).
 
 > **`.workflows/` is app configuration too.** Each file is one named, staged run
 > ([workflows](./06-concepts/workflows.md)) — frontmatter (name, description, stages) plus an
@@ -126,7 +131,7 @@ erDiagram
         markdown lines "one pointer per fact"
     }
     ARTIFACT_MD {
-        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine|build_plan|ground_map|scorecard|workflow_run), lens, created, model, revises, version, answered (build plans)"
+        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine|build_plan|ground_map|scorecard|workflow_run|skill_draft), lens, created, model, revises, version, answered (build plans)"
         markdown body "one lens's finding, the converged synthesis, or quarantined store-time facts"
     }
     ARTIFACT_HTML {

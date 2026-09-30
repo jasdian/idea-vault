@@ -68,7 +68,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach, parser corpus and regrade, the gate under test | D40 |
 | [14-no-mistakes-gate](./14-no-mistakes-gate.md) | The fixed seven-step shipping gate, the invariant catalog, the findings protocol, the checklist | D41 |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0041 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0042 | — |
 
 ## Locked decisions (at a glance)
 
@@ -110,6 +110,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Foil hygiene and lockdown:** the claude-code foil runs `--restricted --tools Read,Grep,Glob` (+ web tools when web access is on), always `--strict-mcp-config`, in the idea's own folder, never under `--dangerously-skip-permissions`, with a checked `init` event, an env pass-list that never includes `IDEA_VAULT_*`, and an 1800 s turn deadline; every Ollama tool result is fenced as untrusted data ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md), amends ADR-0009, ADR-0013).
 - **Recipe provenance and audit re-ask:** every AI-written artifact carries a `recipe:` (skill or workflow digest, parse-coupled template refs, build id, off-contract lenses), shown on R19 with a "recipe changed since" badge and "provenance unknown" for old artifacts; parse-coupled prompts are pinned by goldens; a malformed or partial audit gets at most one targeted re-ask ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md), amends ADR-0023).
 - **No-mistakes gate:** `scripts/gate.sh` is a fixed seven-step pipeline with no skip (intent incl. freshness, strict invariants, build, tests, fmt, clippy, honesty); `check-invariants.sh` collects every finding with an id and severity, and every rule has a seeded test; undeclared fixture, snapshot, floor or rule changes are red; findings are acted on by what a fix would change (no-op, auto-fix, ask-user), and `RUN_PROTOCOL` in every `PROMPT.md` says the same ([ADR-0041](./adr/0041-no-mistakes-gate.md), amends ADR-0030, D41).
+- **Make skill:** a button on the idea page and the stored panel distils the move that worked in a discussion into a draft owner skill as a background job (≤ 2 model calls, `distill-skill` under the `skill_draft` contract, a code-built move trace, never the run journal); the draft is a `skill_draft` artifact, never a turn, with each evidence quote marked ✓ owner / ✓ / ✗; the owner edits and saves it into `vault/.skills/` synchronously, never over a built-in, with a diff and a stale check on an update; an ungrounded quote warns but never blocks; MCP `make_skill` drafts only ([ADR-0042](./adr/0042-make-skill-distil-owner-skills.md), amends ADR-0022, ADR-0023, ADR-0010, D42, R51–R52).
 
 ## Beyond these docs
 

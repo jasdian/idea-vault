@@ -158,13 +158,19 @@ fn meter_line(
 /// `/idea/{slug}/cancel`, aborting the detached task and swapping the (indicator-free) transcript
 /// back in.
 fn pending_block(slug: &str, secs: u64, note: &str) -> String {
+    pending_indicator(slug, secs, note, "#transcript")
+}
+
+/// [`pending_block`] swapping into `target`: `#transcript` in a discussion, `#discussion` under
+/// the stored panel, which has no transcript (a make-skill job on a Stored idea, ADR-0042 D1).
+fn pending_indicator(slug: &str, secs: u64, note: &str, target: &str) -> String {
     let status = if note.trim().is_empty() {
         format!("the foil is thinking — {secs}s")
     } else {
         format!("{} — {secs}s", esc(note))
     };
     format!(
-        r##"<div class="foil-pending" role="status" aria-live="polite" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="#transcript" hx-swap="innerHTML"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="foil-pending__note">{status}</span><form class="foil-cancel" hx-post="/idea/{slug}/cancel" hx-target="#transcript" hx-swap="innerHTML"><button type="submit" class="btn-cancel" title="Stop this run — nothing is saved">cancel</button></form></div>"##
+        r##"<div class="foil-pending" role="status" aria-live="polite" hx-get="/idea/{slug}/pending" hx-trigger="load delay:1500ms" hx-target="{target}" hx-swap="innerHTML"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="foil-pending__note">{status}</span><form class="foil-cancel" hx-post="/idea/{slug}/cancel" hx-target="{target}" hx-swap="innerHTML"><button type="submit" class="btn-cancel" title="Stop this run — nothing is saved">cancel</button></form></div>"##
     )
 }
 
@@ -185,17 +191,30 @@ fn notice_block(message: &str) -> String {
     )
 }
 
-/// What goes under the stored panel for a job slot: a store's one-shot notice (or failure), a
-/// follow-up poll while the store job is still wrapping up, or nothing.
+/// What goes under the stored panel for a job slot: a job's one-shot notice (or failure), the
+/// visible thinking indicator while a job runs (a make-skill distil, or a store wrapping up —
+/// ADR-0042 D1: a model call on a stored idea is never silent), or nothing.
 fn stored_outcome(slug: &str, pending: crate::web::jobs::Pending) -> String {
     use crate::web::jobs::Pending;
     match pending {
         Pending::Notice(msg) | Pending::Failed(msg) => notice_block(&msg),
-        Pending::Running { .. } => format!(
-            r##"<div class="queue-poll" aria-hidden="true" hx-get="/idea/{slug}/pending" hx-trigger="load delay:800ms" hx-target="#discussion" hx-swap="innerHTML"></div>"##
-        ),
+        Pending::Running { secs, note } => pending_indicator(slug, secs, &note, "#discussion"),
         Pending::Idle => String::new(),
     }
+}
+
+/// The stored panel (`_stored.html`) followed by its job outcome. `busy` disables the panel's
+/// make-skill button while any job holds the slot.
+fn render_stored(slug: &str, pending: crate::web::jobs::Pending) -> Result<String, WebError> {
+    use askama::Template as _;
+    let busy = matches!(pending, crate::web::jobs::Pending::Running { .. });
+    let panel = crate::web::templates::Stored {
+        slug: slug.to_string(),
+        busy,
+    }
+    .render()
+    .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
+    Ok(panel + &stored_outcome(slug, pending))
 }
 
 /// A bare re-arm poller: keeps the `/pending` poll alive across a beat when the idea is idle (or
@@ -623,8 +642,9 @@ pub(crate) fn render_memory_panel(
 /// The poll indicator targets `#transcript`, but the stored view replaces the whole discussion
 /// panel (composer and actions included), so that branch widens the swap with `HX-Retarget`/
 /// `HX-Reswap` response headers — exactly the swap the store form performed back when it was a
-/// synchronous request. Only the store job can finish on a `Stored` idea (every other job route
-/// guards on the discussion states), so the branch fires precisely at store completion.
+/// synchronous request. Two jobs can finish on a `Stored` idea: the store job itself (the
+/// branch then fires at store completion) and a make-skill distil, which never changes state
+/// (ADR-0042 D1), so the branch also serves that job's polls.
 pub(crate) fn respond_discussion_or_stored(
     state: &AppState,
     slug: &str,
@@ -632,21 +652,18 @@ pub(crate) fn respond_discussion_or_stored(
     use axum::response::IntoResponse as _;
     let idea = store::read_idea(&state.config.vault_dir, slug)?; // 404 if the idea is gone
     if idea.frontmatter.state == IdeaState::Stored {
-        use askama::Template as _;
-        let mut html = crate::web::templates::Stored {
-            slug: slug.to_string(),
-        }
-        .render()
-        .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
-        // A store that quarantined facts or read a truncated discussion leaves a one-shot notice
-        // in the job slot; it belongs under the stored panel, since this swap replaces the
+        // A job's one-shot notice belongs under the stored panel, since this swap replaces the
         // transcript that would otherwise show it. Truth lands a beat before the job clears its
-        // slot, so a still-Running slot earns one more poll rather than a lost notice.
-        html.push_str(&stored_outcome(
-            slug,
-            crate::web::jobs::peek(&state.jobs, slug),
-        ));
+        // slot, so a still-Running slot keeps its indicator (and poll) rather than a lost notice.
+        let mut html = render_stored(slug, crate::web::jobs::peek(&state.jobs, slug))?;
         html.push_str(&state_badge_oob(IdeaState::Stored));
+        // A finished make-skill job lands a draft artifact; the panel sits outside
+        // `#discussion`, so refresh it out of band as the discussion path does.
+        html.push_str(&crate::web::routes::artifacts::render_artifacts_panel(
+            &state.config.vault_dir,
+            slug,
+            true,
+        )?);
         // The store job rewrote idea.md's body to the consolidated writeup — refresh the page's
         // top .statement out-of-band, since the stored panel deliberately no longer carries it
         // (it would render the same writeup twice on every stored page otherwise).
@@ -911,12 +928,7 @@ fn render_panel(
     use askama::Template as _;
 
     if idea.frontmatter.state == IdeaState::Stored {
-        let stored = crate::web::templates::Stored {
-            slug: idea.frontmatter.slug.clone(),
-        }
-        .render()
-        .map_err(|e| WebError::Internal(format!("template render: {e}")))?;
-        return Ok(stored + &stored_outcome(&idea.frontmatter.slug, pending));
+        return render_stored(&idea.frontmatter.slug, pending);
     }
 
     // Store is legal only from InDiscussion/Reopened (D9) — a Draft page must not offer it.

@@ -6,7 +6,7 @@
 
 ## Conventions
 
-- **ID** — stable `D1`…`D41` (see Coverage below for why the range runs past D25). References
+- **ID** — stable `D1`…`D42` (see Coverage below for why the range runs past D25). References
   across docs use the ID.
 - **Tool** — all diagrams are **Mermaid** in `mermaid` fenced code blocks, rendering inline on GitHub with no
   build step (see [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md) ethos; escape hatches below).
@@ -69,6 +69,7 @@
 | **D36** | Flowchart | Panel stage: proposals → no contest or cold one-proposal scoring by the Auditor role → pure aggregate (totals, tie-break, grafts) → findings + scorecard → graft-mode synthesis (ADR-0034) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D37** | State machine | Loop and Refine: per-round precheck, absorb in step order, stop reasons Dry/Cap/Failed, then audit-gated Refine rounds by id (ADR-0034) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D38** | Flowchart | Workflow registry: built-ins + `vault/.workflows/` → parse by hand-dispatched `kind:` → validate against the skill registry → issue or register → one `Book` pair, swapped whole on reload (ADR-0035) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D42** | Flowchart | Make skill: button → R51 guard (not Draft, ≥ 2 owner turns, ≥ 1 move) → claim → distil job (≤ 2 calls, `skill_draft` contract) → finalize + evidence → `skill_draft` artifact + notice, no turn → R19 review panel → R52 save check (loads, not built-in/internal, fresh digest) → `write_owner_skill` → reload → skill book (ADR-0042) | [06-concepts/skills](./06-concepts/skills.md) |
 | **D20** | State machine | Ollama-unavailable degradation | [05-ai-integration](./05-ai-integration.md) |
 | **D21** | Sequence | Concurrency & context-budget model | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D22** | Activity | Slug lifecycle & collision handling | [03-data-model](./03-data-model.md) |
@@ -87,12 +88,12 @@
 
 ## Coverage
 
-- **41 IDs, D1–D41** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
+- **42 IDs, D1–D42** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
   were added for containerized deployment, D30 for knowledge extraction, D31 for reference
   sources, D32 for the workflow stage model, D33/D34 for the plan workbench and MCP replay, and
   D35–D38 for the grounded, ranked and bounded workflow stages and the workflow registry, and
-  D39–D41 for the run journal, the parser corpus and the no-mistakes gate, all
-  without renumbering — the range is D1–D41 in
+  D39–D41 for the run journal, the parser corpus and the no-mistakes gate, and D42 for make skill, all
+  without renumbering — the range is D1–D42 in
   practice, not D1–D25), each authored exactly once.
   **D1–D15** are the mandatory core (they cover every flow named in [CLAUDE.md](../CLAUDE.md));
   **D16–D25** complete the SOTA set; **D26–D29** cover containerized deployment; **D30** covers
@@ -106,7 +107,8 @@
   **D38** the workflow registry ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md));
   **D39** the run journal ([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)); **D40**
   the parser corpus and regrade ([ADR-0038](./adr/0038-parser-corpus-and-read-only-regrade.md));
-  **D41** the no-mistakes gate ([ADR-0041](./adr/0041-no-mistakes-gate.md)).
+  **D41** the no-mistakes gate ([ADR-0041](./adr/0041-no-mistakes-gate.md)); **D42** make skill
+  ([ADR-0042](./adr/0042-make-skill-distil-owner-skills.md)).
 - The six core flows from CLAUDE.md map to: new idea **D10**, chat (background job + poll, not SSE
   — ADR-0010) **D11**, store+memory **D12**, reopen+memory **D13**, swarm **D14**, reindex **D15**.
 

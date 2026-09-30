@@ -9,7 +9,8 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::web::routes::{
-    admin, artifacts, chat, compact, ideas, mcp, memory, plans, runs, settings, skills, sources,
+    admin, artifacts, chat, compact, ideas, make_skill, mcp, memory, plans, runs, settings, skills,
+    sources,
 };
 pub use crate::web::state::AppState;
 
@@ -53,6 +54,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/idea/{slug}/artifact/{name}/delete",
             post(artifacts::delete_artifact),
+        )
+        // Make skill (docs/adr/0042): R51 drafts as a job; R52 saves a reviewed draft.
+        .route("/idea/{slug}/make-skill", post(make_skill::make_skill))
+        .route(
+            "/idea/{slug}/artifact/{name}/save-skill",
+            post(make_skill::save_skill),
         )
         // The plan workbench (docs/adr/0032): answer into a new version, the lineage head, and
         // a model re-plan as a background job.

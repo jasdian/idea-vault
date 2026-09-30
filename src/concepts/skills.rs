@@ -75,12 +75,17 @@ const BUILTIN: &[(&str, &str)] = &[
     ),
     ("ground-read", include_str!("skills/ground-read.md")),
     ("panel-score", include_str!("skills/panel-score.md")),
+    ("distill-skill", include_str!("skills/distill-skill.md")),
 ];
 
-/// Skills only the workflow engine runs: Ground's readers and Panel's scorers (docs/adr/0034).
-/// Their output feeds code that parses and checks it, so an owner never runs one as a move, a
-/// swarm angle or a workflow step. An owner file may still override the prompt.
-pub const INTERNAL_SKILLS: [&str; 2] = ["ground-read", "panel-score"];
+/// The make-skill distiller (docs/adr/0042): reads a discussion and drafts a skill file.
+pub const DISTILL_SKILL: &str = "distill-skill";
+
+/// Skills only the engine runs: Ground's readers and Panel's scorers (docs/adr/0034), and the
+/// make-skill distiller (docs/adr/0042). Their output feeds code that parses and checks it, so
+/// an owner never runs one as a move, a swarm angle or a workflow step. An owner file may still
+/// override the prompt.
+pub const INTERNAL_SKILLS: [&str; 3] = ["ground-read", "panel-score", DISTILL_SKILL];
 
 /// Where a registered skill's definition came from — shown on the skill book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +121,8 @@ pub struct Skill {
     pub hidden: bool,
     /// One of [`INTERNAL_SKILLS`]: engine-only, never offered or accepted as an owner step.
     pub internal: bool,
+    /// The idea this skill was distilled from by make-skill (docs/adr/0042), if any.
+    pub origin: Option<String>,
     pub prompt: String,
     pub source: SkillSource,
     /// [`digest12`] of the skill file's raw bytes, before `{context}` is filled — what an
@@ -165,6 +172,12 @@ fn parse_skill_doc(raw: &str, source: SkillSource) -> Result<Skill, String> {
     if !prompt.contains("{context}") {
         return Err("prompt has no {context} slot for the idea".to_string());
     }
+    // The skill book links the origin as `/idea/<origin>` (docs/adr/0042).
+    if let Some(origin) = fm.origin.as_deref().filter(|o| !slug::is_valid(o)) {
+        return Err(format!(
+            "origin {origin:?} must be an idea slug (lowercase letters, digits and '-')"
+        ));
+    }
     let internal = INTERNAL_SKILLS.contains(&fm.name.as_str());
     Ok(Skill {
         name: fm.name,
@@ -178,10 +191,18 @@ fn parse_skill_doc(raw: &str, source: SkillSource) -> Result<Skill, String> {
         // guard_skill refuses it, so surfacing it as a chip would only offer a 404.
         hidden: fm.hidden || internal,
         internal,
+        origin: fm.origin,
         prompt,
         source,
         digest: digest12(raw.as_bytes()),
     })
+}
+
+/// Check a candidate owner skill file by the loader's own rules: what a make-skill Save
+/// revalidates before it writes `vault/.skills/<name>.md` (docs/adr/0042). The name becomes the
+/// file stem, so the loader's name-equals-stem rule holds by construction.
+pub fn check_candidate(raw: &str) -> Result<Skill, String> {
+    parse_skill_doc(raw, SkillSource::Vault)
 }
 
 /// The set of skills available at runtime: the built-ins, then the owner's `vault/.skills/`.
@@ -874,6 +895,60 @@ mod tests {
                 skill.name
             );
         }
+    }
+
+    #[test]
+    fn distill_skill_is_internal_hidden_and_refused_as_a_move() {
+        let registry = SkillRegistry::builtin();
+        let distill = registry
+            .get(DISTILL_SKILL)
+            .expect("distill-skill registered");
+        assert!(distill.internal && distill.hidden);
+        assert_eq!(distill.contract, OutputContract::SkillDraft);
+        assert_eq!(distill.role, SkillRole::Harvester);
+        assert!(!registry.move_names().contains(&DISTILL_SKILL.to_string()));
+        assert!(registry.visible().all(|s| s.name != DISTILL_SKILL));
+        // A literal slot in the distiller's text would be filled with the discussion; the one
+        // slot sits at the very end.
+        assert!(distill.prompt.ends_with("{context}"));
+    }
+
+    #[test]
+    fn check_candidate_agrees_with_the_loader() {
+        let cases = [
+            skill_doc("my-move", "attack", "Do it.\n{context}"),
+            skill_doc("my-move", "attack", "Forgot the slot."),
+            skill_doc("My Move", "attack", "{context}"),
+            "---\nname: my-move\ndescription: d\nstage: attack\norigin: an-idea\n---\n{context}"
+                .to_string(),
+            "---\nname: my-move\ndescription: d\nstage: attack\norigin: ../x\n---\n{context}"
+                .to_string(),
+            "---\nname: my-move\ndescription: d\nstage: attack\nmood: x\n---\n{context}"
+                .to_string(),
+            "no frontmatter".to_string(),
+        ];
+        for raw in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            write(tmp.path(), "my-move.md", &raw);
+            let (registry, issues) = SkillRegistry::load(tmp.path());
+            let checked = check_candidate(&raw);
+            assert_eq!(checked.is_ok(), issues.is_empty(), "{raw}\n{issues:?}");
+            if let Ok(skill) = checked {
+                let loaded = registry.get("my-move").unwrap();
+                assert_eq!(skill.origin, loaded.origin);
+                assert_eq!(skill.digest, loaded.digest);
+            }
+        }
+        let with_origin = check_candidate(
+            "---\nname: my-move\ndescription: d\nstage: attack\norigin: an-idea\n---\n{context}",
+        )
+        .unwrap();
+        assert_eq!(with_origin.origin.as_deref(), Some("an-idea"));
+        assert!(check_candidate(
+            "---\nname: my-move\ndescription: d\nstage: attack\norigin: ../x\n---\n{context}"
+        )
+        .unwrap_err()
+        .contains("origin"));
     }
 
     #[test]

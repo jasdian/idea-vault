@@ -392,7 +392,51 @@ pub struct ArtifactPage {
     pub attack_plan_md: Option<String>,
     /// The plan workbench (docs/adr/0032), for a build plan only.
     pub plan_work: Option<PlanWorkView>,
+    /// The make-skill review panel (`_skill_draft.html`, docs/adr/0042), pre-rendered, for a
+    /// skill draft only.
+    pub skill_draft: Option<String>,
     pub recipe: RecipeView,
+}
+
+/// The make-skill review panel (`templates/_skill_draft.html`, docs/adr/0042): the editable
+/// draft, where it would land in the skill book, similar skills, the diff against an owner file
+/// it would update, and each evidence quote marked grounded or not. Serves the artifact page and
+/// R52's re-render.
+#[derive(Template, WebTemplate)]
+#[template(path = "_skill_draft.html")]
+pub struct SkillDraftPanel {
+    pub slug: String,
+    pub file_name: String,
+    /// The text in the textarea: the draft, or the owner's edit on a re-render.
+    pub raw: String,
+    /// `add`, `update`, `rename` or `unknown` (the text does not parse), for styling.
+    pub placement_kind: &'static str,
+    pub placement_line: String,
+    /// The owner file's digest when this is an update; posted back as R52's stale check.
+    pub base_digest: Option<String>,
+    pub diff: Vec<DiffRow>,
+    pub similar: Vec<String>,
+    pub evidence: Vec<EvidenceRow>,
+    pub ungrounded: usize,
+    /// A refusal to show beside the textarea.
+    pub message: Option<String>,
+    /// The saved skill's name, after a Save.
+    pub saved: Option<String>,
+}
+
+/// One review-diff line: `same`, `added` or `removed`, with its sign.
+pub struct DiffRow {
+    pub kind: &'static str,
+    pub sign: &'static str,
+    pub text: String,
+}
+
+/// One evidence quote as the review panel marks it.
+pub struct EvidenceRow {
+    pub mark: &'static str,
+    /// `owner`, `grounded` or `ungrounded`, for styling.
+    pub kind: &'static str,
+    pub quote: String,
 }
 
 /// An artifact's provenance as R19 shows it (ADR-0040): what made it, whether that skill or
@@ -504,6 +548,8 @@ pub struct ArtifactExport {
 #[template(path = "_stored.html")]
 pub struct Stored {
     pub slug: String,
+    /// A job holds the slot: the make-skill button renders disabled (ADR-0042 D1).
+    pub busy: bool,
 }
 
 /// The MCP servers page shell (`templates/mcp.html`); the list is pre-rendered so a mutation can
@@ -672,6 +718,8 @@ pub struct SkillCard {
     /// The file's digest, as an artifact's recipe records it (ADR-0040).
     pub digest: String,
     pub hidden: bool,
+    /// The idea a make-skill Save distilled it from (docs/adr/0042), linked on the card.
+    pub origin: Option<String>,
 }
 
 /// The Sources page shell (`templates/sources.html`); the list is pre-rendered so a mutation can

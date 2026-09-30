@@ -1,7 +1,7 @@
 //! The tool catalog (docs/adr/0024) and the synchronous half of tool dispatch.
 //!
 //! The long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`,
-//! `run_workflow`) are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
+//! `run_workflow`, `make_skill`) are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
 //! with `task:{}` takes the Task lifecycle in `tasks.rs` (`enqueue_task` → `tasks/get` →
 //! `tasks/result`), while a plain `tools/call` from a Task-unaware client is routed by
 //! `call_sync` to [`super::tasks::TaskRegistry::call_sync_bounded`] — the same claim/spawn and
@@ -231,6 +231,26 @@ pub(super) fn catalog() -> Vec<Tool> {
         )
         .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
         Tool::new(
+            "make_skill",
+            "Distil the move that worked in an idea's discussion (in discussion, reopened or \
+             stored) into a draft skill file for the owner's skill book. The draft lands as a \
+             skill_draft artifact, never a turn; the result names its slug (read it with \
+             get_artifact). Saving it into the skill book is the owner's click on the artifact \
+             page — there is no save tool. At most 2 model calls. Long-running: prefer invoking \
+             it as a task; a plain call waits a few seconds and otherwise returns a 'still \
+             running' note — call again with the same arguments to collect it.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "idempotency_key": idempotency_key_schema(),
+                },
+                "required": ["slug"],
+                "additionalProperties": false,
+            })),
+        )
+        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
+        Tool::new(
             "list_workflows",
             "List the workflow book: every named, deterministic staged run (name, description, \
              use-when/avoid-when guidance, stage kinds, worst-case model calls, whether it wants \
@@ -327,7 +347,13 @@ pub(super) async fn call_sync(
 ) -> Result<CallToolResult, McpError> {
     if matches!(
         name,
-        "chat" | "store_idea" | "run_skill" | "run_swarm" | "build_plan" | "run_workflow"
+        "chat"
+            | "store_idea"
+            | "run_skill"
+            | "run_swarm"
+            | "build_plan"
+            | "run_workflow"
+            | "make_skill"
     ) {
         return tasks.call_sync_bounded(state, name, args).await;
     }
@@ -697,7 +723,7 @@ mod tests {
     #[test]
     fn catalog_is_stable_and_marks_long_running_tools_as_task_optional() {
         let tools = catalog();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 17);
         let mut seen = std::collections::HashSet::new();
         for t in &tools {
             assert!(
@@ -715,6 +741,7 @@ mod tests {
             "run_swarm",
             "build_plan",
             "run_workflow",
+            "make_skill",
         ] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(
