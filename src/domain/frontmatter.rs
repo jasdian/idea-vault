@@ -231,7 +231,8 @@ pub fn parse_idea(input: &str) -> Result<(IdeaFrontmatter, String), DomainError>
 /// without one predates versioning and loads as-is (no migration); a later format bumps this.
 pub const IDEA_FORMAT_VERSION: u32 = 1;
 
-const VERSION_KEY: &str = "version";
+/// Namespaced so it never collides with an owner's own `version:` key, which stays in `extra`.
+const VERSION_KEY: &str = "format_version";
 
 /// Accept a missing version (a file written before versioning) or any version up to
 /// [`IDEA_FORMAT_VERSION`]. A newer or malformed version is an error, so an older app never
@@ -256,7 +257,7 @@ fn check_idea_version(version: Option<serde_norway::Value>) -> Result<(), Domain
 /// What `emit_idea` serializes: the format version first, then the idea's own keys.
 #[derive(serde::Serialize)]
 struct VersionedIdea<'a> {
-    version: u32,
+    format_version: u32,
     #[serde(flatten)]
     fm: &'a IdeaFrontmatter,
 }
@@ -268,7 +269,7 @@ struct VersionedIdea<'a> {
 /// anyway (defense in depth — no panic paths in library code).
 pub fn emit_idea(fm: &IdeaFrontmatter, body: &str) -> Result<String, DomainError> {
     let yaml = serde_norway::to_string(&VersionedIdea {
-        version: IDEA_FORMAT_VERSION,
+        format_version: IDEA_FORMAT_VERSION,
         fm,
     })?;
     Ok(emit_fence(&yaml, body))
@@ -402,7 +403,7 @@ Body text here.\n";
 
     /// An `idea.md` exactly as `emit_idea` writes it, carrying keys the app does not know.
     const UNKNOWN_KEYS: &str = "---\n\
-version: 1\n\
+format_version: 1\n\
 title: Distributed idea market\n\
 slug: distributed-idea-market\n\
 state: in_discussion\n\
@@ -436,7 +437,7 @@ created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\n---\n\nB.\n";
         let (fm, body) = parse_idea(shuffled).unwrap();
         assert_eq!(
             emit_idea(&fm, &body).unwrap(),
-            "---\nversion: 1\ntitle: T\nslug: t\nstate: draft\ntags: []\n\
+            "---\nformat_version: 1\ntitle: T\nslug: t\nstate: draft\ntags: []\n\
 created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\nalpha: a\nzeta: 1\n---\n\nB.\n"
         );
     }
@@ -457,7 +458,9 @@ created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\nalpha: a\nzeta: 1\
         let (fm, body) = parse_idea(DOC_EXAMPLE).unwrap();
         let emitted = emit_idea(&fm, &body).unwrap();
         assert!(
-            emitted.starts_with(&format!("---\nversion: {IDEA_FORMAT_VERSION}\ntitle: ")),
+            emitted.starts_with(&format!(
+                "---\nformat_version: {IDEA_FORMAT_VERSION}\ntitle: "
+            )),
             "{emitted}"
         );
         // Read back, the version is consumed by the codec, never left in `extra`.
@@ -467,16 +470,28 @@ created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\nalpha: a\nzeta: 1\
     }
 
     #[test]
+    fn frontmatter_version_leaves_an_owner_version_key_alone() {
+        for owner in ["draft", "2.1", "3"] {
+            let raw = DOC_EXAMPLE.replacen("---\n", &format!("---\nversion: {owner}\n"), 1);
+            let (fm, body) = parse_idea(&raw).unwrap();
+            assert!(fm.extra.contains_key("version"), "{owner}");
+            let (again, _) = parse_idea(&emit_idea(&fm, &body).unwrap()).unwrap();
+            assert_eq!(again.extra, fm.extra, "{owner} survives a rewrite");
+        }
+    }
+
+    #[test]
     fn frontmatter_version_missing_still_loads() {
-        // DOC_EXAMPLE predates versioning: no `version:` key.
-        assert!(!DOC_EXAMPLE.contains("version"));
+        // DOC_EXAMPLE predates versioning: no `format_version:` key.
+        assert!(!DOC_EXAMPLE.contains("format_version"));
         let (fm, _) = parse_idea(DOC_EXAMPLE).unwrap();
         assert_eq!(fm.slug, "distributed-idea-market");
     }
 
     #[test]
     fn frontmatter_version_newer_or_malformed_is_refused() {
-        let with = |v: &str| DOC_EXAMPLE.replacen("---\n", &format!("---\nversion: {v}\n"), 1);
+        let with =
+            |v: &str| DOC_EXAMPLE.replacen("---\n", &format!("---\nformat_version: {v}\n"), 1);
         assert!(parse_idea(&with("1")).is_ok());
         let newer = parse_idea(&with("2")).unwrap_err().to_string();
         assert!(newer.contains("newer"), "{newer}");

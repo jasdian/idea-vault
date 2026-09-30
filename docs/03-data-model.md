@@ -207,13 +207,14 @@ D7) and `SkillFrontmatter` (skill files, which reject unknown keys; see
 skipped on emit when empty, so an idea with no attached sources serializes exactly as it did
 before the field existed ([ADR-0021](./adr/0021-reference-sources.md)).
 
-`version` is the `idea.md` format version and a reserved key: every write stamps
+`format_version` is the `idea.md` format version and the one reserved key (namespaced so an
+owner's own `version:` stays an ordinary preserved key): every write stamps
 `domain::frontmatter::IDEA_FORMAT_VERSION` (currently `1`) as the first key, a file without one
 predates versioning and loads as-is (no migration), and a file with a newer or malformed version
 is refused rather than rewritten down to an older format. Known limitation: such an idea is
 skipped by `reindex` and the boot drift check like any unparsable idea (a log warning, no UI note),
 so it is missing from the idea list and search until a newer build opens the vault;
-`idea-vault validate` names each one. It is read off by the codec, never
+`idea-vault validate` names each one. `format_version` is read off by the codec, never
 carried on `IdeaFrontmatter`. Every other key the app does not know (an owner's own `aliases:`)
 lands in the flattened `extra` map and survives a rewrite: known keys are written first in field
 order, then unknown keys sorted by name. `idea-vault validate` checks the vault against this

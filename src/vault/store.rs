@@ -578,7 +578,13 @@ pub fn read_memory_index(vault_dir: &Path, idea_slug: &str) -> Result<MemoryInde
         }
         Err(e) => return Err(e.into()),
     };
+    Ok(parse_memory_index(&raw))
+}
 
+/// Parse the text of a `MEMORY.md`: one entry per `- [Title](memory/<slug>.md) — <summary>` line,
+/// other lines skipped. Split from [`read_memory_index`] so `validate` can read the file itself
+/// and report an unreadable one as a finding.
+pub fn parse_memory_index(raw: &str) -> MemoryIndex {
     let mut entries = Vec::new();
     for line in raw.lines() {
         let Some(rest) = line.strip_prefix("- [") else {
@@ -600,7 +606,7 @@ pub fn read_memory_index(vault_dir: &Path, idea_slug: &str) -> Result<MemoryInde
             summary: summary.to_string(),
         });
     }
-    Ok(MemoryIndex { entries })
+    MemoryIndex { entries }
 }
 
 /// Rebuild `vault/<idea_slug>/MEMORY.md` (the one-line-per-fact pointer index) by scanning

@@ -83,7 +83,7 @@ pub fn validate_vault(vault_dir: &Path) -> Result<Report, VaultError> {
     let ideas = walk::walk_ideas(vault_dir)?;
     let mut findings = ideas
         .iter()
-        .map(|entry| validate_idea(vault_dir, &entry.slug, &entry.path))
+        .map(|entry| validate_idea(&entry.slug, &entry.path))
         .collect::<Result<Vec<_>, _>>()?
         .concat();
     findings.extend(headless_idea_dirs(vault_dir)?);
@@ -134,7 +134,7 @@ pub fn write_report(report: &Report, out: &mut impl std::io::Write) -> std::io::
     )
 }
 
-fn validate_idea(vault_dir: &Path, slug: &str, dir: &Path) -> Result<Vec<Finding>, VaultError> {
+fn validate_idea(slug: &str, dir: &Path) -> Result<Vec<Finding>, VaultError> {
     let finding = |kind, file: &str, detail: String| Finding {
         slug: slug.to_string(),
         kind,
@@ -170,8 +170,19 @@ fn validate_idea(vault_dir: &Path, slug: &str, dir: &Path) -> Result<Vec<Finding
         .map(|(file, detail)| finding(FindingKind::Frontmatter, &file, detail));
 
     let stems: BTreeSet<&str> = facts.iter().map(|(stem, _)| stem.as_str()).collect();
-    let index = store::read_memory_index(vault_dir, slug)?;
-    let coverage = memory_coverage(&stems, &index)
+    // A missing MEMORY.md is an empty index (an idea never stored); an unreadable one is a finding
+    // and its coverage check is skipped, since there is nothing to compare against.
+    let memory_md = dir.join("MEMORY.md");
+    let index = if memory_md.exists() {
+        read_file(&memory_md).map(|raw| store::parse_memory_index(&raw))
+    } else {
+        Ok(store::parse_memory_index(""))
+    };
+    let coverage = index
+        .map_or_else(
+            |problem| vec![problem],
+            |index| memory_coverage(&stems, &index),
+        )
         .into_iter()
         .map(|detail| finding(FindingKind::MemoryIndex, "MEMORY.md", detail));
 
@@ -495,6 +506,43 @@ created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\nBody.\n";
         assert_eq!(report.findings[0].slug, "My Idea");
         assert!(
             report.findings[0].detail.contains("not a valid slug"),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn validate_reports_an_unreadable_memory_md_and_keeps_going() {
+        let tmp = tempfile::tempdir().unwrap();
+        idea(tmp.path(), "a");
+        fact(tmp.path(), "a", "one", "One", "First.");
+        fs::write(tmp.path().join("a/MEMORY.md"), [0xff, 0xfe]).unwrap();
+        idea(tmp.path(), "b");
+        fs::create_dir_all(tmp.path().join("b/MEMORY.md")).unwrap();
+        idea(tmp.path(), "c");
+        fact(tmp.path(), "c", "orphan", "Orphan", "Unlisted.");
+
+        let report = validate_vault(tmp.path()).unwrap();
+        let rows: Vec<(&str, FindingKind)> = report
+            .findings
+            .iter()
+            .map(|f| (f.slug.as_str(), f.kind))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("a", FindingKind::MemoryIndex),
+                ("b", FindingKind::MemoryIndex),
+                ("c", FindingKind::MemoryIndex),
+            ]
+        );
+        assert!(
+            report.findings[0].detail.contains("unreadable"),
+            "{:?}",
+            report.findings
+        );
+        assert!(
+            report.findings[1].detail.contains("unreadable"),
             "{:?}",
             report.findings
         );

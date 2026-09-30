@@ -2208,7 +2208,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("future")).unwrap();
         std::fs::write(
             tmp.path().join("future/idea.md"),
-            "---\nversion: 2\ntitle: Future\nslug: future\nstate: draft\n\
+            "---\nformat_version: 2\ntitle: Future\nslug: future\nstate: draft\n\
 created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\n\nFrom a newer build.\n",
         )
         .unwrap();
@@ -2219,7 +2219,7 @@ created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\n\nFrom a newe
         assert!(!check_drift(&conn, tmp.path()).unwrap());
         assert!(std::fs::read_to_string(tmp.path().join("future/idea.md"))
             .unwrap()
-            .starts_with("---\nversion: 2\n"));
+            .starts_with("---\nformat_version: 2\n"));
     }
 
     fn lexical_edge_rows(conn: &Connection) -> Vec<(String, String, f64, String)> {
