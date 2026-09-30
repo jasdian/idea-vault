@@ -82,3 +82,6 @@ unimplemented = "deny"
 # HTC-8, OB-001: log through tracing, never stdout/stderr, outside main.rs.
 print_stdout = "deny"
 print_stderr = "deny"
+
+[dependencies.hex]
+version = "0.4"
