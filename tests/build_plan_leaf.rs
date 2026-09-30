@@ -27,6 +27,7 @@ fn gate_plan(plan_section: &str) -> (BuildPlan, GateReport) {
             open_artifact: None,
             audit: None,
             probe: &probe,
+            answered: &[],
         },
     );
     (plan, report)

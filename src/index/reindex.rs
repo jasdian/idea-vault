@@ -708,6 +708,9 @@ mod tests {
                 lens: Some("extract-key-decisions".into()),
                 created: dt(13),
                 model: "test".into(),
+                revises: None,
+                version: None,
+                answered: Vec::new(),
             },
             body: body.into(),
         }

@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use crate::ai::sources::SourceProbe;
 use crate::concepts::audit::{AuditReport, Finding, Label};
-use crate::concepts::build_plan::plan::{BuildPlan, Provenance};
+use crate::concepts::build_plan::plan::{order_kept_markers, BuildPlan, Provenance};
 use crate::domain::evidence::{locate, normalize_for_match};
 use crate::vault::store::{
     is_capstone_turn, parse_turn_heading, split_turns, turn_role, TurnSource,
@@ -149,6 +149,16 @@ pub struct OpenArtifact {
     pub items: Vec<String>,
 }
 
+/// One question the owner answered on the plan workbench (docs/adr/0032): the id it had, the
+/// question as asked, the owner's answer verbatim and the plan version it was asked on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    pub qid: String,
+    pub asked: String,
+    pub answer: String,
+    pub in_stem: String,
+}
+
 /// Everything the gates read besides the plan itself.
 #[derive(Debug, Clone, Copy)]
 pub struct GateInputs<'a> {
@@ -157,6 +167,8 @@ pub struct GateInputs<'a> {
     /// `None` in quick (unaudited) mode.
     pub audit: Option<&'a AuditView>,
     pub probe: &'a SourceProbe,
+    /// The owner answers of the plan's lineage; empty for a first plan. G3 never re-asks one.
+    pub answered: &'a [Answered],
 }
 
 /// What the gates did: header notes for the owner and a tally of each action, keyed by a short
@@ -187,6 +199,7 @@ pub fn run(plan: &mut BuildPlan, inputs: &GateInputs) -> GateReport {
     tasks::apply(plan, inputs, &mut report);
     leaf::apply(plan, inputs, &mut report);
     tree::apply(plan, &mut report);
+    order_kept_markers(plan);
     report
 }
 

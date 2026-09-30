@@ -21,7 +21,8 @@ use crate::concepts::audit::{self, AuditReport, Finding};
 use crate::concepts::build_plan::finish::PlanMode;
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::skills::{
-    ask_on_contract, hydrate_context, persist_plan, RelatedProvider, SkillRegistry,
+    ask_on_contract, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
+    SkillRegistry,
 };
 use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize};
 use crate::concepts::ConceptError;
@@ -445,6 +446,12 @@ pub async fn run_workflow(
                     }
                     if let Some(f) = &findings {
                         carried.extend(findings_carry(f, report.as_ref(), budget, planner));
+                    }
+                }
+                if planner {
+                    let prior = prior_plan_block(vault_dir, idea_slug);
+                    if !prior.is_empty() {
+                        carried.push(prior.trim_end().to_string());
                     }
                 }
                 let (mut context, clipped) = stage_context_flagged(
