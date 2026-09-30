@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+{# R49 — one workflow in full (ADR-0035): what it is for, each stage with its share of the
+   worst-case call ceiling (ADR-0034), a Panel's rubric, the owner-facing explanation, and the
+   definition file as loaded — the thing to copy into vault/.workflows/ to fork it. #}
+<a class="crumb" href="/skills#workflows">← skill book</a>
+<h1 class="title">{{ card.name }}</h1>
+<div class="idea-subhead">
+  <span class="mcp__pill{% if card.source != "built-in" %} mcp__pill--on{% endif %}">{{ card.source }}</span>
+  <span class="mcp__token book__cost">{{ card.cost }}</span>
+  {% if card.capstone %}<span class="mcp__token">capstone</span>{% endif %}
+  {% if card.hidden %}<span class="mcp__token">hidden</span>{% endif %}
+</div>
+
+<section class="mcp book">
+  <div class="book__stage">
+    <p class="book__desc">{{ card.description }}</p>
+    {% if !card.use_when.is_empty() %}<p class="book__when"><span class="book__label">use when</span> {{ card.use_when }}</p>{% endif %}
+    {% if !card.avoid_when.is_empty() %}<p class="book__when"><span class="book__label">not when</span> {{ card.avoid_when }}</p>{% endif %}
+    {% if card.needs_sources %}
+    <p class="src__hint">It opens by grounding itself in the idea's attached sources; on an idea with
+      none, that stage is skipped at no cost and the rest runs as usual.</p>
+    {% endif %}
+  </div>
+
+  <div class="book__stage">
+    <h2 class="book__stage-name">stages</h2>
+    <ol class="book__stages book__stages--full">
+      {% for st in card.stages %}
+      <li>
+        <span class="book__kind">{{ st.kind }}</span> {{ st.detail }} <span class="book__calls">≤{{ st.calls }} call{% if st.calls != 1 %}s{% endif %}</span>
+        {% if !st.rubric.is_empty() %}
+        <table class="book__rubric">
+          <thead><tr><th>criterion</th><th>weight</th><th>scores 0 when</th><th>scores 2 when</th></tr></thead>
+          <tbody>
+            {% for c in st.rubric %}
+            <tr><td><code>{{ c.name }}</code></td><td>×{{ c.weight }}</td><td>{{ c.zero }}</td><td>{{ c.two }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+
+  {% if !body_html.trim().is_empty() %}
+  <div class="book__stage">
+    <h2 class="book__stage-name">how it works</h2>
+    <div class="statement">{{ body_html|safe }}</div>
+  </div>
+  {% endif %}
+
+  <div class="book__stage">
+    <h2 class="book__stage-name">definition</h2>
+    <p class="src__note">copy into <code>{{ dir }}/{{ card.name }}.md</code> to override it, or
+      under a new name to fork it, then reload the skill book.</p>
+    <pre class="copyable book__raw">{{ raw }}</pre>
+  </div>
+</section>
+{% endblock %}

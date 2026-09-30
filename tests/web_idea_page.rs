@@ -548,3 +548,90 @@ async fn capstone_row_unusable_plan_surfaces_the_retry_message_in_the_job_result
     let body = support::web::poll_until(state, "/idea/sharp-idea/pending", &message).await;
     assert!(body.contains(&message), "{body}");
 }
+
+/// The `title` attribute of the workflow chip that posts to `name`.
+fn workflow_chip_title<'a>(page: &'a str, name: &str) -> &'a str {
+    let form = page
+        .split(&format!("hx-post=\"/idea/sharp-idea/workflow/{name}\""))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {name} chip"));
+    form.split("title=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn chips_include_owner_workflow_and_capstone_row_holds_ready_to_build() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "body\n");
+    let dir = state.workflows.dir().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("quick-check.md"),
+        "---\nname: quick-check\ndescription: An owner one-angle check\nstages:\n  - kind: fan_out\n    steps:\n      - {role: critic, skill: premortem}\n  - kind: synthesize\n---\n",
+    )
+    .unwrap();
+    let (status, _) = post_form(state.clone(), "/skills/reload", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let body = actions_page(state).await;
+    let (moves, capstones) = body
+        .split_once("class=\"capstones\"")
+        .expect("capstone row");
+    // The owner workflow is a chip in the moves row, its title carrying the ceiling (ADR-0034).
+    assert!(moves.contains("hx-post=\"/idea/sharp-idea/workflow/quick-check\""));
+    assert_eq!(
+        workflow_chip_title(&body, "quick-check"),
+        "Deterministic workflow (D19): An owner one-angle check. Worst case: up to 2 model \
+         calls · widest stage 1 → 1 wave at K=1. Runs serially on your local Ollama model, so \
+         it takes a while."
+    );
+    assert!(workflow_chip_title(&body, "design-panel").contains("up to 12 model calls"));
+    // The capstone is only in the capstone row, and its audited chip states its own worst case.
+    assert!(!moves.contains("/workflow/ready-to-build\""));
+    assert!(capstones.contains("hx-post=\"/idea/sharp-idea/workflow/ready-to-build\""));
+    assert!(capstones.contains("Worst case: up to 12 model calls · widest stage 5 → 5 waves"));
+}
+
+#[tokio::test]
+async fn no_sources_hint_on_ground_workflow_chip() {
+    let hint = "no sources attached, so its ground stage is skipped";
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec![])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion, "body\n");
+
+    let bare = actions_page(state.clone()).await;
+    assert!(workflow_chip_title(&bare, "design-panel").contains(hint));
+    assert!(
+        !workflow_chip_title(&bare, "interrogate").contains(hint),
+        "a workflow with no Ground stage never carries it"
+    );
+    assert!(
+        bare.contains(
+            "no sources attached: design-panel, ready-to-build will skip their ground stage"
+        ),
+        "{bare}"
+    );
+
+    // Attach a registered source: the hint and caption go, because Ground would now run.
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("note.md"), "reference\n").unwrap();
+    state
+        .sources
+        .add(idea_vault::sources::SourceConfig {
+            name: idea_vault::domain::Name::try_from("refs").unwrap(),
+            host_path: src.path().to_path_buf(),
+        })
+        .unwrap();
+    let mut idea = store::read_idea(&vault_dir, "sharp-idea").unwrap();
+    idea.frontmatter.sources = vec!["refs".into()];
+    store::write_idea(&vault_dir, &idea).unwrap();
+
+    let sourced = actions_page(state).await;
+    assert!(!workflow_chip_title(&sourced, "design-panel").contains(hint));
+    assert!(!sourced.contains("ground stage"), "{sourced}");
+}

@@ -321,7 +321,43 @@ pub(crate) struct ActionsInput<'a> {
     pub can_store: bool,
     pub busy: bool,
     pub settings: &'a crate::ai::LlmSettings,
+    pub chips: ChipCtx,
     pub oob: bool,
+}
+
+/// What the workflow chips' cost lines and no-sources hint are computed from (ADR-0034): the
+/// shared model bound K the waves are counted at, and whether this idea's turns carry any
+/// resolvable source — the same test Ground's skip makes, so the hint never disagrees with a run.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChipCtx {
+    pub concurrency: usize,
+    pub has_sources: bool,
+}
+
+impl ChipCtx {
+    /// From the idea's scoped backend (`scoped_llm`), whose source probe is exactly what a run
+    /// started now would ground against.
+    pub(crate) fn new(state: &AppState, scoped: &crate::ai::LlmBackend) -> Self {
+        Self {
+            concurrency: state.config.ai_concurrency,
+            has_sources: !scoped.source_probe().is_empty(),
+        }
+    }
+}
+
+/// A workflow chip's hover title: the description, the worst-case cost (shown before running,
+/// ADR-0034), and the no-sources hint when a Ground stage would be skipped.
+fn workflow_title(w: &crate::concepts::workflows::Workflow, chips: ChipCtx) -> String {
+    let cost = crate::web::routes::skills::cost_line(w, chips.concurrency);
+    let hint = if w.needs_sources() && !chips.has_sources {
+        format!(" ({})", crate::web::routes::skills::NO_SOURCES_HINT)
+    } else {
+        String::new()
+    };
+    format!(
+        "Deterministic workflow (D19): {}. Worst case: {cost}.{hint}",
+        w.description
+    )
 }
 
 /// The "Plan · vN · k open" chip for the idea's plan lineage head (docs/adr/0032). Degrades to
@@ -355,6 +391,7 @@ pub(crate) fn render_actions(input: ActionsInput) -> Result<String, WebError> {
         can_store,
         busy,
         settings,
+        chips,
         oob,
     } = input;
     let skills = book.skills.as_ref();
@@ -365,9 +402,25 @@ pub(crate) fn render_actions(input: ActionsInput) -> Result<String, WebError> {
         .filter(|w| !w.capstone)
         .map(|w| crate::web::templates::WorkflowChip {
             name: w.name.to_string(),
-            description: w.description.to_string(),
+            title: workflow_title(w, chips),
         })
         .collect();
+    let capstone = book
+        .workflows
+        .get(crate::concepts::workflows::READY_TO_BUILD);
+    // Every Ground workflow the owner is offered here, the capstone included, that this idea's
+    // missing sources would leave ungrounded.
+    let ungrounded = if chips.has_sources {
+        Vec::new()
+    } else {
+        book.workflows
+            .visible()
+            .filter(|w| !w.capstone)
+            .chain(capstone)
+            .filter(|w| w.needs_sources())
+            .map(|w| w.name.clone())
+            .collect()
+    };
     // Move chips: every visible skill except capstones, which get their own button row.
     let moves = skills
         .visible()
@@ -425,6 +478,10 @@ pub(crate) fn render_actions(input: ActionsInput) -> Result<String, WebError> {
         workflows,
         backend_note: backend_note(settings.backend),
         audit_on: settings.audit_findings,
+        build_cost: capstone
+            .map(|w| crate::web::routes::skills::cost_line(w, chips.concurrency))
+            .unwrap_or_default(),
+        ungrounded,
         plan: plan_chip(vault_dir, slug),
         oob,
     }
@@ -489,6 +546,7 @@ pub(crate) fn respond_with_transcript(
         can_store,
         busy,
         settings: &llm.settings(),
+        chips: ChipCtx::new(state, &llm),
         oob: true,
     })?);
     // Third OOB fragment: the artifacts panel, so a finished extraction (or any transcript
@@ -777,6 +835,7 @@ pub(crate) fn build_discussion(
     model: &str,
     can_store: bool,
     book: &crate::concepts::workflows::Book,
+    chips: ChipCtx,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -806,6 +865,7 @@ pub(crate) fn build_discussion(
         can_store,
         busy,
         settings,
+        chips,
         oob: false,
     })?;
     let queue_html = render_queue_panel(slug, queued_items, false)?;
@@ -833,6 +893,7 @@ fn render_panel(
     settings: &crate::ai::LlmSettings,
     model: &str,
     book: &crate::concepts::workflows::Book,
+    chips: ChipCtx,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -860,6 +921,7 @@ fn render_panel(
         model,
         can_store,
         book,
+        chips,
         pending,
         queued_items,
         budget_bytes,
@@ -903,6 +965,7 @@ pub async fn idea_page(
         &llm.settings(),
         &llm.model(),
         &book,
+        ChipCtx::new(&state, &llm),
         pending,
         queued_items,
         llm.context_budget().max_bytes,

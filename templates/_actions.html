@@ -55,10 +55,15 @@
       {# Text-only like the sibling chips — an emoji glyph inflates the chip's line box and makes
          it tower over the rest of the row; the dashed border is the workflow marker. #}
       <button type="submit" class="chip chip--workflow"
-              title="Deterministic workflow (D19): {{ wf.description }}. {{ backend_note }}">{{ wf.name }}</button>
+              title="{{ wf.title }} {{ backend_note }}">{{ wf.name }}</button>
     </form>
     {% endfor %}
     <span class="moves__caption">swarm attacks from {{ default_angles }} angles by default, then converges into one synthesis · <a href="/skills">skill book</a></span>
+    {# ADR-0034: a Ground workflow still runs without sources, it just skips grounding at no
+       cost — said up front so the owner can attach a source first if they wanted it. #}
+    {% if !ungrounded.is_empty() %}
+    <span class="moves__caption moves__hint" role="note">no sources attached: {% for n in ungrounded %}{% if !loop.first %}, {% endif %}{{ n }}{% endfor %} will skip {% if ungrounded.len() == 1 %}its{% else %}their{% endif %} ground stage — attach a source above to verify against real code</span>
+    {% endif %}
   </div>
 
   <div class="capstones">
@@ -81,7 +86,7 @@
     <form class="capstones__pair" hx-post="/idea/{{ slug }}/workflow/ready-to-build" hx-target="#transcript" hx-swap="innerHTML"
           hx-disabled-elt="find button">
       <button type="submit" class="chip chip--build chip--build-audited"{% if busy %} disabled{% endif %}
-              title="About 7 model calls: 5 harvesters + audit + planner; only owner-quoted decisions become Settled, refuted items are fenced. Slower on small models.{% if !audit_on %} (audit is off: the plan will be marked audit skipped){% endif %}">⌁⌁ audited build plan</button>
+              title="About 7 model calls: 5 harvesters + audit + planner; only owner-quoted decisions become Settled, refuted items are fenced. Slower on small models.{% if !build_cost.is_empty() %} Worst case: {{ build_cost }}.{% endif %}{% if !audit_on %} (audit is off: the plan will be marked audit skipped){% endif %}">⌁⌁ audited build plan</button>
     </form>
     {# The way back to the plan's workbench (docs/adr/0032): the latest version, and how many of
        its questions still wait on the owner. #}

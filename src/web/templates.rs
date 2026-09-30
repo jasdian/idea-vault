@@ -267,6 +267,12 @@ pub struct Actions {
     pub backend_note: String,
     /// The Settings audit toggle: the audited build chip warns when it is off.
     pub audit_on: bool,
+    /// The audited build chip's worst-case cost line (ADR-0034), empty when `ready-to-build` is
+    /// not registered.
+    pub build_cost: String,
+    /// The Ground workflows (visible chips and the capstone) that will skip their ground stage
+    /// because this idea has no sources attached — the caption names them; empty with sources.
+    pub ungrounded: Vec<String>,
     /// The lineage head of the idea's build plans, for the "Plan · vN · k open" chip
     /// (docs/adr/0032); `None` until a first plan exists.
     pub plan: Option<PlanChip>,
@@ -291,10 +297,12 @@ pub struct MoveChip {
     pub title: String,
 }
 
-/// One workflow button: name (the route segment) + description (the hover title).
+/// One workflow button: name (the route segment) + its hover title, which carries the description,
+/// the worst-case cost line (ADR-0034: the ceiling is shown before running) and, when the idea has
+/// no sources, the note that its Ground stage will be skipped.
 pub struct WorkflowChip {
     pub name: String,
-    pub description: String,
+    pub title: String,
 }
 
 /// One checkbox in the swarm angle picker: the angle (a skill name), its tooltip (the same one
@@ -534,6 +542,61 @@ pub struct SkillsList {
     pub dir: String,
     pub issues: Vec<crate::concepts::skills::SkillIssue>,
     pub groups: Vec<SkillGroup>,
+    /// Where owner workflows are read from (`IDEA_VAULT_WORKFLOWS_DIR`, ADR-0035).
+    pub workflow_dir: String,
+    /// Owner workflow files that failed to load or validate on the last (re)load.
+    pub workflow_issues: Vec<crate::concepts::workflows::WorkflowIssue>,
+    /// Every registered workflow, in chip order — drawn from the same book snapshot as `groups`.
+    pub workflows: Vec<WorkflowCard>,
+}
+
+/// One workflow on the skill book and its R49 detail page (ADR-0035), as display strings.
+pub struct WorkflowCard {
+    pub name: String,
+    pub description: String,
+    pub use_when: String,
+    pub avoid_when: String,
+    pub source: &'static str,
+    pub hidden: bool,
+    /// Derived from the definition (it chains a build-plan skill): runs from the capstone row.
+    pub capstone: bool,
+    /// The worst-case calls and waves line (ADR-0034), the same one the chip's title carries.
+    pub cost: String,
+    /// It opens with a Ground stage, which is skipped on an idea with no sources.
+    pub needs_sources: bool,
+    pub stages: Vec<StageLine>,
+}
+
+/// One stage of a workflow, as the book and the detail page list it.
+pub struct StageLine {
+    /// The on-disk `kind:` spelling.
+    pub kind: &'static str,
+    pub detail: String,
+    /// This stage's share of the ceiling.
+    pub calls: u32,
+    /// A Panel's rubric; empty for every other kind.
+    pub rubric: Vec<RubricLine>,
+}
+
+/// One Panel criterion with the anchors a scorer reads for 0 and 2.
+pub struct RubricLine {
+    pub name: String,
+    pub weight: u8,
+    pub zero: String,
+    pub two: String,
+}
+
+/// R49 — one workflow in full (`templates/workflow_detail.html`, ADR-0035): its stages with each
+/// one's share of the ceiling, the owner-facing explanation, and the file as loaded.
+#[derive(Template, WebTemplate)]
+#[template(path = "workflow_detail.html")]
+pub struct WorkflowDetailPage {
+    pub card: WorkflowCard,
+    /// The markdown body below the frontmatter, rendered and sanitised.
+    pub body_html: String,
+    /// The definition file as read.
+    pub raw: String,
+    pub dir: String,
 }
 
 /// One spine stage on the skill book.

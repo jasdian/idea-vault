@@ -940,6 +940,37 @@ a.srcchip:hover { border-color: var(--accent); color: var(--accent); }
   font-family: var(--mono); font-size: .66rem; text-transform: uppercase; letter-spacing: .08em;
   color: var(--faint); margin-right: .35rem;
 }
+/* The workflow book (ADR-0035): a stage list set as a numbered margin log — mono kind, serif
+   detail, and each stage's share of the call ceiling right after it in faint ink. */
+.book__link { text-decoration: none; }
+.book__link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.book__stages {
+  margin: .2rem 0 .1rem; padding-left: 1.4rem; font-size: .9rem; color: var(--ink);
+  display: flex; flex-direction: column; gap: .2rem;
+}
+.book__stages li::marker { font-family: var(--mono); font-size: .72rem; color: var(--faint); }
+.book__stages--full { gap: .7rem; }
+.book__kind {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .04em; color: var(--accent);
+  margin-right: .3rem;
+}
+.book__calls { font-family: var(--mono); font-size: .7rem; color: var(--faint); white-space: nowrap; }
+.book__cost { color: var(--ink); }
+.book__rubric {
+  margin: .5rem 0 .2rem; border-collapse: collapse; font-size: .84rem; width: 100%;
+}
+.book__rubric th {
+  font-family: var(--mono); font-size: .66rem; font-weight: 500; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--faint); text-align: left; padding: .25rem .5rem .25rem 0;
+  border-bottom: 1px solid var(--rule-strong);
+}
+.book__rubric td { padding: .3rem .5rem .3rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.book__raw {
+  position: relative; margin: .2rem 0 0; padding: .7rem .85rem; border-radius: var(--radius);
+  font-family: var(--mono); font-size: .76rem; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--ink) 4%, var(--paper)); border: 1px solid var(--rule);
+}
+.moves__hint { color: var(--warn); }
 
 /* ---- ideation spine (#idea-actions) ----------------------------------- */
 /* The spine reads as a margin annotation over the moves: mono stage names, a quiet ✓ for covered
