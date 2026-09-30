@@ -207,6 +207,15 @@ D7) and `SkillFrontmatter` (skill files, which reject unknown keys; see
 skipped on emit when empty, so an idea with no attached sources serializes exactly as it did
 before the field existed ([ADR-0021](./adr/0021-reference-sources.md)).
 
+`version` is the `idea.md` format version and a reserved key: every write stamps
+`domain::frontmatter::IDEA_FORMAT_VERSION` (currently `1`) as the first key, a file without one
+predates versioning and loads as-is (no migration), and a file with a newer or malformed version
+is refused rather than rewritten down to an older format. It is read off by the codec, never
+carried on `IdeaFrontmatter`. Every other key the app does not know (an owner's own `aliases:`)
+lands in the flattened `extra` map and survives a rewrite: known keys are written first in field
+order, then unknown keys sorted by name. `idea-vault validate` checks the vault against this
+schema, read-only (frontmatter, `MEMORY.md` coverage, duplicate memories).
+
 ```mermaid
 classDiagram
     class IdeaFrontmatter {
@@ -217,6 +226,7 @@ classDiagram
         +string[] sources
         +datetime created
         +datetime updated
+        +map extra
     }
     class IdeaState {
         <<enumeration>>

@@ -330,6 +330,24 @@ fn gate_step4_fails_without_the_golden_vault_fixture() {
 }
 
 #[test]
+fn gate_step4_fails_on_a_golden_vault_with_no_idea() {
+    let repo = Repo::new();
+    fs::remove_file(repo.root().join("tests/fixtures/golden-vault/seed/idea.md")).unwrap();
+    repo.write(
+        "tests/fixtures/golden-vault/seed/notes.txt",
+        "not an idea\n",
+    );
+    repo.commit("empty the fixture");
+    let out = repo.gate(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("holds no idea"), "{}", text(&out));
+    assert!(
+        !repo.cargo_log().lines().any(|l| l.ends_with("-- validate")),
+        "validate never ran on the empty copy"
+    );
+}
+
+#[test]
 fn intent_freshness_skipped_on_main() {
     let repo = Repo::new();
     let out = repo.gate(&[]);

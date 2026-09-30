@@ -187,6 +187,7 @@ bash scripts/gate.sh      # the fixed 7-step shipping gate, no skip: intent (+fr
 bash scripts/gate.sh --list           # print the step table
 bash scripts/gate.sh --install-hook   # install the pre-push hook (runs check-invariants.sh --strict); use alone
 bash scripts/check-invariants.sh --list   # the invariant catalog: id|severity|ADR/D|zero-state
+cargo run -- validate      # read-only vault check (IDEA_VAULT_VAULT_DIR): frontmatter, MEMORY.md coverage, duplicate memories; exit 1 on any finding
 cargo run -- regrade [--idea <slug>] [--parser audit|facts|contract|plan-gates] [--strict]   # replay today's parsers over vault/*/.runs (read-only; ADR-0038)
 ```
 

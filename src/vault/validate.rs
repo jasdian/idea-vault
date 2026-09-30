@@ -4,8 +4,8 @@
 //! It checks exactly three things per idea, nothing more (owner decision: consecutive user turns
 //! are legitimate, so turn ordering is deliberately not checked):
 //!
-//! 1. **Frontmatter** — `idea.md` and every `memory/*.md` parse, and each declared slug matches its
-//!    folder or file name (D22).
+//! 1. **Frontmatter** — `idea.md` and every `memory/*.md` parse, each declared slug matches its
+//!    folder or file name (D22), and no idea folder has lost its `idea.md`.
 //! 2. **MEMORY.md coverage** — every memory fact is listed in `MEMORY.md`, and every line of
 //!    `MEMORY.md` points at a fact that exists.
 //! 3. **Duplicate memories** — no two facts of one idea share a title or a body, compared with
@@ -85,11 +85,39 @@ pub fn validate_vault(vault_dir: &Path) -> Result<Report, VaultError> {
         .map(|entry| validate_idea(vault_dir, &entry.slug, &entry.path))
         .collect::<Result<Vec<_>, _>>()?
         .concat();
+    findings.extend(headless_idea_dirs(vault_dir)?);
     findings.sort();
     Ok(Report {
         ideas: ideas.len(),
         findings,
     })
+}
+
+/// Idea folders that lost their `idea.md`: `walk_ideas` skips them, so without this pass the very
+/// corruption `validate` exists to catch would be invisible. A folder counts as an idea folder
+/// when it holds any other idea truth file (`conversation.md`, `MEMORY.md` or `memory/`);
+/// dot-folders (`.skills/`, `.workflows/`) are app config, and any other stray folder is ignored.
+fn headless_idea_dirs(vault_dir: &Path) -> Result<Vec<Finding>, VaultError> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(vault_dir)? {
+        let path = entry?.path();
+        let Some(slug) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let holds_truth = ["conversation.md", "MEMORY.md", "memory"]
+            .iter()
+            .any(|f| path.join(f).exists());
+        if path.is_dir() && !slug.starts_with('.') && !path.join("idea.md").exists() && holds_truth
+        {
+            found.push(Finding {
+                slug: slug.to_string(),
+                kind: FindingKind::Frontmatter,
+                file: "idea.md".to_string(),
+                detail: "missing: the folder holds idea files but no idea.md".to_string(),
+            });
+        }
+    }
+    Ok(found)
 }
 
 /// Write one line per finding and a closing summary line.
@@ -361,6 +389,29 @@ created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\nBody.\n";
         assert_eq!(
             kinds(&report),
             vec![(FindingKind::MemoryIndex, "MEMORY.md")]
+        );
+    }
+
+    #[test]
+    fn validate_flags_an_idea_folder_that_lost_its_idea_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        idea(tmp.path(), "kept");
+        idea(tmp.path(), "headless");
+        fs::remove_file(tmp.path().join("headless/idea.md")).unwrap();
+        fs::write(tmp.path().join("headless/conversation.md"), "## user\nhi\n").unwrap();
+        // Not idea folders: a stray directory, and app config under a dot-folder.
+        fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        fs::write(tmp.path().join("notes/todo.txt"), "x").unwrap();
+        fs::create_dir_all(tmp.path().join(".skills/memory")).unwrap();
+
+        let report = validate_vault(tmp.path()).unwrap();
+        assert_eq!(report.ideas, 1);
+        assert_eq!(kinds(&report), vec![(FindingKind::Frontmatter, "idea.md")]);
+        assert_eq!(report.findings[0].slug, "headless");
+        assert!(
+            report.findings[0].detail.contains("missing"),
+            "{:?}",
+            report.findings
         );
     }
 

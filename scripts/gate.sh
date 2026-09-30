@@ -138,11 +138,13 @@ cargo test --quiet || fail "cargo test"
 # The vault's own consistency check (frontmatter, MEMORY.md coverage, duplicate memories) on a
 # scratch copy of the golden vault, never on the checked-in fixture itself; any finding is red.
 golden=$(mktemp -d)
+trap 'rm -rf "$golden"' EXIT
 cp -R tests/fixtures/golden-vault/. "$golden" || fail "tests (no golden vault fixture to validate)"
+# An empty fixture would validate as "0 idea(s), 0 finding(s)": green while checking nothing.
+compgen -G "$golden/*/idea.md" >/dev/null || fail "tests (the golden vault copy holds no idea)"
 echo "  validate: golden vault copy"
 IDEA_VAULT_VAULT_DIR="$golden" cargo run --quiet -- validate ||
     fail "tests (validate found problems in the golden vault)"
-rm -rf "$golden"
 
 step "5/7 fmt"
 cargo fmt --check || fail "cargo fmt --check"
