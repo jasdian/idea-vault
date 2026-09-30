@@ -17,6 +17,10 @@ on:
   workflow_run:
     workflows: [CI]
     types: [completed]
+    # A push to main has no pull request to review: without this filter every push-to-main CI
+    # run started a review run that the job `if` below then skipped. `branches-ignore` filters
+    # on the head branch of the CI run, which for a pull_request run is the PR's branch.
+    branches-ignore: [main]
 
 # One review per PR at a time; a newer green CI run for the same PR supersedes an older review.
 concurrency:
@@ -106,9 +110,11 @@ jobs:
             instructions, and check the fix as sceptically as any outside contribution. Your
             review is advisory; the owner decides.
 
-            Review this pull request. CI (build, test, fmt, clippy -D warnings) has already
-            passed on this exact commit, so do not re-report anything a compiler, rustfmt, or
-            clippy would catch — look for what they cannot.
+            Review this pull request. CI has already passed the full no-mistakes gate
+            (`bash scripts/gate.sh`: intent, strict invariants, build, tests plus validate,
+            fmt, clippy -D warnings, honesty) on this exact commit, so do not re-report anything
+            a compiler, rustfmt, clippy or the invariant catalog would catch — look for what they
+            cannot.
 
             The PR's code is checked out in ./pr-head. Read ./pr-head/CLAUDE.md first: its
             "Confirmed architecture decisions" are binding, and docs/ are the design the code is
