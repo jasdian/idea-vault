@@ -143,7 +143,8 @@
   re-audits (D37).
 - **Call ceiling** — a workflow's exact worst-case number of model calls, repair retries included
   (`Workflow::call_ceiling`), at most `WORKFLOW_MAX_CALLS` (32) and shown before a run; a **wave** is
-  `⌈widest stage / K⌉` batches at the shared concurrency bound K.
+  `⌈widest stage / K⌉` batches at the shared concurrency bound K The run is charged by billed requests, not steps
+  ([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)).
 - **Capstone** — a workflow that chains a build-plan skill; derived, and allowed only under the name
   `ready-to-build` (owners fork it by overriding that name).
 - **Stage artifact / run record** — an `artifacts/*.md` file a Ground, Panel or Loop stage writes
@@ -159,6 +160,46 @@
   judged and merged into one result. The `converge` skill is the single-turn version: it judges the
   findings already in the transcript and commits to one verdict.
 
+## Observability, provenance and the gate
+
+- **Run journal** — the append-only `vault/<slug>/.runs/<run_id>.jsonl` one AI job writes: `RunStarted`,
+  each `LlmCall` (verbatim response and its call meta), `ToolCall`, `Contract`, `Verdict`, `RunFinished`
+  (`journal::JournalEntry`). Diagnostics, **not truth**: never indexed, never read into a prompt, never
+  forked, newest 50 runs per idea kept. Unrelated to MCP replay (D34) and never called "replay"
+  ([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md), D39).
+- **Run inspector** — `GET /idea/{slug}/runs/{run_id}` (R50), the read-only page over one run journal.
+- **Call meta** (`ai::call::CallMeta`) — what one model call cost and how it stopped: prompt and output
+  tokens, `api_calls`, stop reason, `num_ctx`, milliseconds. **Output truncated** is
+  `stop_reason == "length"`; **input truncated** is a prompt at or over 98% of `num_ctx`, judged
+  for a tool loop by its largest single round (`peak_prompt_tokens`), never by the summed usage.
+- **Contract outcome** (`ai::contract::ContractOutcome`) — `Clean`, `Repaired`, `Retried` or
+  `OffContract(violation)`: how an answer met its output contract.
+- **Verdict line** — a parser's canonical one-line judgement of a model answer (`pass=<n> key=value …`),
+  written by `regrade::summarize`, the single definition; journaled and replayed
+  ([ADR-0038](./adr/0038-parser-corpus-and-read-only-regrade.md)).
+- **Regrade** — `idea-vault regrade`, the read-only replay of today's parsers over the journaled answers,
+  printing one line per **flip**; **haystack** is the idea body and conversation prefix a grounding
+  verdict was checked against, and a verdict whose haystack changed is skipped. Replay covers parse,
+  detector and gate code, never prompts (D40).
+- **Parser corpus** — the hand-curated `tests/fixtures/raw-outputs/<parser>/<case>.md` outputs plus
+  `parser-corpus.snap`, filled only by an explicit `regrade --export`.
+- **Recipe** (`domain::Recipe`) — the optional frontmatter block on an AI-written artifact naming its
+  skill or workflow, digest, prompt templates, build id and off-contract lenses. **Digest** is 12 hex
+  digits of a file's SHA-256. An artifact without one is "provenance unknown", never "stale"
+  ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md)).
+- **Audit re-ask** — the single extra Auditor call, naming only the findings still without a verdict,
+  made when an audit answer is malformed or partial; merged first verdict wins.
+- **Foil lockdown** — the claude-code foil's fixed launch: `--restricted --tools Read,Grep,Glob` (plus
+  web tools while web access is on), `--strict-mcp-config`, the idea's folder as cwd, no
+  `--dangerously-skip-permissions`, a pass-list environment that never includes `IDEA_VAULT_*`, a
+  checked `init` event and an 1800 s turn deadline. **Fence** (`ai::untrusted::fence_untrusted`) wraps
+  every Ollama tool result as untrusted data ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)).
+- **No-mistakes gate** — `scripts/gate.sh`, the fixed seven-step shipping gate, with the invariant
+  **catalog** of `scripts/check-invariants.sh` (each rule an id and a severity, each with a seeded test),
+  the **honesty** step and the **findings protocol** (**no-op**, **auto-fix**, **ask-user**), shared by
+  the developer and every build plan's `RUN_PROTOCOL` ([ADR-0041](./adr/0041-no-mistakes-gate.md), D41,
+  [14-no-mistakes-gate](./14-no-mistakes-gate.md)).
+
 ## System / code
 
 - **Single crate** — idea-vault ships as one binary Cargo crate with strict internal modules; not a
@@ -172,6 +213,6 @@
 
 ## Diagram vocabulary
 
-- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D32`, catalogued in
+- **Diagram ID (Dn)** — every diagram in the docs has a stable ID in `D1`…`D41`, catalogued in
   [08-diagrams](./08-diagrams.md). References elsewhere use the ID.
 - **Home doc** — the single document a diagram is authored in; the registry only links to it.

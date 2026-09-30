@@ -30,6 +30,11 @@
 | The workflow book and R49 show each workflow's ceiling; the chips offer owner workflows and hint when sources are missing; progress notes follow one grammar | [ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md) | `tests/web_skills.rs`: `book_lists_workflows_with_ceiling_and_issue_banner`, `reload_revalidates_workflows_same_response`, `r49_renders_builtin_and_vault_workflow_and_404s_unknown`; `tests/web_idea_page.rs`: `chips_include_owner_workflow_and_capstone_row_holds_ready_to_build`, `no_sources_hint_on_ground_workflow_chip`; `tests/workflow_stages.rs::progress_note_sequence_for_design_panel` |
 | MCP `list_workflows` / `run_workflow`: unknown or invalid names claim nothing, a capstone points to `build_plan`, a served result replays | [ADR-0036](./adr/0036-mcp-list-workflows-and-run-workflow.md) | `tests/mcp_server.rs`: `list_workflows_shape`, `run_workflow_task_round_trip_returns_artifact_slugs`, `run_workflow_unknown_or_invalid_is_invalid_params_no_claim`, `run_workflow_capstone_points_to_build_plan`, `run_workflow_replay_is_idempotent` |
 | An identical MCP retry after a served result creates no job, turn or artifact | [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md), [D34](./13-mcp-server-inbound.md) | `tests/mcp_server.rs`: `plain_run_skill_build_prompt_retry_after_served_replays_without_second_plan`, `store_idea_retry_after_served_replays`, `failed_run_is_not_cached_and_retry_runs_again` |
+| A model call's text, tokens, stop reason and contract outcome are journaled; the journal is append-only, never fails a turn, never indexed, forked or read into a prompt | [ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md), [D39](./05-ai-integration.md) | `ai::journal::tests` (`create_new_refuses_existing_file`, `every_line_is_flushed_and_parseable_prefix_survives_drop`, `drop_without_finish_writes_cancelled`, `no_floats_in_serialized_entries`, `read_run_tolerates_torn_last_line`), `ai::call::tests::input_truncated_at_98_percent_of_num_ctx_and_unknown_is_false`; `tests/journal_flow.rs` (`skill_job_writes_started_llmcall_contract_finished`, `cancelled_job_leaves_run_finished_cancelled`, `tool_loop_rounds_count_as_api_calls`, `journal_open_failure_does_not_fail_turn`, `reindex_ignores_runs_dir`, `fork_does_not_copy_runs`); the `runs-not-truth` invariant rule |
+| Today's parsers give the same verdicts on recorded and curated raw model output; regrade never writes | [ADR-0038](./adr/0038-parser-corpus-and-read-only-regrade.md), [D40](#d40--parser-corpus-and-regrade) | `regrade::tests` (`unchanged_parser_yields_zero_flips`, `changed_audit_parser_reports_flip_line`, `edited_idea_body_skips_facts_verdict`, `appended_conversation_still_regrades_via_prefix_hash`, `never_writes_to_vault`); `tests/parser_corpus.rs`; `tests/cli_regrade.rs::strict_exits_1_on_flip` |
+| The claude foil sees only the pass-list environment, its init event matches the tool allowlist, and a turn ends at its deadline; every Ollama tool result is fenced | [ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md) | `claude_code::tests` (`child_env_*`, `args_*`, `init_*`); `tests/claude_backend.rs` (`claude_child_does_not_see_mcp_token`, `busy_tool_events_hit_turn_deadline`); `untrusted::tests`; `tests/tool_loop_flow.rs`; the `tool-fence` and `no-skip-permissions` invariant rules |
+| An artifact's recipe round-trips, an old artifact shows "provenance unknown", parse-coupled prompts are pinned by goldens, a malformed audit gets one targeted re-ask | [ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md) | `domain::frontmatter::tests` (`artifact_without_recipe_still_parses`, `recipe_roundtrips`); `provenance::tests` (goldens); `audit::tests` (`garbled_then_valid_merges_to_full`, `partial_then_fills_gaps_first_wins`, `reask_error_keeps_first_report`, `reask_also_garbled_stays_failed_uncertain`); the goldens in `tests/fixtures/prompt-goldens/` |
+| The gate is fixed, every invariant rule has a seeded violation that flags exactly it, and an undeclared expectation change is red | [ADR-0041](./adr/0041-no-mistakes-gate.md), [D41](./14-no-mistakes-gate.md) | `tests/gate_invariants.rs`, `tests/gate_script.rs` (see [The gate under test](#the-gate-under-test)); `plan::tests` for the product side |
 | An `idempotency_key` reused with different arguments is rejected | [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md) | `tests/mcp_server.rs`: `idempotency_key_with_different_args_is_invalid_params` |
 
 ## The keystone: reindex invariant (fixture test)
@@ -95,7 +100,78 @@ and compares its ideas, tags, memory facts, backlinks and FTS rows with `golden-
 - **Golden vaults** — checked-in fixture `vault/` directories representing each state and edge case
   (dangling backlink, reopened-with-merged-memory, unicode title → slug). Reindex output is snapshot-
   compared.
+- **Parser corpus** — `tests/fixtures/raw-outputs/<parser>/<case>.md`, curated raw model outputs
+  with a committed verdict snapshot (`tests/fixtures/parser-corpus.snap`); see
+  [Parser corpus and regrade](#d40--parser-corpus-and-regrade).
+- **Prompt goldens** — `tests/fixtures/prompt-goldens/*.txt`, the parse-coupled prompts rendered for
+  a fixed input, written by hand from the source ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md)).
 - **Temp dirs** — storage/index tests run against a throwaway directory, never the real vault.
+
+## D40 — Parser corpus and regrade
+
+The code that judges a model answer (the audit parser, the store-time fact parser and its evidence
+gate, the skill output contracts, the build-plan parser and gates) is tested against real answers,
+not only hand-written strings ([ADR-0038](./adr/0038-parser-corpus-and-read-only-regrade.md)). Replay
+covers **parse, detector and gate code only**: a prompt change alters what the model would say, and
+no recorded answer can show that (prompts are pinned by goldens instead).
+
+```mermaid
+flowchart TD
+    JOB["AI job (ADR-0037)"] -->|"each parse site journals\nVerdict = summarize(parser, raw, haystack)"| JRN[".runs/run_id.jsonl\nLlmCall.response_text + Verdict + HaystackRef"]
+    JRN --> RG["idea-vault regrade\n[--idea] [--parser] [--strict]"]
+    RG --> HAY{"parser needs a haystack?"}
+    HAY -->|"no (audit, contract)"| RUN["run today's parser over response_text"]
+    HAY -->|"yes (facts, plan-gates)"| REC{"conversation prefix hash\nand idea body hash still match?"}
+    REC -->|"no"| SKIP["skipped: haystack changed"]
+    REC -->|"yes"| RUN
+    RUN --> CMP{"today's line equals the journaled line?"}
+    CMP -->|"yes"| SAME["unchanged"]
+    CMP -->|"no"| FLIP["print one flip line,\nto pass / to fail / changed"]
+    FLIP --> EXIT{"--strict and any flip?"}
+    EXIT -->|"yes"| E1["exit 1"]
+    EXIT -->|"no"| E0["exit 0 (never writes to the vault)"]
+    JRN -.->|"regrade --export slug/run_id#seq case\n(by hand only)"| FIX["tests/fixtures/raw-outputs/parser/case.md"]
+    FIX --> CT["cargo test --test parser_corpus:\nsummarize each fixture, compare with parser-corpus.snap"]
+    CT -->|"mismatch"| RED["flip report + red test\n(PARSER_CORPUS_BLESS=1 rewrites the snap: an ask-user act, ADR-0041)"]
+```
+
+`regrade::summarize` is the single definition of a verdict line, so a journaled line and a replayed one
+cannot drift. `regrade` needs a vault, so it is not a gate step; the corpus test is its offline
+stand-in and runs inside `cargo test` (and once more by name in gate step 7). When a change to a
+parser, detector or gate is committed, paste the regrade summary or the corpus flip report into the
+commit message.
+
+## The gate under test
+
+The shipping gate ([ADR-0041](./adr/0041-no-mistakes-gate.md), [docs/14](./14-no-mistakes-gate.md),
+[D41](./14-no-mistakes-gate.md)) is itself tested, so it cannot rot or be quietly weakened.
+
+- **`tests/gate_invariants.rs`** builds the smallest clean tree every rule needs (a `tempfile` dir with
+  `src/config.rs`, `src/ai/`, `src/web/`, a compose file, a CLAUDE.md with matching ranges,
+  `docs/08-diagrams.md`, an ADR, the docs/14 checklist and the `.claude/` mirrors) and points
+  `check-invariants.sh --root` at it. A `SEEDS` table has **at least one row per catalog id and one per
+  detection arm** of a multi-arm rule (`ratchet`, `doc-links`, `doc-ranges`, `checklist-mirror`), each
+  planting exactly one violation; the table-driven test asserts each seed yields exactly one finding carrying that id (exit
+  1 for error rows; for warn rows 0 without `--strict` and 1 with it; 0 for info rows). A meta-test
+  asserts the `--list` id set equals the `SEEDS` id set, so a rule cannot ship without a seed. Others:
+  the clean tree passes with an `[ok]` line per id, the versioned tree (tracked and unignored files
+  copied to a tempdir, so `.claude/` never decides it) passes `--strict`, two seeded violations are
+  both reported (collect-all), the checklist mirror is INFO without `.claude/` or with an absent
+  mirror file and an error for a drifted one beside an absent one, and an
+  unknown flag or `--list` combined with another flag exits 2 listing the valid flags.
+- **`tests/gate_script.rs`** runs `gate.sh` in a temporary `git init` repo with a `main` and a feature
+  branch, with a stub `cargo` first on `PATH` that logs its arguments and exits 0 (there is no test
+  seam inside the script): the hook is executable, marked, idempotent, refuses a foreign hook, honours
+  `core.hooksPath`; an unknown flag or a combined flag is a usage error and there is no skip; intent
+  without an acceptance bullet, or without an `ADR-NNNN`/`D<n>` token, or unchanged since main on a
+  branch, fails step 1 (and freshness is skipped on main); `PARSER_CORPUS_BLESS` fails step 4 before
+  any `cargo test` call; an unlisted changed fixture or a raised floor fails step 7 and a listed one
+  passes, on a branch and on main alike (on main step 7 diffs against `HEAD`).
+- **`plan::tests`** cover the product side: `RUN_PROTOCOL` acts by action (no-op, auto-fix, ask-user in
+  that order), forbids weakening a check, and restarts the full gate after any fix; `FIELD_ACTION` has
+  exactly one row per `FIELD_KEYS` entry; every ask-user label and every `INTENT_SECTIONS` label is
+  named in the protocol; every `[product]` phrase of the docs/14 checklist appears verbatim in it; and
+  `tests/web_build_plan.rs` checks the findings clause reaches the owner's `PROMPT.md` before `## PINNED`.
 
 ## What is explicitly not tested by machines
 
@@ -109,3 +185,4 @@ and compares its ideas, tags, memory facts, backlinks and FTS rows with `golden-
 - [03-data-model](./03-data-model.md) — D15 and the truth/derived contract the keystone test guards.
 - [05-ai-integration](./05-ai-integration.md) — D20/D24 behaviors the AI tests assert.
 - [06-concepts/swarm](./06-concepts/swarm.md) — D21 limits the concurrency test enforces.
+- [14-no-mistakes-gate](./14-no-mistakes-gate.md) — the gate that runs this suite (D41).

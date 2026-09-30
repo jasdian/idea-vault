@@ -6,7 +6,7 @@
 
 ## Conventions
 
-- **ID** — stable `D1`…`D38` (see Coverage below for why the range runs past D25). References
+- **ID** — stable `D1`…`D41` (see Coverage below for why the range runs past D25). References
   across docs use the ID.
 - **Tool** — all diagrams are **Mermaid** in `mermaid` fenced code blocks, rendering inline on GitHub with no
   build step (see [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md) ethos; escape hatches below).
@@ -52,6 +52,9 @@
 | **D16** | Activity | HTTP request / middleware pipeline — AI-driven routes branch into a background job, not an SSE stream | [09-web-ui](./09-web-ui.md) |
 | **D18** | Sequence | Skill invocation with output-contract validation + at most one retry, run as a background job when interactive; a build_plan skill persists via build_plan::finish (ADR-0010, ADR-0023, ADR-0030) | [06-concepts/skills](./06-concepts/skills.md) |
 | **D25** | Sequence | Startup / boot | [01-architecture](./01-architecture.md) |
+| **D39** | Sequence | Run-journal lifecycle: claim → `open_run` (`RunStarted`, prune to 50) → `spawn_job` → `LlmCall` / `ToolCall` / `Contract` / `Verdict` → `RunFinished` (done, failed, cancelled by the writer's `Drop`, panicked); an open failure runs unjournaled (ADR-0037) | [05-ai-integration](./05-ai-integration.md) |
+| **D40** | Flowchart | Parser corpus and regrade: journaled verdict → haystack recovery or skip → today's parser → same / flip → exit; hand-run `--export` into the committed corpus and the snapshot test (ADR-0038) | [10-testing-strategy](./10-testing-strategy.md) |
+| **D41** | Flowchart | The no-mistakes gate: the seven fixed steps, the bless refusal, and the findings protocol (no-op / auto-fix / ask-user) on a red step (ADR-0041) | [14-no-mistakes-gate](./14-no-mistakes-gate.md) |
 
 ### Structure of the web + orchestration
 
@@ -84,11 +87,12 @@
 
 ## Coverage
 
-- **38 IDs, D1–D38** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
+- **41 IDs, D1–D41** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
   were added for containerized deployment, D30 for knowledge extraction, D31 for reference
   sources, D32 for the workflow stage model, D33/D34 for the plan workbench and MCP replay, and
-  D35–D38 for the grounded, ranked and bounded workflow stages and the workflow registry, all
-  without renumbering — the range is D1–D38 in
+  D35–D38 for the grounded, ranked and bounded workflow stages and the workflow registry, and
+  D39–D41 for the run journal, the parser corpus and the no-mistakes gate, all
+  without renumbering — the range is D1–D41 in
   practice, not D1–D25), each authored exactly once.
   **D1–D15** are the mandatory core (they cover every flow named in [CLAUDE.md](../CLAUDE.md));
   **D16–D25** complete the SOTA set; **D26–D29** cover containerized deployment; **D30** covers
@@ -99,7 +103,10 @@
   ([ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md)); **D34** covers MCP idempotent
   replay ([ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md)); **D35–D37** cover the
   Ground, Panel, and Loop/Refine stages ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md)),
-  **D38** the workflow registry ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md)).
+  **D38** the workflow registry ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md));
+  **D39** the run journal ([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)); **D40**
+  the parser corpus and regrade ([ADR-0038](./adr/0038-parser-corpus-and-read-only-regrade.md));
+  **D41** the no-mistakes gate ([ADR-0041](./adr/0041-no-mistakes-gate.md)).
 - The six core flows from CLAUDE.md map to: new idea **D10**, chat (background job + poll, not SSE
   — ADR-0010) **D11**, store+memory **D12**, reopen+memory **D13**, swarm **D14**, reindex **D15**.
 

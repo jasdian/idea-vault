@@ -1,6 +1,6 @@
 # ADR-0023 — A verification layer: output contracts, factored audit, grounded memory
 
-- **Status:** Accepted — amended by [ADR-0034](./0034-grounded-ranked-and-bounded-workflow-stages.md) (Panel scorers are cold Auditor calls, Refine re-audits, Panel proposals and Loop items are audited as findings)
+- **Status:** Accepted — amended by [ADR-0037](./0037-run-journal-diagnostics-only-call-record.md) (a contract outcome is recorded, and truncation is a violation) and [ADR-0040](./0040-recipe-provenance-and-audit-re-ask.md) (the Auditor gets at most one targeted re-ask); amended by [ADR-0034](./0034-grounded-ranked-and-bounded-workflow-stages.md) (Panel scorers are cold Auditor calls, Refine re-audits, Panel proposals and Loop items are audited as findings)
 - **Date:** 2026-09-28
 - **Deciders:** owner
 
@@ -141,6 +141,25 @@ old dedupe, kept as a backstop). NOOP is skipped.
 - **Let UPDATE rewrite the existing fact.** Rejected: memory facts are owner-editable truth, and a
   rewrite could silently discard the owner's own edits.
 - **No toggle (always audit).** Rejected by the owner in favour of on-by-default with a live toggle.
+
+## Amendments — ADR-0037 and ADR-0040 (2026-09-30)
+
+> **Contract outcomes are data ([ADR-0037](./0037-run-journal-diagnostics-only-call-record.md)).**
+> The "warn and keep the answer" fallback of the output contract is no longer only a log line:
+> `ask_on_contract` returns a `ContractOutcome` (`Clean`, `Repaired`, `Retried`, `OffContract`) that is
+> journaled against the call whose text was kept and stamped into an artifact's recipe. A truncated
+> answer is a violation (`Violation::Truncated`): an **output** truncation takes the existing single
+> retry; an **input** truncation takes none (the same window would truncate again) and is recorded
+> `OffContract("input truncated")`.
+>
+> **The Auditor may be re-asked once ([ADR-0040](./0040-recipe-provenance-and-audit-re-ask.md)).**
+> When the audit answer leaves any finding without a verdict and the caller can fund it, one further
+> Auditor call is made whose suffix lists only the missing ids, merged first verdict wins; a re-ask
+> that errors or stays garbled keeps the `UNCERTAIN` fallback, and a call that failed outright is not
+> re-asked. This updates the consequence "one more call per swarm" to "one more call per swarm, and
+> at most one more when the audit answer is malformed or partial". Retry and re-ask still run under
+> the permit the call already holds, or the audit's own, so
+> [ADR-0006](./0006-bounded-concurrency-swarm.md)'s bound is unchanged.
 
 ---
 

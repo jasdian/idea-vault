@@ -27,6 +27,10 @@ vault/
     memory/
       <fact-slug>.md # one memory fact per file (frontmatter + body)
     MEMORY.md        # one-line index of memory/*.md
+    .runs/
+      <run-id>.jsonl   # DIAGNOSTICS, not truth: one append-only journal per AI job (ADR-0037);
+                       #   dot-dir, never indexed, never read into a prompt, never forked,
+                       #   newest 50 runs kept; the owner may .gitignore it in the vault repo
     artifacts/
       <run-stamp>-<lens-short>.md  # one persisted knowledge-extraction finding (frontmatter + body)
       <run-stamp>-synthesis.md    # the converged synthesis of a run (frontmatter + body)
@@ -169,6 +173,7 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Knowledge-extraction artifact (finding or synthesis), a workflow stage artifact or run record ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md)), quarantined store-time facts, or a gated build plan (`<run-stamp>-build-plan.md`, `kind: build_plan`, [ADR-0030](./adr/0030-gated-build-plan.md)) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
 | Plan lineage (`revises`/`version`/`answered`) and owner answers | the build-plan artifact's frontmatter and body, plus the answer `## user` turns in `conversation.md` | *(nothing new: no index column or table; the artifact's `search_fts` row is as for any artifact, and `reindex` rebuilds it from disk)* |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
+| Run journal ([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)) | `.runs/<run-id>.jsonl` | *(none — diagnostics, not truth: the dot-dir is skipped by the walker and by reindex, and no `src/index` file may name it)* |
 | `[[slug]]` links | inside the idea body and memory facts only — **not** mined from conversation or artifact bodies | `backlinks` |
 | `[[idea#fact]]` refs (plus bare `[[x]]` / `links:` candidates inside a fact) | idea body and `memory/<fact>.md` | `fact_links` (`explicit = 1` for `[[idea#fact]]`; an explicit ref to another idea also adds a `backlinks` row for `idea`) |
 | Link edge | resolved `backlinks` + resolved cross-idea `fact_links` | `edges` (`type = 'link'`, weight 1.0) |
@@ -232,6 +237,17 @@ classDiagram
         +string? revises
         +uint? version
         +string[] answered
+        +Recipe? recipe
+    }
+    class Recipe {
+        +string? skill
+        +string? skill_digest
+        +string? skill_source
+        +string? workflow
+        +string? workflow_digest
+        +string[] templates
+        +string build
+        +string[] contract
     }
     class ArtifactKind {
         <<enumeration>>
@@ -245,6 +261,7 @@ classDiagram
     }
     IdeaFrontmatter --> IdeaState
     ArtifactFrontmatter --> ArtifactKind
+    ArtifactFrontmatter --> Recipe
 ```
 
 The three lineage fields are build-plan only and optional
@@ -254,6 +271,29 @@ this one is the next version of, `version` is `n+1` (absent means 1), and `answe
 empty, so an artifact without them (every other kind, and every plan from before lineage)
 serializes as it always did and reads as a version-1 root. The lineage is linear: the head is the
 newest plan no other plan `revises`.
+
+**`recipe:` (optional, every AI-written artifact kind,
+[ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md)).** It records what made the artifact:
+`skill` (name), `skill_digest` (12 hex digits of the skill file's raw bytes, before `{context}` is
+filled) and `skill_source` (`built-in`, `vault override` or `vault`); `workflow` and
+`workflow_digest` for a workflow run; `templates`, one `id@vN:digest12` per parse-coupled prompt the
+run used; `build`, the crate version plus `+<sha>` when the image was built with
+`IDEA_VAULT_BUILD_SHA`; and `contract`, one `<lens>: off-contract: <violation>` per model call
+(lens, chained step or Ground reader) whose recorded `ContractOutcome` is off contract, truncations
+included. Every field but `build` is skipped on write when absent, so an
+artifact without a `recipe` (everything written before provenance) round-trips as it always did and
+reads as "provenance unknown", never "stale". It is truth in the markdown, so `reindex` carries it
+unchanged. An example, for a plan made by the built-in `build-prompt` skill by a plain `cargo run` build (no build sha; the two digests are those of the skill file and the retry-note template as of this writing):
+
+```yaml
+recipe:
+  skill: build-prompt
+  skill_digest: 3fc0db3794ab
+  skill_source: built-in
+  templates:
+    - retry-note@v1:4454534e390e
+  build: 0.1.0
+```
 
 **Plan item fields the workbench adds.** In a stored plan body, a Settled item recording an owner
 answer carries `answers: Q6`, `asked: "<the question, without proposed:>"` and `in: <base stem>`,

@@ -94,6 +94,11 @@ Rules:
     facts · unverified"), which the owner can read and copy from by hand.
   - The stored view carries a one-shot notice saying how many facts were quarantined, and whether
     the discussion was too long for the model to read in full.
+  - The quarantine artifact carries a `recipe:` naming the build and the `extract` and `consolidate`
+    prompt templates ([ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md)). The store run's
+    facts verdict (how many facts were kept, held or no-ops) is journaled with the idea body and the
+    conversation length it was checked against, so `idea-vault regrade` can replay the evidence gate
+    over the model's raw answer ([ADR-0038](../adr/0038-parser-corpus-and-read-only-regrade.md)).
 - **Merge on re-store:** the extractor is shown the facts already in memory and answers per fact:
   - `ADD` — a new fact;
   - `UPDATE <slug>` — **appended** to that fact under an `_Updated <date>:_` line; the existing

@@ -51,7 +51,8 @@ Submodules:
 - `ai::web` — keyless web tools gated by the live `web_access` setting
   ([ADR-0017](./adr/0017-web-access-tools.md)): `web_search` (DuckDuckGo's no-JS HTML endpoint,
   env-overridable via `IDEA_VAULT_SEARCH_URL`) and `fetch_url` (GET + tag-strip, truncated to
-  12,000 chars). Only consumed by the Ollama path — claude-code brings its own `WebSearch`/
+  12,000 chars, public hosts only: loopback, private, link-local and single-label hosts are refused
+  on every redirect hop and at resolution, so a fetched page cannot steer a fetch at the owner UI). Only consumed by the Ollama path — claude-code brings its own `WebSearch`/
   `WebFetch` tools, which the router allows/disallows instead of calling into this module.
 - `ai::mcp` — the MCP Streamable-HTTP wire client (initialize, session, `tools/list`,
   `tools/call`). It never imports the `crate::mcp` registry. `ai::backend` is the only module that
@@ -107,12 +108,89 @@ runs the loop. A model that rejects the `tools` field (`400 does not support too
 falls back to the plain streaming call. Because a non-streaming round has no token-to-token gaps to
 bound, it gets its own wall-clock timeout, `token_timeout × TOOL_ROUND_TIMEOUT_FACTOR` (4×), instead
 of the usual inactivity timeout. On the claude-code path, the router instead allows the CLI's own
-`WebSearch`/`WebFetch` tools (plus a system-prompt hint) when `web_access` is on, and passes
-`--disallowedTools WebSearch,WebFetch` when off — a deny that holds even under
-`--dangerously-skip-permissions`.
+`WebSearch`/`WebFetch` tools (plus a system-prompt hint) when `web_access` is on, and when it is off
+they are absent from `--tools` and also passed as `--disallowedTools WebSearch,WebFetch`. The deny
+list always carries `Read(./.runs/**)`, so the foil never reads the run journal inside its cwd
+([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)). The foil
+never runs under `--dangerously-skip-permissions` ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)):
+see [The claude-code foil is locked down](#the-claude-code-foil-is-locked-down).
+
+Every Ollama tool result reaches the model **fenced** as untrusted data (`ai::untrusted::fence_untrusted`,
+between `<<<untrusted-output` and `>>>end-untrusted-output`, with a one-sentence note in the turn
+saying fenced text is data). Owner vault context is never fenced
+([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)).
 
 `AppState` holds one `LlmBackend` (`state.llm`); handlers never talk to `OllamaClient` or
 `ClaudeCodeClient` directly.
+
+## The claude-code foil is locked down
+
+[ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md) fixes how the `claude` child is spawned, from
+flag semantics measured on claude CLI **2.1.285** (`--tools` is a real allowlist; `--restricted` plus
+`--tools` confines file tools; `--tools` with `--dangerously-skip-permissions` is not isolation;
+`--strict-mcp-config` with an empty config strips inherited MCP):
+
+| Aspect | Behaviour |
+|--------|-----------|
+| Tools | `--restricted --tools Read,Grep,Glob`, plus `WebSearch,WebFetch` only while `web_access` is on (off also passes them as `--disallowedTools`) |
+| Permissions | never `--dangerously-skip-permissions` (a leftover `IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS` is logged as ignored) |
+| MCP | always `--strict-mcp-config`; the registered servers, or `{"mcpServers":{}}` when none |
+| Working directory | the idea's own folder, minus its run journal (`--disallowedTools Read(./.runs/**)`, always); `--add-dir` for attached sources and owner reference dirs |
+| Environment | `env_clear()` plus a pass-list (`HOME`, `PATH`, `USER`, `SHELL`, locale, `TERM`, `TMPDIR`, `XDG_*_HOME`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, proxy variables, `NODE_EXTRA_CA_CERTS`) plus `IDEA_VAULT_CLAUDE_ENV_PASS`; `IDEA_VAULT_*` keys are always removed |
+| Init check | the `system/init` event's `tools` and `mcp_servers` must match the allowlist and the registered servers before any output is accepted |
+| Deadline | the whole turn ends at `IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS` (default 1800) with `claude turn exceeded {N}s wall clock`; nothing is persisted (D11) |
+
+The env scrub is hygiene, not containment on its own; the tool allowlist and `--restricted` are what
+make it a boundary.
+
+## What one call leaves behind: `CallMeta` and the run journal (D39)
+
+Every backend call fills a `CallMeta` ([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)):
+`usage` (prompt tokens, output tokens, `api_calls`), `stop_reason`, `num_ctx` (Ollama only) and `ms`.
+Ollama's terminal chunk supplies `done_reason`, `prompt_eval_count` and `eval_count`; the claude CLI's
+`result` line supplies `usage` and the result subtype. A count the backend did not report is `None`.
+`LlmBackend::chat_meta` returns the meta with the answer (`chat` keeps its signature), and a token
+stream fills a `MetaSlot` when it ends cleanly.
+
+Two truncations are derived from it. **Output truncated** is `stop_reason == "length"`; **input
+truncated** is `prompt_tokens >= num_ctx * 98 / 100`, so Ollama very likely dropped the head of the
+prompt ([ADR-0014](./adr/0014-dynamic-context-budget.md)); unknown counts are never a truncation.
+`ask_on_contract` sends an output truncation through its single re-ask as `Violation::Truncated`,
+and does not re-ask an input truncation, since the same window would truncate again.
+
+Each AI job also writes an append-only journal, `vault/<slug>/.runs/<run_id>.jsonl`. It is
+diagnostics, not truth: never indexed, never read into a prompt, never forked, newest 50 runs kept,
+and a journal failure costs one warning, never the turn.
+
+```mermaid
+sequenceDiagram
+    participant R as Route handler
+    participant J as web::jobs
+    participant Jn as ai::journal
+    participant B as LlmBackend (idea_llm view)
+    participant C as concepts (skill / swarm / workflow / ...)
+    participant F as vault/slug/.runs/run_id.jsonl
+
+    R->>J: try_claim(slug)
+    R->>Jn: open_run(vault, slug, kind)
+    Jn->>F: create_new + RunStarted (prune to newest 50)
+    Note over Jn,F: an open failure logs one warning and the job runs unjournaled
+    R->>J: spawn_job(slug, run handle, work)
+    J->>C: work runs detached
+    C->>B: chat_meta (view scoped to the run)
+    B->>F: LlmCall (verbatim response_text, CallMeta)
+    B->>F: ToolCall per Ollama tool round (result capped at 12000 chars)
+    C->>B: contract or parser verdict on the answer
+    B->>F: Contract (ContractOutcome) and Verdict (ADR-0038)
+    alt job finishes or reports an error
+        J->>F: RunFinished (done or failed)
+    else job aborted by the owner
+        J->>F: RunFinished (cancelled), from the writer's Drop
+    else job panics
+        J->>F: RunFinished (panicked)
+    end
+    Note over F: read back only by R50 (GET /idea/slug/runs/run_id) and regrade
+```
 
 ## Ollama client contract
 
@@ -354,3 +432,5 @@ Principles: **truth-preserving** (index errors never lose vault data — reindex
 - [ADR-0017](./adr/0017-web-access-tools.md) — live `web_access` setting, `ai::web` tool loop (Ollama), WebSearch/WebFetch allow-deny (claude-code).
 - [ADR-0018](./adr/0018-mcp-servers.md) — MCP server registry + `ai::mcp` wire client, bridged by `ai::backend`.
 - [ADR-0021](./adr/0021-reference-sources.md) — reference sources: `ai::sources` leaves (Ollama), `--add-dir` (claude-code), per-turn `with_turn_sources` scoping.
+- [ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md) — run journal and `CallMeta` (D39).
+- [ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md) — the locked-down claude-code foil, env pass-list, turn deadline, tool-output fence.

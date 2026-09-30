@@ -109,10 +109,13 @@ Containerization requires the app to stop assuming `localhost`. `config.rs`
 | `IDEA_VAULT_CLAUDE_HOST_BIN` | *(native: unused)* | `~/.local/bin/claude` (default) — host path the claude override bind-mounts ro into the container | claude-code-in-containers only ([ADR-0013](./adr/0013-containerized-claude-code.md)); compose-interpolation var, not read by `config.rs`. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | *(native: unused — the CLI's own login state applies)* | **required** by the claude override (`:?` guard — `up`/`config` fails fast when unset) | long-lived token from a one-time host `claude setup-token`; inherited by the spawned CLI from the app's env ([ADR-0013](./adr/0013-containerized-claude-code.md)). |
 | `IDEA_VAULT_CLAUDE_MODEL` | *(CLI default)* | `${IDEA_VAULT_CLAUDE_MODEL:-}` (blank = CLI default) | optional `--model` for the claude-code backend; retunable live via `/settings`. |
-| `IDEA_VAULT_CLAUDE_CWD` | *(the vault dir)* | — | the foil's working dir. Defaults to the vault, **never the app source**, so a full-agentic foil cannot rewrite idea-vault. |
+| `IDEA_VAULT_CLAUDE_CWD` | *(the vault dir)* | — | the foil's base working dir, used by turns that belong to no idea. Defaults to the vault, **never the app source**. Every idea turn overrides it with that idea's own folder, which `--restricted` confines the foil's file tools to ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)). |
 | `IDEA_VAULT_CLAUDE_ADD_DIRS` | *(none)* | — | colon-separated dirs the foil may read (Obsidian vault, Claude Code artifacts) → `--add-dir`. |
-| `IDEA_VAULT_CLAUDE_ALLOWED_TOOLS` | *(all)* | — | comma-separated allow-list (only applied when permissions are **not** skipped). |
-| `IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS` | `true` | — | `--dangerously-skip-permissions` for unattended runs (the full-agentic default); set `false` to lock down. |
+| `IDEA_VAULT_CLAUDE_ALLOWED_TOOLS` | *(none)* | — | comma-separated extra `--allowedTools` pre-approvals. Only an entry that names one of the foil's tools (`Read`, `Grep`, `Glob`, and `WebSearch`/`WebFetch` while web access is on) or a registered `mcp__<server>` is passed; it can never widen the tool allowlist itself ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)). |
+| `IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS` | *(removed)* | — | no longer read: the foil never runs under `--dangerously-skip-permissions` ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)). A value left in `.env` is logged as ignored at boot. |
+| `IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS` | `1800` | — | wall-clock ceiling on one whole claude-code turn ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)), on top of the per-line inactivity timeout below; past it the turn fails with `claude turn exceeded {N}s wall clock`, the process is killed and nothing is persisted (D11). A busy tool-calling foil never trips the per-line timeout, so this is the bound. |
+| `IDEA_VAULT_CLAUDE_ENV_PASS` | *(none)* | — | comma-separated extra environment variable names the claude child may inherit, added to the fixed pass-list (`HOME`, `PATH`, `USER`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`, `XDG_{CONFIG,CACHE,DATA}_HOME`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, the `HTTP(S)_PROXY`/`NO_PROXY` set in both cases, `NODE_EXTRA_CA_CERTS`). Every other variable is withheld, and **`IDEA_VAULT_*` keys are always removed, even if listed here**, so `IDEA_VAULT_MCP_TOKEN` never reaches the foil. It is hygiene, not containment on its own ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)). Add a name here if a proxy or CA setting the CLI needs is not on the list. |
+| `IDEA_VAULT_BUILD_SHA` | *(unset — `cargo run` stamps the crate version alone)* | build arg `IDEA_VAULT_BUILD_SHA` (`${IDEA_VAULT_BUILD_SHA:-}`), read at **compile time** by `option_env!` | the commit an artifact's `recipe.build` records as `<version>+<sha>` ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md)). Not a runtime setting: pass it when building, e.g. `IDEA_VAULT_BUILD_SHA=$(git rev-parse --short HEAD) docker compose build`, or `IDEA_VAULT_BUILD_SHA=… cargo build`. Left empty it changes nothing but the provenance stamp. |
 | `IDEA_VAULT_CLAUDE_TIMEOUT_SECS` | `300` | — | hard inactivity timeout for claude-code turns (agentic turns run longer than a hot local model). |
 | `IDEA_VAULT_CLAUDE_EFFORT` | `high` | `${IDEA_VAULT_CLAUDE_EFFORT:-high}` | initial claude-code reasoning effort (`low`/`medium`/`high`), injected as a system-prompt hint since the CLI has no per-call effort flag; retunable live via `/settings`. |
 
@@ -150,6 +153,11 @@ Key runtime details:
   ownership onto empty volumes only).
 - `curl` + `ca-certificates` are installed **for the healthcheck** (which hits `/admin/health`, the
   route that itself probes Ollama — [D20](./05-ai-integration.md)).
+- **Build id.** `ARG IDEA_VAULT_BUILD_SHA` is declared after the dependency cook, so a new commit never
+  invalidates the cached deps layer, and it is in the environment of the `cargo build` `RUN`, where
+  `option_env!` reads it at compile time. The compose file passes it through as a build arg
+  (`${IDEA_VAULT_BUILD_SHA:-}`); left empty, artifacts stamp the crate version alone
+  ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md)).
 
 ## D28 — CPU vs GPU (compose composition)
 
@@ -253,6 +261,13 @@ docker compose -f docker-compose.yml -f docker-compose.claude.yml restart idea-v
 ```
 
 Pitfalls specific to this override (beyond the general pitfalls list below):
+
+- **The foil sees only the pass-list, not the app's environment.** The spawned CLI (and the probe)
+  gets `HOME=/claude`, `PATH` and `CLAUDE_CODE_OAUTH_TOKEN` because they are on the fixed pass-list;
+  every `IDEA_VAULT_*` variable, including `IDEA_VAULT_MCP_TOKEN`, is withheld. A proxy or CA variable
+  outside the list must be named in `IDEA_VAULT_CLAUDE_ENV_PASS` or the CLI will not see it
+  ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)). The foil is confined to the idea's own folder
+  (`--restricted`) and never runs under `--dangerously-skip-permissions`.
 
 - **Rebuild before the volume is first created.** The image `chown`s the `/claude` mountpoint
   (D27) so a *freshly created* `claude-state` volume inherits app-uid ownership; a volume created

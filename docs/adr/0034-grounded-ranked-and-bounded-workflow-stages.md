@@ -1,6 +1,6 @@
 # ADR-0034 — Grounded, ranked and bounded workflow stages
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0037](./0037-run-journal-diagnostics-only-call-record.md) (the call budget is charged by billed requests, not by steps)
 - **Date:** 2026-09-30
 - **Deciders:** Owner
 - **Amends:** [ADR-0006](./0006-bounded-concurrency-swarm.md) (a workflow's total model calls are
@@ -147,6 +147,16 @@ gains a leading Ground (worst case 12 with sources, 8 without, unchanged without
   what reaches later stages exists.
 - **A `regex` dependency for token mining**: rejected. The scan is hand-written; the crate list
   does not grow.
+
+## Amendment — ADR-0037 (2026-09-30)
+
+> **Amended by [ADR-0037](./0037-run-journal-diagnostics-only-call-record.md).** The `CallBudget` is
+> charged as requests go out, by a meter on the run's backend view, not by counting steps: a retry is
+> one more, each Ollama tool round is one more, a claude process is one. The exact ceiling per stage
+> is unchanged and still shown before a run; a tool-using call can now cost more than the one call its
+> stage's ceiling assumed, so the reserve check funds fewer elastic rounds. The audit's targeted re-ask
+> ([ADR-0040](./0040-recipe-provenance-and-audit-re-ask.md)) is charged like any other request and is
+> attempted only when the budget can fund two calls.
 
 ---
 

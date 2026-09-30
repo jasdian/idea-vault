@@ -72,8 +72,14 @@ AgentResult {
   role:     <role>
   lens:     <skill name, if any>           // provenance: "premortem · critic"
   content:  <text / list>                  // split into findings, audited, synthesized
+  contract: Clean | Repaired | Retried | OffContract(violation)   // ADR-0037: how the lens's contract was met
 }
 ```
+
+`contract` is recorded rather than only logged: an off-contract lens shows on the run inspector (R50)
+and in the artifact's `recipe:` ([ADR-0037](../adr/0037-run-journal-diagnostics-only-call-record.md),
+[ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md)). An agent's answer is repaired against
+its contract but never retried here; the one retry belongs to `skills::ask_on_contract`.
 
 The orchestrator (`concepts::swarm` / `concepts::workflows` / `concepts::knowledge`) is responsible
 for building `AgentTask`s and consuming `AgentResult`s; the agent module only knows how to *run one

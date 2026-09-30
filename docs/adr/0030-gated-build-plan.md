@@ -1,6 +1,6 @@
 # ADR-0030 — A gated build plan replaces the raw build prompt
 
-- **Status:** Proposed
+- **Status:** Proposed — amended by [ADR-0041](./0041-no-mistakes-gate.md) (the run protocol's rules 9–12 are rewritten as the findings protocol; still 12 steps)
 - **Date:** 2026-09-29
 - **Deciders:** Owner
 - **Amends:**
@@ -307,3 +307,17 @@ These are named here rather than in each plan:
 - **A frontmatter stamp.** It forces an index edit for no reader. *(Reversed by
   [ADR-0032](./0032-plan-workbench-answers-and-versions.md): `revises`/`version`/`answered` carry the
   lineage; the index still needs no edit.)*
+
+## Amendment — ADR-0041 (2026-09-30)
+
+> **Amended by [ADR-0041](./0041-no-mistakes-gate.md).** In the `PROMPT.md` run protocol above, rules
+> 1–8 are unchanged and rules 9–12 are rewritten, so the count stays at 12. Rule 9 is one fixed
+> pipeline per task (red-first, edit, acceptance, then the project's full gate from its first step).
+> Rule 10 replaces "stop after 3 failed attempts" with findings by action: **no-op** (note it and
+> continue), **auto-fix** (inside the task's files without changing an intent field: at most 3 attempts
+> per task, a fix made after the task's commit is its own `fix(T#)` commit, then re-run the acceptance
+> and the full gate) and **ask-user** (fixing would change an intent field: 0 attempts, quote the
+> failure verbatim, leave the task `[?]`). Rule 11 forbids weakening a check. Rule 12 ends each report
+> with findings and requires an escaped mistake to be encoded as a failing test or acceptance. Every
+> field key is classified in `FIELD_ACTION` (`depends` ask-user, `reads` no-op), and plan.md's header
+> reads `Rules: PROMPT.md (How to run this and its rule 10 Findings, PINNED, Fence)`.

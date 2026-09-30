@@ -44,6 +44,7 @@ flowchart LR
         R33["GET /skills — the skill book: every move by spine stage, then the workflow book (ADR-0022, ADR-0035)"]
         R49["GET /skills/workflow/:name — one workflow in full: stages, worst-case call ceiling, panel rubric, definition file (ADR-0035) | 404 unknown"]
         R36["GET /sources — named reference sources page (ADR-0021)"]
+        R50["GET /idea/:slug/runs/:run_id — the run inspector: one run journal, call by call (ADR-0037, D39) | 404 unknown idea or run"]
     end
     subgraph partials["HTMX partials"]
         R3["POST /ideas — create (D10) → idea row / redirect"]
@@ -128,6 +129,7 @@ flowchart LR
     R33 --> T_SKILLS["templates/skills.html"]
     R34 --> T_SKILLSLIST["templates/_skills_list.html"]
     R49 --> T_WFDETAIL["templates/workflow_detail.html"]
+    R50 --> T_RUN["templates/run.html"]
     R36 --> T_SOURCES["templates/sources.html"]
     R37 --> T_SRCLIST["templates/_sources_list.html"]
     R38 --> T_SRCEDIT["templates/_source_edit_row.html"]
@@ -147,6 +149,7 @@ flowchart LR
 ```
 
 Route groups map to `web::routes` submodules: `plans` (R46–R48 — the plan workbench, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md)),
+`runs` (R50 — the read-only run inspector over one run journal, [ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)),
 `ideas` (R1, R2, R3, R8, R9b, R12, R14, R23, R42–R45 —
 `set_tags`/`set_sources`/`cancel_job`/`delete_idea`), `chat`
 (R9, R32 — the send path and its pending-message queue), `memory`/idea-actions (R4–R7, R15, R16, R22 — the module name predates the delete/workflow
@@ -197,6 +200,24 @@ view if a store job won the race first. R45 (`delete_idea`) removes the whole id
 runs a **forced** reindex (`web::routes::reindex_logged_forced`, bypassing the empty-vault guard
 [ADR-0019](./adr/0019-vault-mount-verified-not-created.md) would otherwise apply) before an `HX-Redirect`
 home, since deleting the last idea legitimately empties the vault.
+
+**R50 (`web::routes::runs`, [ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md),
+[D39](./05-ai-integration.md)).** A synchronous, read-only page over one run journal
+(`vault/<slug>/.runs/<run_id>.jsonl`): the run's kind, build and outcome, then per call its role,
+backend and model, how the answer met its output contract (`clean`, `repaired`, `retried` or
+`off-contract: <why>`), prompt and output tokens, API calls, stop reason, milliseconds and
+truncation flags, any Ollama tool rounds, and the verbatim response folded in a `<details>`. Lines
+are read as plain JSON so a journal from another build still renders what it can; an unreadable
+line (a run cut off mid-write) is counted and shown, never fatal. An unknown idea or run id is
+`404`, and a run id is restricted to letters, digits and `-` so it can never name a path outside
+`.runs/`. The idea page links the newest run as "last run ↗". The journal is diagnostics, not
+truth: nothing on this route writes or indexes it.
+
+**R19 and recipes ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md)).** The artifact
+page shows the artifact's `recipe:` line (`skill <name> @ <digest12> (<source>) · build
+<version>[+<sha>]`, or `provenance unknown` for an artifact written before recipes), one line per
+off-contract lens, and a "recipe changed since" badge when the stored skill or workflow digest
+differs from the live book. `/skills` (R33/R34) shows each skill's and workflow's digest.
 
 **R46–R48 (`web::routes::plans`, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md),
 [D33](./06-concepts/skills.md#the-plan-workbench-d33)).** R46 (`answer_plan`) is a synchronous,
@@ -289,6 +310,9 @@ templates/
                             #   with use_when/avoid_when/source/role/contract, plus load issues;
                             #   then the #workflows book (each workflow's stages, worst-case call
                             #   ceiling and waves, source, issues banner); re-rendered by reload (R34)
+  run.html                  # extends base — one run journal, call by call (R50, ADR-0037): kind/build/outcome, then
+                            #   per call role, backend, contract outcome, tokens, stop reason, truncation flags,
+                            #   tool rounds and the verbatim response in a <details>
   workflow_detail.html      # extends base — one workflow in full (R49, ADR-0035): stages with their share
                             #   of the call ceiling, a panel's rubric table, the owner-facing explanation
                             #   and the definition file as loaded (the thing to copy to fork it)

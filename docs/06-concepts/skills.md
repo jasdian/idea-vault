@@ -133,7 +133,7 @@ sequenceDiagram
     J->>Reg: snapshot().get(name) → invoke(skill, idea)
     Reg->>Bud: fill {context} (related block + idea body + memory + recent turns, under budget)
     Bud-->>Reg: hydrated prompt
-    Reg->>L: chat(prompt) [one semaphore permit, active backend]
+    Reg->>L: chat_meta(prompt) [one semaphore permit, active backend]
     L-->>Reg: answer
     Reg->>C: validate(skill.contract, answer) — strip chatter, check shape
     alt contract violated
@@ -148,6 +148,19 @@ sequenceDiagram
     Reg-->>J: skill output
     J-->>U: mark_done, next poll returns the finished transcript
 ```
+
+`ask_on_contract` returns the answer together with a `ContractOutcome`: `Clean` (validated as the
+model wrote it), `Repaired` (validation stripped or reshaped something), `Retried` (valid on the one
+retry) or `OffContract(violation)` (kept although it never met the contract, with the violation).
+The outcome is journaled against the call whose text was kept
+([ADR-0037](../adr/0037-run-journal-diagnostics-only-call-record.md), D39) and stamped into an
+artifact's recipe. A truncated answer is a violation (`Violation::Truncated`): when generation hit its
+output limit (`stop_reason == "length"`) the single retry runs as usual, and a truncated first answer
+that still validated is kept (repaired) over a retry that is off contract, empty or failed (a build
+plan is still decided by its plan score); when the prompt filled 98% of
+the window the answer is kept without a retry, since the same window would truncate again, and is
+recorded `OffContract("input truncated")` with one warning
+([ADR-0023](../adr/0023-verification-layer.md) amendment).
 
 ## Registry & discovery
 
@@ -321,6 +334,21 @@ every path and command. It also carries a leaf rule: a task title is one commit 
 page derives a `PROMPT.md` run protocol and an `/attack`-style `plan.md` from the stored plan
 ([09-web-ui](../09-web-ui.md)).
 
+## Provenance: the skill digest and the recipe
+
+Every skill carries a **digest**: 12 hex digits of the SHA-256 of its raw markdown file, computed at
+registry load *before* `{context}` is filled, so it changes when the owner edits the file and not
+when the idea changes. The skill book (`/skills`) shows it as `@<digest>` next to each move and marks
+owner overrides. An AI-written artifact made by a skill stamps a `recipe:` block into its frontmatter
+(`skill`, `skill_digest`, `skill_source` as `built-in`, `vault override` or `vault`, the
+parse-coupled prompt templates it used, the build id and any off-contract lens), and the artifact page
+shows it, with a **"recipe changed since"** badge when the stored digest differs from the live skill's
+(or the skill is gone). An artifact with no recipe reads "provenance unknown", never "stale". Only the
+prompts whose answers code parses (the audit and its re-ask, the contract retry note, the fact
+extraction and consolidation instructions) are frozen behind golden tests; skills themselves are
+owner-editable data, so they are digested, never frozen
+([ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md), [data model](../03-data-model.md)).
+
 ## Distinction from adjacent concepts
 
 | Concept | What it is | Relation to skills |
@@ -355,4 +383,6 @@ page derives a `PROMPT.md` run protocol and an `/attack`-style `plan.md` from th
 - [ADR-0022](../adr/0022-skills-as-markdown-and-the-skill-book.md) — skills as markdown, owner
   overrides, the skill book and the spine.
 - [ADR-0023](../adr/0023-verification-layer.md) — output contracts and the one-retry rule.
+- [ADR-0037](../adr/0037-run-journal-diagnostics-only-call-record.md) — `ContractOutcome`, truncation, the run journal (D39).
+- [ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md) — the skill digest and the artifact recipe.
 - [ADR-0032](../adr/0032-plan-workbench-answers-and-versions.md) — the plan workbench and lineage (D33).

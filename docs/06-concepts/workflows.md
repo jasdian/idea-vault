@@ -297,7 +297,15 @@ Every workflow has an exact worst-case number of model calls, repair retries inc
 
 A definition whose ceiling is over `WORKFLOW_MAX_CALLS` (32) is rejected at load, never clamped. At
 run time a `CallBudget` counts calls against the ceiling and holds in reserve the ceiling of every
-stage still to come, so an elastic stage (a Loop) can never starve the final one. The built-ins:
+stage still to come, so an elastic stage (a Loop) can never starve the final one. The count is of
+**billed requests** ([ADR-0037](../adr/0037-run-journal-diagnostics-only-call-record.md)): the run's
+backend view carries a meter, so a retry, each Ollama tool round and each claude process is charged
+as it goes out. A tool-using call can therefore cost more than the one call its stage's ceiling
+assumed, and the reserve check then funds fewer elastic rounds. The Audit stage (and every Refine
+re-audit) may make one targeted re-ask of a malformed or partial audit
+([ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md)), but only when `CallBudget::can_fund(2)`
+holds, so the re-ask is paid for out of slack and the workflow's ceiling is never exceeded. The
+built-ins:
 
 | Workflow | Worst case |
 |---|---|
@@ -476,6 +484,18 @@ They share machinery (bounded parallel agents, the judge, the audit, the synthes
 A workflow *uses* the swarm fan-out as its parallel stage; a swarm is the lower-level primitive
 ([D14](./swarm.md)).
 
+## Provenance and the run journal
+
+A workflow file has a **digest** like a skill (12 hex digits of its raw markdown, shown on the
+workflow book and on R49). Every artifact a workflow run writes (stage artifacts and the run record,
+and a build plan when the capstone is the planner) carries a `recipe:` naming the workflow, its digest,
+the parse-coupled templates used, the build id and any off-contract lens, and the artifact page shows a
+"recipe changed since" badge when the digest differs from the live workflow's
+([ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md)). A workflow run is one journaled run of
+kind `workflow` ([ADR-0037](../adr/0037-run-journal-diagnostics-only-call-record.md), D39): each stage's
+calls, contract outcomes and audit verdicts land in `vault/<slug>/.runs/<run_id>.jsonl` and are shown
+by R50.
+
 ## Mapping to code
 
 - **Workflow definitions:** markdown files parsed by `domain::frontmatter::parse_workflow` into the
@@ -502,4 +522,6 @@ A workflow *uses* the swarm fan-out as its parallel stage; a swarm is the lower-
 - [ADR-0034](../adr/0034-grounded-ranked-and-bounded-workflow-stages.md) — Ground, Panel, Loop, Refine, the call ceiling and stage artifacts.
 - [ADR-0035](../adr/0035-workflows-as-markdown-and-the-workflow-book.md) — workflows as markdown files, the workflow book, R49.
 - [ADR-0036](../adr/0036-mcp-list-workflows-and-run-workflow.md) — the MCP `list_workflows` and `run_workflow` tools.
+- [ADR-0037](../adr/0037-run-journal-diagnostics-only-call-record.md) — the run journal, and the call budget charged by billed requests.
+- [ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md) — the workflow digest, the artifact recipe and the audit re-ask.
 - The host tool's own Workflow concept is the inspiration; here it is applied to one idea.

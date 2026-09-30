@@ -80,7 +80,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D38), and ADRs 0001–0036. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D41), and ADRs 0001–0041. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -97,6 +97,7 @@ vault/
     memory/          # one durable fact/decision per file, LLM-memory style
       *.md           # frontmatter + body; link related memories with [[slug]]
     MEMORY.md        # one-line index of memory/ files, loaded as context when the idea reopens
+    .runs/           # diagnostics, NOT truth: one append-only <run_id>.jsonl per AI job (ADR-0037); never indexed, forked or read into a prompt, newest 50 kept
 index.db             # SQLite: rebuildable search/tag/backlink index over vault/**
 ```
 
@@ -140,6 +141,31 @@ When implementing these, keep the mental model close to a real agent harness:
   ([ADR-0033](docs/adr/0033-mcp-idempotent-replay-and-plan-tools.md)). `list_workflows` and
   `run_workflow` put the workflow book on MCP; a capstone points to `build_plan`
   ([ADR-0036](docs/adr/0036-mcp-list-workflows-and-run-workflow.md)).
+- **Run journal** — every AI job writes an append-only `vault/<slug>/.runs/<run_id>.jsonl` (each call's
+  verbatim response, tokens, stop reason, tool rounds, contract outcome and parser verdict): diagnostics,
+  not truth, never indexed, forked or read into a prompt, newest 50 runs kept, and a journal failure
+  never fails a turn; R50 (`GET /idea/{slug}/runs/{run_id}`) inspects one
+  ([ADR-0037](docs/adr/0037-run-journal-diagnostics-only-call-record.md), D39). It is unrelated to
+  ADR-0033's MCP replay.
+- **Regrade and the parser corpus** — `idea-vault regrade` re-runs today's parsers, detectors and gates
+  over the journaled answers and prints one line per flip (read-only; a verdict whose haystack changed
+  is skipped), and `tests/parser_corpus.rs` checks hand-exported fixtures against a committed snapshot;
+  replay never covers prompt changes ([ADR-0038](docs/adr/0038-parser-corpus-and-read-only-regrade.md), D40).
+- **Foil hygiene and lockdown** — the claude-code foil runs `--restricted --tools Read,Grep,Glob`
+  (+ `WebSearch,WebFetch` only while web access is on), always `--strict-mcp-config`, in the idea's own
+  folder, never under `--dangerously-skip-permissions`, with a checked stream-json `init` event, an env
+  pass-list, and a turn deadline; every Ollama tool result is fenced as untrusted data
+  ([ADR-0039](docs/adr/0039-foil-hygiene-and-lockdown.md)).
+- **Recipe provenance** — every AI-written artifact carries a `recipe:` (skill or workflow digest,
+  parse-coupled template refs, build id, off-contract lenses); an old artifact reads "provenance
+  unknown", an edited skill shows "recipe changed since", and a malformed or partial audit gets at most
+  one targeted re-ask ([ADR-0040](docs/adr/0040-recipe-provenance-and-audit-re-ask.md)).
+- **No-mistakes gate** — `scripts/gate.sh` is a fixed pipeline with no skip whose invariant catalog
+  collects every finding with an id and severity (each rule has a seeded test), and whose honesty step
+  is red when a fixture, snapshot, floor or rule change is not declared under `## Expectation changes`;
+  findings are acted on by what a fix would change (no-op, auto-fix, ask-user), and `RUN_PROTOCOL` in
+  every `PROMPT.md` says the same ([ADR-0041](docs/adr/0041-no-mistakes-gate.md), D41,
+  [docs/14](docs/14-no-mistakes-gate.md)).
 - **Subagent swarming** — fan out N agents in parallel to attack one idea from independent angles,
   then converge/synthesize. Against local Ollama models this means bounded concurrency and careful
   context budgeting — do not naively spawn unbounded parallel calls.
@@ -154,7 +180,11 @@ cargo build --release     # single-binary release build
 cargo test                # run tests
 cargo test <name>         # run a single test by name substring
 cargo fmt && cargo clippy # format + lint before finishing a change
-bash scripts/gate.sh      # the fixed-order shipping gate: intent → invariant greps → build → tests → fmt → clippy -D warnings
+bash scripts/gate.sh      # the fixed 7-step shipping gate, no skip: intent (+freshness) → strict invariants → build → tests → fmt → clippy -D warnings → honesty (ADR-0041)
+bash scripts/gate.sh --list           # print the step table
+bash scripts/gate.sh --install-hook   # install the pre-push hook (runs check-invariants.sh --strict); use alone
+bash scripts/check-invariants.sh --list   # the invariant catalog: id|severity|ADR/D|zero-state
+cargo run -- regrade [--idea <slug>] [--parser audit|facts|contract|plan-gates] [--strict]   # replay today's parsers over vault/*/.runs (read-only; ADR-0038)
 ```
 
 Ollama must be running locally (`ollama serve`, model pulled) for AI features to work; the app
@@ -186,12 +216,19 @@ ADR-0006), `IDEA_VAULT_OLLAMA_TIMEOUT_SECS` (default `120`, the hard inactivity 
 (default `high`; injected as a system-prompt hint, since the claude CLI has no per-call effort
 flag), and the dynamic-context-budget overrides `IDEA_VAULT_OLLAMA_CTX_TOKENS` /
 `IDEA_VAULT_CLAUDE_CTX_TOKENS` (default `0` = auto-derive from the model, else clamped
-`1024..=2_000_000` tokens; [ADR-0014](docs/adr/0014-dynamic-context-budget.md)), and
+`1024..=2_000_000` tokens; [ADR-0014](docs/adr/0014-dynamic-context-budget.md)),
+`IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS` (default `1800`, the wall-clock ceiling on one whole claude-code
+turn) and `IDEA_VAULT_CLAUDE_ENV_PASS` (comma-separated extra env names the claude child may inherit,
+on top of a fixed pass-list; `IDEA_VAULT_*` keys are never passed;
+[ADR-0039](docs/adr/0039-foil-hygiene-and-lockdown.md)), and
 `IDEA_VAULT_WORKFLOWS_DIR` (default `<vault>/.workflows`, owner workflow files, app config not vault
 truth; [ADR-0035](docs/adr/0035-workflows-as-markdown-and-the-workflow-book.md)). All of the above
 are only the **initial** values — the live Settings page (`GET`/`POST /settings`,
 [ADR-0011](docs/adr/0011-live-switchable-llm-backend.md)) can retune
 backend/temperature/model/effort/context-window at runtime with no restart.
+`IDEA_VAULT_BUILD_SHA` is different: a **build-time** value (a Dockerfile `ARG`, read by `option_env!`;
+unset under `cargo run`) that stamps artifact recipes as `<version>+<sha>`
+([ADR-0040](docs/adr/0040-recipe-provenance-and-audit-re-ask.md)).
 **Never hardcode `localhost:11434` or a localhost bind** — it breaks the
 containerized run. `vault/` is a host bind mount (truth you own); the SQLite index and Ollama models
 are named volumes (rebuildable / re-pullable). GPU touches only the Ollama service. The **claude-code

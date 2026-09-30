@@ -1,6 +1,6 @@
 # ADR-0013 — claude-code backend in the container: bind-mount CLI + `setup-token` + `HOME=/claude` volume
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0039](./0039-foil-hygiene-and-lockdown.md) (the spawned CLI no longer inherits the service environment: it gets a fixed pass-list)
 - **Date:** 2026-07-08
 - **Deciders:** owner
 
@@ -110,6 +110,16 @@ auth error in the UI.
 - **Docker secrets for the token** — the standard hardening for multi-tenant/production secrets,
   but overkill for a loopback single-owner tool where `docker inspect` access already implies host
   access; adds a swarm/secrets-file dependency this stack otherwise has no use for. Rejected.
+
+## Amendment — ADR-0039 (2026-09-30)
+
+> **Amended by [ADR-0039](./0039-foil-hygiene-and-lockdown.md).** The sentence above that the spawned
+> `claude` child "already inherits the full service environment (`src/ai/claude_code.rs` never calls
+> `.env()`/`env_clear()`)" is no longer true: the child, and the `--version` probe, is spawned with
+> `env_clear()` plus a fixed pass-list, and every `IDEA_VAULT_*` key is withheld. The token still
+> reaches the CLI with no change to the override, because `CLAUDE_CODE_OAUTH_TOKEN` and
+> `HOME` (`/claude` here) are on the pass-list. A proxy or CA variable outside the list is named in
+> `IDEA_VAULT_CLAUDE_ENV_PASS` ([12-deployment](../12-deployment.md)).
 
 ---
 

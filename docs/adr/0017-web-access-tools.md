@@ -1,6 +1,6 @@
 # ADR-0017 — Web access tools, gated by one live setting
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0039](./0039-foil-hygiene-and-lockdown.md) (on the claude-code path the web tools are absent from `--tools` when off, not only denied; there is no skip-permissions mode)
 - **Date:** 2026-07-08
 - **Deciders:** owner
 
@@ -25,7 +25,13 @@ differently in mechanism:
 - **Ollama path — a new `ai::web` module.** Two keyless tools: `web_search` (GETs DuckDuckGo's no-JS
   HTML endpoint, no API key; the endpoint is env-overridable via `IDEA_VAULT_SEARCH_URL`, e.g. to
   point at a self-hosted SearXNG instance) and `fetch_url` (GET + tag-strip, truncated to 12,000
-  characters so one fetch can never blow the context budget). `LlmBackend::chat` runs a **bounded
+  characters so one fetch can never blow the context budget). `fetch_url` takes a model-chosen URL,
+  and the model reads pages an attacker may write, so it fetches **public hosts only**: loopback,
+  private, link-local, CGNAT and single-label hosts (the compose names `ollama`, `idea-vault`) and
+  `localhost`/`.local`/`.internal` names are refused, on the first URL and on every redirect hop,
+  and a custom resolver drops every inward address a name resolves to (DNS rebinding included).
+  Otherwise a fetched page could steer the foil into reading another idea off the unauthenticated
+  owner UI at the app's own bind address and exfiltrating it with the next fetch. `LlmBackend::chat` runs a **bounded
   tool-calling loop** on top of `/api/chat` with `stream: false` and a `tools` array: at most
   `MAX_TOOL_ROUNDS = 4` rounds of "model may call tools", at most `MAX_CALLS_PER_ROUND = 3` executed
   calls per round, then one final forced tool-free call so the loop always terminates in a plain
@@ -91,6 +97,14 @@ original privacy guarantee remains available, just no longer the unconditional d
   tokens can be produced") for a feature that already has a working non-streaming path. Deferred,
   not rejected outright — revisit if the non-streaming round's coarser "thinking…" experience turns
   out to matter in practice.
+
+## Amendment — ADR-0039 (2026-09-30)
+
+> **Amended by [ADR-0039](./0039-foil-hygiene-and-lockdown.md).** The claim above that the deny of
+> `WebSearch`/`WebFetch` "holds even under `--dangerously-skip-permissions` (the full-agentic
+> default)" describes a mode that no longer exists. With web access off the two tools are simply
+> not in `--tools`, and are also passed as `--disallowedTools`; with it on they are added to
+> `--tools`. Every Ollama tool result, web text included, is also fenced as untrusted data.
 
 ---
 

@@ -88,7 +88,13 @@ sequenceDiagram
   (≥80% word overlap) are merged, keeping every lens that raised them.
 - **Audit** (`concepts::audit`, on by default, live toggle, [ADR-0023](../adr/0023-verification-layer.md)).
   Factored: the auditor sees only the numbered claims and the source material, and is told to prefer
-  UNCERTAIN over CONFIRMED.
+  UNCERTAIN over CONFIRMED. When the answer leaves any finding without a verdict (a malformed or
+  partial answer), the swarm makes **one** targeted re-ask naming only the missing ids and merges the
+  results first-verdict-wins; if the re-ask errors or stays garbled the findings stay UNCERTAIN, and
+  an audit call that failed outright is not re-asked. A swarm has no call budget, so it always may
+  re-ask ([ADR-0023](../adr/0023-verification-layer.md) amendment,
+  [ADR-0040](../adr/0040-recipe-provenance-and-audit-re-ask.md)). Each audit call journals its own
+  verdict for `regrade` ([ADR-0038](../adr/0038-parser-corpus-and-read-only-regrade.md)).
 - **Synthesizer.** Sees the idea statement and each finding's provenance and verdict, and is told
   not to build on REFUTED findings.
 - **Code-appended appendix** (the model doesn't write it):

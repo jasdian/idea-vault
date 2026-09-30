@@ -17,6 +17,7 @@ flowchart TB
         APP["app.rs — router, middleware (re-exports web::state::AppState)"]
         CFG["config.rs — paths, Ollama URL, limits (IDEA_VAULT_* env, D26); re-exports ai::LlmBackendKind"]
         IMPORT["import.rs — import_dir: Obsidian/flat-markdown notes → Draft ideas + reindex\n(idea-vault import DIR, ADR-0009)"]
+        REGRADE["regrade.rs — summarize/regrade_entry/run/export/corpus: replay today's parsers over the run journals and the committed parser corpus, read-only\n(idea-vault regrade, ADR-0038, D40)"]
 
         subgraph domain["domain/ (pure, no IO)"]
             D_IDEA["idea.rs — Idea, IdeaState"]
@@ -46,13 +47,18 @@ flowchart TB
 
         subgraph ai["ai/ (LLM backend boundary)"]
             A_OLL["ollama.rs — Ollama client + health (D20)"]
-            A_CC["claude_code.rs — claude CLI backend (ADR-0009)"]
+            A_CC["claude_code.rs — claude CLI backend, locked-down foil: --restricted, --tools allowlist, --strict-mcp-config, env pass-list, turn deadline (ADR-0009, ADR-0039)"]
             A_BK["backend.rs — LlmBackend live router + LlmSettings (ADR-0009/0011)"]
             A_STREAM["stream.rs — Ollama NDJSON → token stream"]
             A_BUDGET["budget.rs — context budgeting (D21)"]
             A_WEB["web.rs — keyless web_search/fetch_url + tool defs (ADR-0017)"]
             A_MCP["mcp.rs — MCP Streamable-HTTP wire client (init/session/tools-list/tools-call, ADR-0018)"]
-            A_CONTRACT["contract.rs — pure output-contract validate/repair/items/trim_sections (ADR-0023)"]
+            A_CONTRACT["contract.rs — pure output-contract validate/repair/items/trim_sections; ContractOutcome + Violation::Truncated (ADR-0023, ADR-0037)"]
+            A_CALL["call.rs — CallUsage / CallMeta (tokens, stop reason, num_ctx, ms), truncation predicates, MetaSlot (ADR-0037)"]
+            A_JOURNAL["journal.rs — the run journal: JournalWriter, JournalEntry, RunKind, open_run, read_run, 50-run retention (ADR-0037, D39)"]
+            A_VERDICT["verdict.rs — ParserKind, Haystack, HaystackRef: what a journaled verdict names (ADR-0038)"]
+            A_PROV["provenance.rs — PromptTemplate, digest12, template_ref, build_id: the recipe a stored artifact is stamped with (ADR-0040)"]
+            A_UNTRUSTED["untrusted.rs — fence_untrusted + FENCE_NOTE: the tool-result fence (ADR-0039)"]
             A_SRC["sources.rs — deterministic source_list/source_grep/source_read tool leaves (ADR-0021)\n+ SourceProbe: bounded anchor/token checks for the build-plan gates (ADR-0030)"]
         end
 
@@ -85,7 +91,8 @@ flowchart TB
         end
 
         subgraph web["web/ (HTTP surface)"]
-            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources, plans"]
+            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources, plans, runs"]
+            W_RUNS["routes/runs.rs — the run inspector R50: read-only view of one run journal (ADR-0037)"]
             W_PLANS["routes/plans.rs — the plan workbench routes R46–R48: answer, latest, re-plan (docs/adr/0032)"]
             W_MCPSRV["mcp_server/ — auth.rs, handler.rs, tools.rs, tasks.rs, idempotency.rs, prompts.rs: the inbound MCP\nserver at POST /api/mcp (rmcp ServerHandler + Bearer AuthLayer, ADR-0024)"]
             W_STATE["web/state.rs — AppState (shared handler state)"]
@@ -131,11 +138,17 @@ flowchart TD
     config["config (bin-level leaf)"]
     app["app (bin-level)"]
     import["import (bin-level)"]
+    regrade["regrade (bin-level)"]
 
     app --> web
     import --> index
     import --> vault
     import --> domain
+    regrade --> concepts
+    regrade --> memory
+    regrade --> ai
+    regrade --> vault
+    regrade --> domain
     web --> config
     config --> ai
     web -->|"incl. concepts::build_plan (lineage, workbench)"| concepts
@@ -172,6 +185,7 @@ flowchart TD
     class web top;
     class app top;
     class import top;
+    class regrade top;
     class domain base;
     class mcp base;
     class sources base;
@@ -193,6 +207,7 @@ flowchart TD
 | `web` | everything below, including `config` (`web::state::AppState` holds `Arc<Config>`) | `app` (no library module may depend on `web`) |
 | `app` (bin-level) | `web` only (re-exports `web::state::AppState`) | everything else internal |
 | `import` (bin-level, used only by `main`) | `index`, `vault`, `domain` | everything else internal; no library module may depend on `import` |
+| `regrade` (bin-level, used only by `main`) | `concepts`, `memory`, `ai`, `vault`, `domain` | `web`, `index`; no library module may depend on `regrade` |
 
 > Rationale for a couple of edges that might surprise: `index` depends on `vault` because reindex
 > reads markdown to rebuild ([ADR-0002](./adr/0002-markdown-source-of-truth-sqlite-index.md)). `ai`
@@ -225,7 +240,10 @@ flowchart TD
 - **`ai`** — the sole LLM-backend boundary (ADR-0009): `LlmBackend`, a **live router** over an
   Ollama HTTP client and the `claude` CLI backend, dispatching per call from runtime-tunable
   `LlmSettings` ([ADR-0011](./adr/0011-live-switchable-llm-backend.md)); also health probe and
-  context budgeting. Provider-swap is localized here (out of scope beyond these two,
+  context budgeting. It also owns the call record and its diagnostics: `call` (what a call cost and how
+  it stopped), `journal` (the per-job run journal, [ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)),
+  `verdict` (what a journaled verdict names), `provenance` (recipe digests) and `untrusted` (the
+  tool-result fence, [ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)). Provider-swap is localized here (out of scope beyond these two,
   [ADR-0003](./adr/0003-ollama-local-only-ai.md)). `ai::web` supplies the keyless `web_search`/
   `fetch_url` tool leaves the router's bounded tool-calling loop executes on the Ollama path when
   the live `web_access` setting is on ([ADR-0017](./adr/0017-web-access-tools.md)). `ai::mcp` is the
@@ -259,6 +277,14 @@ flowchart TD
 - **`import`** — a bin-level driver (used only by `main`, like `web`): converts a directory of flat
   Obsidian `.md` notes into ideas, then reindexes ([ADR-0009](./adr/0009-pluggable-llm-backend-claude-code.md)).
   Depends on `domain` + `vault` + `index`; nothing depends on it.
+- **`regrade`** — a bin-level driver like `import` (used only by `main`): `idea-vault regrade`
+  replays today's parsers, detectors and gates over the run journals under `vault/*/.runs/` and the
+  committed parser corpus, and prints one line per flip ([ADR-0038](./adr/0038-parser-corpus-and-read-only-regrade.md),
+  [D40](./10-testing-strategy.md)). It never writes to the vault; its only write is the hand-run
+  `--export` into `tests/fixtures/raw-outputs/`. `regrade::summarize` only *dispatches* to each
+  parser's own summary function (`concepts::audit::summarize_audit`, `memory::extract::summarize_facts`,
+  `ai::contract::summarize_contract`, `concepts::build_plan::finish::summarize_plan_gates`), so a
+  parser never reaches up into it. Depends on `concepts`, `memory`, `ai`, `vault` and `domain`.
 
 ## Future workspace mapping (not built now)
 
@@ -268,7 +294,7 @@ If promoted to a workspace ([ADR-0005](./adr/0005-single-crate-vs-workspace.md))
 |--------------|-----------------|
 | `idea-vault-core` | `domain`, `vault`, `index`, `mcp`, `sources` |
 | `idea-vault-ai` | `ai`, `memory`, `concepts` |
-| `idea-vault-web` | `web` (incl. `web::state::AppState`) + binary (`main`, `app`, `config`, `import`) |
+| `idea-vault-web` | `web` (incl. `web::state::AppState`) + binary (`main`, `app`, `config`, `import`, `regrade`) |
 
 The D4 direction already matches these crate boundaries, so extraction requires no dependency
 inversion. `ai` no longer needs the `config` crate (`LlmBackendKind` lives in `ai`); `config` lands

@@ -26,7 +26,7 @@ New here? Read top to bottom:
 4. [02-module-reference](./02-module-reference.md) — the single-crate module graph + rules (D4, D5).
 5. [03-data-model](./03-data-model.md) — vault-on-disk truth + SQLite index + reindex (D6–D8, D15, D22).
 6. [04-state-machine](./04-state-machine.md) — the idea lifecycle (D9).
-7. [05-ai-integration](./05-ai-integration.md) — Ollama + claude-code, background-job flow, degradation, errors (D3, D11, D20, D24).
+7. [05-ai-integration](./05-ai-integration.md) — Ollama + claude-code, background-job flow, degradation, errors (D3, D11, D20, D24, D39).
 8. [06-concepts/](./06-concepts/) — the harness primitives:
    [memory](./06-concepts/memory.md) (D12, D13, D23),
    [skills](./06-concepts/skills.md) (D18, D33),
@@ -38,7 +38,8 @@ New here? Read top to bottom:
 11. [12-deployment](./12-deployment.md) — containerized local hosting, with/without GPU (D26–D29, D31).
 12. [13-mcp-server-inbound](./13-mcp-server-inbound.md) — exposing idea-vault itself as an MCP server.
 13. [08-diagrams](./08-diagrams.md) — the full diagram registry.
-14. [10-testing-strategy](./10-testing-strategy.md) — invariants and how they're tested.
+14. [10-testing-strategy](./10-testing-strategy.md) — invariants and how they're tested (D40).
+15. [14-no-mistakes-gate](./14-no-mistakes-gate.md) — the shipping gate, its invariant catalog and the findings protocol (D41).
 
 For running the stack, the top-level [README](../README.md) has the Docker quickstart.
 
@@ -53,7 +54,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [02-module-reference](./02-module-reference.md) | Single-crate modules + one-way deps | D4, D5 |
 | [03-data-model](./03-data-model.md) | Vault contract + SQLite index + reindex | D6, D7, D8, D15, D22 |
 | [04-state-machine](./04-state-machine.md) | Idea lifecycle | D9 |
-| [05-ai-integration](./05-ai-integration.md) | Ollama + claude-code boundary (live router), background-job flow, degradation, errors | D3, D11, D20, D24 |
+| [05-ai-integration](./05-ai-integration.md) | Ollama + claude-code boundary (live router), the locked-down foil, background-job flow, run journal and `CallMeta`, degradation, errors | D3, D11, D20, D24, D39 |
 | [06-concepts/memory](./06-concepts/memory.md) | Extract on Store, load on Reopen, backlinks | D12, D13, D23 |
 | [06-concepts/skills](./06-concepts/skills.md) | Reusable ideation moves as markdown files, the skill book, the spine | D18, D33 |
 | [06-concepts/agents](./06-concepts/agents.md) | Subagent roles + I/O contract | — |
@@ -63,10 +64,11 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [09-web-ui](./09-web-ui.md) | Routes, middleware, templates, HTMX (background-job polling) | D16, D17 |
 | [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers, reference sources | D26, D27, D28, D29, D31 |
 | [13-mcp-server-inbound](./13-mcp-server-inbound.md) | Inbound MCP server (`/api/mcp`), the Task↔Job bridge, and the reusable cookbook | — |
-| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D38) | (catalog) |
-| [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
+| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D41) | (catalog) |
+| [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach, parser corpus and regrade, the gate under test | D40 |
+| [14-no-mistakes-gate](./14-no-mistakes-gate.md) | The fixed seven-step shipping gate, the invariant catalog, the findings protocol, the checklist | D41 |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0036 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0041 | — |
 
 ## Locked decisions (at a glance)
 
@@ -103,6 +105,11 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Grounded, ranked and bounded workflow stages:** a workflow gains four stage kinds decided in code — **Ground** (map the attached sources and verify every reader-cited anchor in code, carry only verified anchors, skipped free with no sources), **Panel** (proposals scored alone, cold, by the Auditor role against a weighted rubric; code picks the winner and grafts), **Loop** (rounds until dry or capped) and **Refine** (rewrite the audit's REFUTED/UNCERTAIN findings by id, re-audit) — under an exact call ceiling of at most 32 shown before every run; Ground, Panel and Loop keep one artifact each plus a `workflow_run` record, written all-or-nothing after the final stage and never as turns or evidence, a scoped exception to the discard-intermediates rule ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md), amends ADR-0006, ADR-0021, ADR-0023, D14; D35–D37).
 - **Workflows as markdown + the workflow book:** every workflow is a markdown file (built-ins compiled in from `src/concepts/workflows/*.md`, owner files in `vault/.workflows/` via `IDEA_VAULT_WORKFLOWS_DIR`), parsed by a hand-dispatched `kind:` and validated against the skill registry, an invalid file a book issue with the built-in kept; skills and workflows are held as one `Book` pair reloaded together; the workflow book lists each with its call ceiling and R49 (`GET /skills/workflow/{name}`) shows one in full; only `ready-to-build` may be a capstone ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md), amends ADR-0022, D38).
 - **MCP workflows:** `list_workflows` and `run_workflow` put the workflow book on the inbound MCP server; a capstone is refused with a pointer to `build_plan`, and a run returns its turn plus the stage-artifact slugs ([ADR-0036](./adr/0036-mcp-list-workflows-and-run-workflow.md), amends ADR-0024 and ADR-0029).
+- **Run journal (diagnostics only):** every AI job writes an append-only `vault/<slug>/.runs/<run_id>.jsonl` (each call's verbatim response, tokens, stop reason, tool rounds, contract outcome and parser verdict); never indexed, never read into a prompt, never forked, newest 50 runs kept, and a journal failure never fails a turn; R50 is the read-only inspector; a workflow's call budget is charged by billed requests; unrelated to ADR-0033's MCP replay ([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md), D39, R50).
+- **Parser corpus and regrade:** `idea-vault regrade` replays today's parsers over the journaled answers and prints one line per flip, skipping a verdict whose haystack changed and never writing to the vault; a hand-curated corpus (`regrade --export` only) is checked against a committed snapshot; replay covers parse, detector and gate code, never prompts ([ADR-0038](./adr/0038-parser-corpus-and-read-only-regrade.md), D40).
+- **Foil hygiene and lockdown:** the claude-code foil runs `--restricted --tools Read,Grep,Glob` (+ web tools when web access is on), always `--strict-mcp-config`, in the idea's own folder, never under `--dangerously-skip-permissions`, with a checked `init` event, an env pass-list that never includes `IDEA_VAULT_*`, and an 1800 s turn deadline; every Ollama tool result is fenced as untrusted data ([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md), amends ADR-0009, ADR-0013).
+- **Recipe provenance and audit re-ask:** every AI-written artifact carries a `recipe:` (skill or workflow digest, parse-coupled template refs, build id, off-contract lenses), shown on R19 with a "recipe changed since" badge and "provenance unknown" for old artifacts; parse-coupled prompts are pinned by goldens; a malformed or partial audit gets at most one targeted re-ask ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md), amends ADR-0023).
+- **No-mistakes gate:** `scripts/gate.sh` is a fixed seven-step pipeline with no skip (intent incl. freshness, strict invariants, build, tests, fmt, clippy, honesty); `check-invariants.sh` collects every finding with an id and severity, and every rule has a seeded test; undeclared fixture, snapshot, floor or rule changes are red; findings are acted on by what a fix would change (no-op, auto-fix, ask-user), and `RUN_PROTOCOL` in every `PROMPT.md` says the same ([ADR-0041](./adr/0041-no-mistakes-gate.md), amends ADR-0030, D41).
 
 ## Beyond these docs
 

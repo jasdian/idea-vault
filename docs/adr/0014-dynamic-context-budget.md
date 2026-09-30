@@ -1,6 +1,6 @@
 # ADR-0014 — Dynamic, per-backend/model context budget (amends ADR-0012's fixed 16 KiB arithmetic)
 
-- **Status:** Accepted
+- **Status:** Accepted — addendum: [ADR-0037](./0037-run-journal-diagnostics-only-call-record.md) reads `prompt_eval_count` against the dispatched `num_ctx`
 - **Date:** 2026-07-08
 - **Deciders:** owner
 
@@ -141,6 +141,14 @@ equal are deleted — there is now exactly one source, `LlmBackend::context_budg
   mismatch between routes), every turn would pay the probe timeout before generation starts,
   forever — D20 says degrade, not silently add latency. Hence the failure cache with the 60s
   retry-after above.
+
+## Addendum — ADR-0037 (2026-09-30)
+
+> **Addendum, [ADR-0037](./0037-run-journal-diagnostics-only-call-record.md).** The dispatched
+> `num_ctx` (floored at the window the assembled prompt implies, above) is now recorded in every
+> call's `CallMeta`, next to Ollama's `prompt_eval_count`. A call whose prompt filled at least 98% of
+> that window is flagged **input truncated**, which is how the silent truncation this ADR eliminates
+> would show if it ever recurred. Unknown counts are never flagged.
 
 ---
 

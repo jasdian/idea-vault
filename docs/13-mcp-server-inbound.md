@@ -261,6 +261,15 @@ test — building a fresh router per request would mint a fresh, empty `LocalSes
 |---|---|---|
 | `IDEA_VAULT_MCP_TOKEN` | unset (feature off) | Bearer token gating `/api/mcp`. Unset/blank: not mounted. No live retuning — a restart is needed to change it, since the route is mounted once at boot. |
 
+The token is a server secret and the claude-code foil never sees it: the child's environment is a
+fixed pass-list that always excludes every `IDEA_VAULT_*` key
+([ADR-0039](./adr/0039-foil-hygiene-and-lockdown.md)). An MCP `chat`, `run_skill`, `run_swarm`,
+`run_workflow`, `build_plan`, `answer_plan` re-plan or `store_idea` call runs the same detached
+job as the web route, so it writes the same run journal
+([ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)); that journal is unrelated to
+D34's result replay (a replay serves a stored result to an identical retry, while the journal is a
+read-only diagnostics record that nothing serves back).
+
 See [docs/12-deployment.md](./12-deployment.md) for the full env var contract table, and
 [ADR-0024](./adr/0024-mcp-server-inbound.md) for why absence disables the feature rather than
 defaulting to open.

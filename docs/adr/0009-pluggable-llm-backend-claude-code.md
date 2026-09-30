@@ -1,6 +1,6 @@
 # ADR-0009 — Pluggable LLM backend; claude-code as an agentic option
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0039](./0039-foil-hygiene-and-lockdown.md) (the foil is no longer full-agentic: it runs locked down, with a scrubbed environment and a turn deadline)
 - **Date:** 2026-07-07
 - **Deciders:** owner
 
@@ -73,3 +73,12 @@ Two adjacent capabilities land with it:
   `tests/claude_backend.rs`). The persist boundaries above the seam remain covered by the Ollama-path
   web tests.
 - **Ollama stays the default** — the offline local option is unchanged.
+
+## Amendment — ADR-0039 (2026-09-30)
+
+> **Amended by [ADR-0039](./0039-foil-hygiene-and-lockdown.md).** The "Safety of a full-agentic foil"
+> consequence above no longer holds. The foil runs `--restricted --tools Read,Grep,Glob` (plus the
+> web tools while web access is on), always with `--strict-mcp-config`, in the idea's own folder, and
+> never under `--dangerously-skip-permissions`; `IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS` is no longer read.
+> The child gets a scrubbed environment and a turn deadline. The rest of this ADR (a second backend
+> behind `LlmBackend`, one-shot `claude` processes, the stream-json wire format) stands.

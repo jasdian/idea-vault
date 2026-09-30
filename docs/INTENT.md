@@ -49,7 +49,9 @@ expectation changes are red.
 - plan::tests::prompt_protocol_is_code_owned_and_precedes_the_items: RUN_PROTOCOL rules 9-12 are
   rewritten as the findings protocol (ADR-0041); the "Stop after 3 failed attempts" substring is
   replaced by the new rule phrases, and the byte-identity assertion stays.
-- plan::tests (plan.md header, two tests): the `Rules:` header gains `Findings` (owner decision D-c).
+- plan::tests (plan.md header, two tests) and web_build_plan::prompt_md_carries_findings_protocol_end_to_end: the `Rules:` header gains `Findings` (owner decision D-c),
+  worded `How to run this and its rule 10 Findings` because the findings protocol is rule 10 of
+  `## How to run this`, not a PROMPT.md section; a new test holds every header name to PROMPT.md.
 - check-invariants catalog: the nine existing rules gain ids (`ollama-url` … `d4-web-app`) and the
   script collects all findings; no rule is removed or downgraded.
 - IGNORE_FLOOR: a new ratchet floor at 0, not a rise.
@@ -75,6 +77,20 @@ expectation changes are red.
   `idea-vault regrade --export`.
 - tests/fixtures/parser-corpus.snap: new snapshot of today's verdict line per corpus case
   (ADR-0038), written once with `PARSER_CORPUS_BLESS=1 cargo test --test parser_corpus`.
+- claude_code::tests (two args tests) and tests/claude_backend.rs: `--disallowedTools` now always
+  carries `Read(./.runs/**)` ahead of the web pair, and is present with web access on too, so the
+  foil never reads the run journal inside its cwd (ADR-0037, ADR-0039 review finding).
+- skills::tests::digest_is_of_raw_file_not_filled_prompt: `Skill::recipe` takes the recorded
+  `ContractOutcome` instead of re-validating the kept text (ADR-0040 review finding); the same notes
+  are asserted, plus a truncated outcome.
+- tests/gate_invariants.rs: `SEEDS` rows gain a detection-arm name and seven arm seeds;
+  `committed_tree_is_clean` runs against the versioned tree copied out of git, so gitignored
+  `.claude/` state never decides it (ADR-0041 review findings).
+- checklist-mirror: an absent `.claude/` mirror file is INFO, as an absent `.claude/` already was;
+  a present, drifted mirror stays an error, and the catalog severity is unchanged.
+- gate.sh step 7: runs on main too, diffing against `HEAD`; only step 1 freshness is skipped there.
+- ai::call::CallMeta: gains `peak_prompt_tokens` (skipped when absent, so single-call journal lines
+  are unchanged); input truncation reads it for a tool loop instead of the summed prompt tokens.
 - journal_flow::skill_job_writes_started_llmcall_contract_finished: the journaled sequence gains the
   `verdict` entry P2 writes beside each contract-checked call (ADR-0038); every other assertion
   stays.

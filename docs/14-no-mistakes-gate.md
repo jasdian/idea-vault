@@ -26,12 +26,53 @@ no `--skip`, `--from` or environment seam; the only flags are `--list` (print th
 re-installs over its own hook and refuses one without the marker. The hook runs
 `scripts/check-invariants.sh --strict`: fast, and no cargo.
 
+### D41 — The gate pipeline and the findings protocol
+
+```mermaid
+flowchart TD
+    START(["bash scripts/gate.sh"]) --> S1["1 intent: acceptance bullet, ADR/D token,\nINTENT.md changed since main on a branch"]
+    S1 -->|green| S2["2 invariants: check-invariants.sh --strict\n(every rule runs, all findings collected)"]
+    S2 -->|green| S3["3 build: cargo build"]
+    S3 -->|green| S4{"PARSER_CORPUS_BLESS set?"}
+    S4 -->|"yes"| RED
+    S4 -->|"no"| S4T["4 tests: cargo test"]
+    S4T -->|green| S5["5 fmt: cargo fmt --check"]
+    S5 -->|green| S6["6 clippy: -D warnings"]
+    S6 -->|green| S7["7 honesty: changed fixtures, snapshots, rising floors,\nremoved or downgraded rules declared under Expectation changes,\nthen the parser corpus replay"]
+    S7 -->|green| GREEN(["GATE PASSED"])
+
+    S1 -->|red| RED
+    S2 -->|red| RED
+    S3 -->|red| RED
+    S4T -->|red| RED
+    S5 -->|red| RED
+    S6 -->|red| RED
+    S7 -->|red| RED
+
+    RED{"What would fixing it change?"} -->|"no file"| NOOP["no-op: record it, continue"]
+    RED -->|"inside the step's own files,\nno intent touched"| AUTO["auto-fix: at most 3 attempts per step,\ncommit gate step: summary,\nthen re-run from step 1"]
+    RED -->|"intent, an expectation, a floor,\nan ADR Decision or a rule"| ASK["ask-user: 0 attempts,\nrelay the finding verbatim"]
+    AUTO --> START
+    NOOP --> CONT(["carry on with the same run"])
+```
+
+There is no skip, no `--from` and no budget step: the runtime cap is the workflow CallBudget
+([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md)). A no-op finding changes no file, so the run
+carries on; only a fix restarts the gate.
+
 ## The invariant catalog
 
 `scripts/check-invariants.sh --list` prints it as `id|severity|ADR/D|zero-state`. Every rule runs
 and reports (`[ok] <id> — …` or `ERROR|WARN|INFO <id>: <target> — <message>`); `--strict` promotes
-WARN to ERROR; INFO never counts. Every id has a seeded violation in `tests/gate_invariants.rs`
-that flags exactly that id, and a meta-test fails when a rule ships without one.
+WARN to ERROR; INFO never counts. Every id, and every detection arm of a multi-arm rule, has a
+seeded violation in `tests/gate_invariants.rs` that flags exactly that id, and a meta-test fails
+when a rule ships without one. `checklist-mirror` is INFO for a `.claude/` mirror file that is
+absent (a fresh clone, or a worktree whose `.claude/` holds only a campaign workspace) and an error
+for one that exists and drifted.
+
+Step 1's freshness check is skipped on `main`; step 7's honesty check is not: on `main` it diffs
+the working tree and index against `HEAD`, so a commit made straight to `main` still declares its
+expectation changes.
 
 ## Findings protocol
 
