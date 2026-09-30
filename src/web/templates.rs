@@ -267,7 +267,16 @@ pub struct Actions {
     pub backend_note: String,
     /// The Settings audit toggle: the audited build chip warns when it is off.
     pub audit_on: bool,
+    /// The lineage head of the idea's build plans, for the "Plan · vN · k open" chip
+    /// (docs/adr/0032); `None` until a first plan exists.
+    pub plan: Option<PlanChip>,
     pub oob: bool,
+}
+
+/// The idea page's way back to its plan: the head version and how many questions it still asks.
+pub struct PlanChip {
+    pub version: u32,
+    pub open: usize,
 }
 
 /// One stage of the spine strip.
@@ -305,6 +314,8 @@ pub struct ArtifactEntry {
     /// One-line provenance ("finding · key decisions" / "synthesis" / "html report").
     pub meta: String,
     pub is_html: bool,
+    /// A build plan a later version revises (docs/adr/0032): listed, but dimmed.
+    pub is_superseded: bool,
 }
 
 /// Partial: the artifacts panel (`templates/_artifacts.html`) — every extraction artifact with
@@ -333,6 +344,76 @@ pub struct ArtifactPage {
     /// `PROMPT.md` and `plan.md` projections of a build plan, derived at view time.
     pub prompt_md: Option<String>,
     pub attack_plan_md: Option<String>,
+    /// The plan workbench (docs/adr/0032), for a build plan only.
+    pub plan_work: Option<PlanWorkView>,
+}
+
+/// Partial: the plan workbench (`templates/_plan_work.html`, `id="work"`, docs/adr/0032) — the
+/// open questions and owner-held tasks of one plan version, each with the field that answers it,
+/// plus the re-plan controls. Rendered inside R19's page, and alone as R46's 422 response with
+/// the owner's answers and the per-field error kept.
+#[derive(Template, WebTemplate)]
+#[template(path = "_plan_work.html")]
+pub struct PlanWorkView {
+    pub slug: String,
+    pub stem: String,
+    pub version: u32,
+    pub revises: Option<String>,
+    /// The `Q#`/`T#` ids answered to make this version.
+    pub answered: Vec<String>,
+    pub superseded_by: Vec<String>,
+    pub head: String,
+    pub is_head: bool,
+    /// Root first, this version last.
+    pub lineage: Vec<LineageStep>,
+    /// The run header's mode ("quick", "v2 · answers on … · audit not re-run", …).
+    pub mode: String,
+    pub open: Vec<PlanQuestion>,
+    pub blocked: Vec<PlanBlock>,
+    /// Whether the idea's state takes answers (D9: only an active discussion); a Stored idea
+    /// shows the questions without the forms.
+    pub can_answer: bool,
+    /// A submission-wide error with no one field to sit beside ("no answer given").
+    pub form_error: Option<String>,
+}
+
+impl PlanWorkView {
+    /// Forms render only on the head of an idea in discussion: answers land on the head alone.
+    pub fn is_answerable(&self) -> bool {
+        self.is_head && self.can_answer
+    }
+}
+
+/// One version in the lineage line.
+pub struct LineageStep {
+    pub stem: String,
+    pub version: u32,
+}
+
+/// One open question with its answer field.
+pub struct PlanQuestion {
+    pub id: String,
+    pub text: String,
+    pub markers: Vec<String>,
+    /// The tasks this question holds back.
+    pub blocks: Vec<String>,
+    /// The owner's words, kept across a rejected submission or carried from a hedged answer.
+    pub value: String,
+    pub error: Option<String>,
+    /// Why the answer in `value` reads as undecided (G2 keeps a hedged answer open).
+    pub hedge: Option<&'static str>,
+}
+
+/// One task held for the owner: an answer field when an answer can release it, else its reasons.
+pub struct PlanBlock {
+    pub id: String,
+    pub text: String,
+    pub blocked_by: Vec<String>,
+    pub reasons: Vec<String>,
+    pub answerable: bool,
+    pub value: String,
+    pub error: Option<String>,
+    pub hedge: Option<&'static str>,
 }
 
 /// One findings section of the standalone HTML report export.

@@ -6,12 +6,13 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 
-use crate::concepts::build_plan::plan;
+use crate::concepts::build_plan::{plan, workbench};
 use crate::concepts::knowledge;
 use crate::domain::{slug as domain_slug, ArtifactKind};
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::memory::{guard_discussion_state, progress_sink};
+use crate::web::routes::plans::plan_work_view;
 use crate::web::routes::{reindex_logged, scoped_llm};
 use crate::web::state::AppState;
 use crate::web::templates::{
@@ -156,8 +157,27 @@ fn artifact_meta(fm: &crate::domain::ArtifactFrontmatter) -> String {
             format!("finding · {} · {when}", knowledge::lens_short(lens))
         }
         (ArtifactKind::Finding, None) => format!("finding · {when}"),
-        (ArtifactKind::BuildPlan, _) => format!("build plan · {when}"),
+        (ArtifactKind::BuildPlan, _) => {
+            format!("build plan · v{} · {when}", fm.version.unwrap_or(1))
+        }
         (ArtifactKind::Quarantine, _) => format!("quarantined facts · unverified · {when}"),
+    }
+}
+
+/// The workbench for the build plan `stem` (docs/adr/0032). Degrades to no workbench: a plan the
+/// workbench cannot read still renders as a page, with its body and copy blocks.
+fn plan_work(
+    vault_dir: &std::path::Path,
+    slug: &str,
+    stem: &str,
+    state: crate::domain::IdeaState,
+) -> Option<crate::web::templates::PlanWorkView> {
+    match workbench::plan_view(vault_dir, slug, Some(stem)) {
+        Ok(view) => Some(plan_work_view(view, slug, state, &[], None)),
+        Err(e) => {
+            tracing::warn!(slug, stem, error = %e, "plan workbench skipped");
+            None
+        }
     }
 }
 
@@ -195,15 +215,19 @@ pub async fn view_artifact(
                 Some((a, b)) => (Some(a), Some(b)),
                 None => (None, None),
             };
+            let plan_work = (artifact.frontmatter.kind == ArtifactKind::BuildPlan)
+                .then(|| plan_work(vault_dir, &slug, stem, idea.frontmatter.state))
+                .flatten();
             Ok(ArtifactPage {
                 title: artifact.frontmatter.title.clone(),
+                meta: artifact_meta(&artifact.frontmatter),
                 idea_slug: slug,
                 idea_title: idea.frontmatter.title,
                 file_name: name,
-                meta: artifact_meta(&artifact.frontmatter),
                 content_html: render_markdown(&artifact.body),
                 prompt_md,
                 attack_plan_md,
+                plan_work,
             }
             .into_response())
         }
@@ -266,6 +290,13 @@ pub(crate) fn render_artifacts_panel(
         tracing::warn!(idea_slug, error = %e, "unparsable artifacts; listing by file name only");
         Vec::new()
     });
+    // A plan some later version names in `revises` is history, not the plan to act on
+    // (docs/adr/0032); the lineage is linear, so that alone marks every non-head version.
+    let superseded: std::collections::BTreeSet<&str> = artifacts
+        .iter()
+        .filter(|a| a.frontmatter.kind == ArtifactKind::BuildPlan)
+        .filter_map(|a| a.frontmatter.revises.as_deref())
+        .collect();
     let entries = store::list_artifact_files(vault_dir, idea_slug)?
         .into_iter()
         .map(|file| {
@@ -280,6 +311,7 @@ pub(crate) fn render_artifacts_panel(
                     let (title, meta) =
                         parsed.unwrap_or_else(|| (file.slug.clone(), "unparsable".to_string()));
                     ArtifactEntry {
+                        is_superseded: superseded.contains(file.slug.as_str()),
                         file_name,
                         title,
                         meta,
@@ -291,6 +323,7 @@ pub(crate) fn render_artifacts_panel(
                     title: file.slug.clone(),
                     meta: "html report".to_string(),
                     is_html: true,
+                    is_superseded: false,
                 },
             }
         })

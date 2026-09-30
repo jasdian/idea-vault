@@ -116,6 +116,22 @@ pub fn try_claim(jobs: &Jobs, slug: &str) -> bool {
     true
 }
 
+/// Whether a job is running for this idea. Non-consuming, unlike [`peek`]: a pending `Failed` or
+/// `Notice` stays for the poll that shows it. The gate for a deterministic write that must not
+/// interleave with a model job's write-back yet takes no slot itself (the plan workbench,
+/// docs/adr/0032).
+pub fn is_running(jobs: &Jobs, slug: &str) -> bool {
+    jobs.lock().is_ok_and(|map| {
+        matches!(
+            map.get(slug),
+            Some(Job {
+                status: JobStatus::Running,
+                ..
+            })
+        )
+    })
+}
+
 /// Spawn a claimed job's detached task with a panic backstop. Every call site already converts
 /// `work`'s own `Result` to [`mark_done`]/[`mark_failed`] internally — but if `work` itself
 /// *panics* partway through (a template render, an unexpected slice index, ...), a bare
@@ -467,5 +483,16 @@ mod tests {
         // One-shot: the next poll is back to Idle, and the slot is claimable again.
         assert!(matches!(peek(&jobs, "i"), Pending::Idle));
         assert!(try_claim(&jobs, "i"));
+    }
+
+    #[test]
+    fn is_running_never_consumes_an_unshown_outcome() {
+        let jobs = new_registry();
+        assert!(!is_running(&jobs, "a"));
+        assert!(try_claim(&jobs, "a"));
+        assert!(is_running(&jobs, "a"));
+        mark_failed(&jobs, "a", "boom".into());
+        assert!(!is_running(&jobs, "a"));
+        assert!(matches!(peek(&jobs, "a"), Pending::Failed(m) if m == "boom"));
     }
 }

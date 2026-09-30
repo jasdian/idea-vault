@@ -44,6 +44,16 @@ pub enum WebError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// A well-formed request the current state refuses and a later retry can pass (a running
+    /// job, a superseded plan version — docs/adr/0032) → 409 with the reason.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
+    /// A form the server rejected field by field → 422 with the re-rendered form (an HTML
+    /// fragment rendered by the handler), so the owner's input survives the round trip.
+    #[error("unprocessable form")]
+    Unprocessable(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -75,6 +85,10 @@ impl IntoResponse for WebError {
         match self {
             WebError::BadRequest(reason) => {
                 (StatusCode::BAD_REQUEST, format!("bad request: {reason}")).into_response()
+            }
+            WebError::Conflict(reason) => (StatusCode::CONFLICT, reason).into_response(),
+            WebError::Unprocessable(html) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, axum::response::Html(html)).into_response()
             }
             // AI-rooted failures are a degraded state, not an internal fault (D20/D24):
             // the local model is down/slow — tell the owner, don't masquerade as a server bug.

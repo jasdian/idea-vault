@@ -970,3 +970,90 @@ a.srcchip:hover { border-color: var(--accent); color: var(--accent); }
   background: color-mix(in srgb, var(--ink) 5%, var(--paper)); border: 1px solid var(--rule);
 }
 .useit pre:hover .copy-btn, .useit .copy-btn:focus { opacity: 1; }
+
+/* ---- build-plan page: the plan workbench (docs/adr/0032) ---------------- */
+/* Reads like the margin of a lab notebook: serif prose for the owner's questions, mono ids and
+   machinery, one indigo rule down the left. The answer field is the composer's sibling (serif,
+   accent focus) because what goes in it becomes the owner's own turn. */
+.planwork {
+  margin: 1.25rem 0 2rem; padding: .9rem 0 .4rem 1rem;
+  border-left: 2px solid var(--accent); border-top: 1px solid var(--rule);
+}
+.planwork__title { font-family: var(--serif); font-size: 1.15rem; margin: 0 0 .25rem; }
+.planwork__lineage { font-family: var(--mono); font-size: .74rem; color: var(--muted); margin: 0 0 .5rem; }
+.planwork__v { color: var(--accent); font-weight: 600; }
+.planwork__mode { color: var(--faint); }
+.planwork__trail {
+  list-style: none; display: flex; flex-wrap: wrap; gap: .2rem; margin: 0 0 .6rem; padding: 0;
+  font-family: var(--mono); font-size: .72rem; color: var(--faint);
+}
+.planwork__trail li + li::before { content: "→ "; color: var(--faint); }
+.planwork__trail b { color: var(--ink); font-weight: 600; }
+.planwork__superseded {
+  margin: 0 0 .8rem; font-family: var(--mono); font-size: .76rem; color: var(--warn);
+  padding: .4rem .65rem; border-left: 2px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: var(--warn-soft);
+}
+.planwork__done { font-family: var(--serif); font-style: italic; color: var(--ok); margin: .3rem 0 .8rem; }
+.planwork__how {
+  margin: 0 0 1rem; padding-left: 1.2rem; font-family: var(--serif); font-size: .9rem;
+  color: var(--muted); line-height: 1.5;
+}
+.planwork__how b { color: var(--ink); font-weight: 600; }
+.planwork__form { margin: 0; }
+.planwork__label {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .04em; color: var(--accent);
+  margin: 1.1rem 0 .4rem; font-weight: 500;
+}
+.planwork__label--inline { margin: 0; }
+.planwork__item {
+  margin: 0 0 .7rem; padding: .55rem .7rem; background: var(--surface);
+  border: 1px solid var(--rule); border-radius: var(--radius);
+}
+.planwork__item:target, .planwork__item:focus-within {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.planwork__item > summary {
+  cursor: pointer; font-family: var(--serif); font-size: 1rem; line-height: 1.45; color: var(--ink);
+}
+.planwork__task { margin: 0; font-family: var(--serif); font-size: 1rem; line-height: 1.45; }
+.planwork__id {
+  font-family: var(--mono); font-size: .76rem; font-weight: 600; color: var(--accent);
+  background: var(--accent-soft); border-radius: 4px; padding: .05rem .35rem; margin-right: .2rem;
+}
+.planwork__holds { font-family: var(--mono); font-size: .7rem; color: var(--faint); white-space: nowrap; }
+.planwork__marker, .planwork__reasons {
+  font-family: var(--mono); font-size: .72rem; color: var(--muted); margin: .35rem 0 0;
+}
+.planwork__reasons { list-style: none; padding: 0; }
+.planwork__reasons li::before { content: "· "; color: var(--faint); }
+.planwork__hint {
+  display: block; margin: .55rem 0 .25rem; font-family: var(--serif); font-style: italic;
+  font-size: .8rem; color: var(--faint);
+}
+.planwork__field {
+  width: 100%; box-sizing: border-box; resize: vertical; padding: .45rem .55rem;
+  font-family: var(--serif); font-size: 1rem; line-height: 1.5; color: var(--ink);
+  background: var(--paper); border: 1px solid var(--rule-strong); border-radius: 6px;
+}
+.planwork__field:focus { outline: none; border-color: var(--accent); }
+.planwork__err, .planwork__flash:not(:empty) {
+  margin: .35rem 0 0; font-family: var(--mono); font-size: .74rem; color: var(--danger);
+}
+.planwork__hedge {
+  margin: .35rem 0 0; font-family: var(--mono); font-size: .72rem; color: var(--warn);
+  padding: .3rem .6rem; border-left: 2px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: var(--warn-soft);
+}
+.planwork__submit, .planwork__replan {
+  display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin: .9rem 0 .2rem;
+}
+.planwork__replan form { margin: 0; }
+.planwork__note { font-family: var(--serif); font-style: italic; font-size: .8rem; color: var(--faint); }
+.planwork__replan .planwork__flash { flex-basis: 100%; }
+
+/* The idea page's way back to the plan, beside the build chips; indigo while questions wait. */
+.chip--plan { text-decoration: none; color: var(--muted); }
+.chip--plan::before { content: "§ "; }
+.chip--plan-open { border-color: var(--accent); color: var(--accent); }
+.artifacts__row--superseded { opacity: .55; }

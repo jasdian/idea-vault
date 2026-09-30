@@ -83,6 +83,12 @@
       <button type="submit" class="chip chip--build chip--build-audited"{% if busy %} disabled{% endif %}
               title="About 7 model calls: 5 harvesters + audit + planner; only owner-quoted decisions become Settled, refuted items are fenced. Slower on small models.{% if !audit_on %} (audit is off: the plan will be marked audit skipped){% endif %}">⌁⌁ audited build plan</button>
     </form>
+    {# The way back to the plan's workbench (docs/adr/0032): the latest version, and how many of
+       its questions still wait on the owner. #}
+    {% if let Some(p) = plan %}
+    <a class="chip chip--plan{% if p.open > 0 %} chip--plan-open{% endif %}" href="/idea/{{ slug }}/plan/latest"
+       title="Open the latest build plan{% if p.open > 0 %} — answer its open questions there to make the next version{% endif %}">Plan · v{{ p.version }} · {{ p.open }} open</a>
+    {% endif %}
   </div>
 
   <div class="commit-bar">

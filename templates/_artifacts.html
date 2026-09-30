@@ -3,7 +3,7 @@
   <h2>artifacts <span class="artifacts__hint">— harvested by extract knowledge; delete what you don't keep</span></h2>
   <ul>
     {% for entry in entries %}
-    <li>
+    <li{% if entry.is_superseded %} class="artifacts__row--superseded" title="superseded by a later plan version"{% endif %}>
       <a class="artifacts__file{% if entry.is_html %} artifacts__file--html{% endif %}"
          href="/idea/{{ idea_slug }}/artifact/{{ entry.file_name }}"
          title="View {{ entry.file_name }}">{{ entry.title }}</a>
