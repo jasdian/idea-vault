@@ -204,9 +204,12 @@ its header comment.
     skipped run says why in its summary.
   - **`diagnose`** runs Claude on current main with a read-only token, no git or gh tools, and no
     persisted credentials. The cargo cache is restored, never saved. Claude reads the failed log
-    as fenced, untrusted data. If main is already green, or passes the CI commands its prompt
-    lists, it only diagnoses. Otherwise it fixes the root cause in the working tree, re-runs
-    those commands, and gives up after 3 attempts. It writes its diagnosis, PR body and commit subject to files.
+    as fenced, untrusted data. The cache is restored under CI's `shared-key`. If main is already
+    green, or `cargo fetch --locked` and `bash scripts/gate.sh` pass on it, it only diagnoses.
+    Otherwise it fixes the root cause in the working tree, re-runs both, and gives up after 3
+    attempts. The gate runs on main there, so step 1 skips freshness; the prompt has Claude write
+    the hotfix branch's top intent block so the PR's own CI passes step 1. It writes its
+    diagnosis, PR body and commit subject to files.
   - **`publish`** (no model) posts the diagnosis on the issue. It refuses anything that contains
     a secret-like string. It runs the guard **before** anything is pushed, and then either closes
     the issue (already fixed), leaves it open (no fix, or a withheld fix), or pushes
