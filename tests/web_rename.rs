@@ -29,6 +29,7 @@ fn seed(vault: &std::path::Path, slug: &str, title: &str, state: IdeaState) {
                 sources: vec![],
                 created: Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap(),
                 updated: Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap(),
+                extra: Default::default(),
             },
             body: "A statement about wombats and their burrows.\n".into(),
         },

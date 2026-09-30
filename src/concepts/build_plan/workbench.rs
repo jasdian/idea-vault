@@ -731,6 +731,7 @@ Ship the zone snapshot tool.
                     sources: vec![],
                     created: at(0),
                     updated: at(0),
+                    extra: Default::default(),
                 },
                 body: "A zone snapshot trading tool.\n".into(),
             },

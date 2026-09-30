@@ -1,6 +1,8 @@
 //! Frontmatter schema (docs/03-data-model.md D8) and the `---\n<yaml>\n---\n<body>` fence
 //! parse/emit functions used for both `idea.md` and `memory/<fact-slug>.md`.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 use crate::domain::artifact::ArtifactKind;
@@ -30,6 +32,11 @@ pub struct IdeaFrontmatter {
     pub sources: Vec<String>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
+    /// Every frontmatter key the app does not know (an owner's own `aliases:`, a key a newer
+    /// idea-vault writes), kept so a rewrite of `idea.md` never drops it. Emitted after the known
+    /// keys, sorted by key; the original order of unknown keys is not kept.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_norway::Value>,
 }
 
 /// The structured header of a `compacted.md` sidecar — the derived rolling summary of the
@@ -352,6 +359,57 @@ Body text here.\n";
         assert_eq!(body, body2);
     }
 
+    /// An `idea.md` exactly as `emit_idea` writes it, carrying keys the app does not know.
+    const UNKNOWN_KEYS: &str = "---\n\
+title: Distributed idea market\n\
+slug: distributed-idea-market\n\
+state: in_discussion\n\
+tags:\n\
+- markets\n\
+created: 2026-07-07T10:15:00Z\n\
+updated: 2026-07-07T11:40:00Z\n\
+aliases:\n\
+- Idea bazaar\n\
+owner_meta:\n\
+\x20\x20priority: 3\n\
+\x20\x20reviewed: true\n\
+---\n\
+\n\
+Body text here.\n";
+
+    #[test]
+    fn frontmatter_roundtrip_keeps_unknown_keys_with_no_diff() {
+        let (fm, body) = parse_idea(UNKNOWN_KEYS).unwrap();
+        assert_eq!(
+            fm.extra.keys().collect::<Vec<_>>(),
+            vec!["aliases", "owner_meta"]
+        );
+        assert_eq!(emit_idea(&fm, &body).unwrap(), UNKNOWN_KEYS);
+    }
+
+    #[test]
+    fn frontmatter_roundtrip_writes_known_keys_first_then_unknown_sorted() {
+        let shuffled = "---\nzeta: 1\ntitle: T\nalpha: a\nslug: t\nstate: draft\n\
+created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\n---\n\nB.\n";
+        let (fm, body) = parse_idea(shuffled).unwrap();
+        assert_eq!(
+            emit_idea(&fm, &body).unwrap(),
+            "---\ntitle: T\nslug: t\nstate: draft\ntags: []\n\
+created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\nalpha: a\nzeta: 1\n---\n\nB.\n"
+        );
+    }
+
+    #[test]
+    fn frontmatter_roundtrip_without_unknown_keys_is_unchanged() {
+        let (fm, body) = parse_idea(DOC_EXAMPLE).unwrap();
+        assert!(fm.extra.is_empty());
+        let emitted = emit_idea(&fm, &body).unwrap();
+        assert!(
+            !emitted.contains("extra"),
+            "no stray key from the flattened map: {emitted}"
+        );
+    }
+
     #[test]
     fn idea_body_separation_preserved_including_blank_lines() {
         let body = "Line one.\n\nLine two.\n";
@@ -363,6 +421,7 @@ Body text here.\n";
             sources: vec![],
             created: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             updated: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            extra: Default::default(),
         };
         let emitted = emit_idea(&fm, body).unwrap();
         let (_, parsed_body) = parse_idea(&emitted).unwrap();

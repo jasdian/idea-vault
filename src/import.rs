@@ -132,6 +132,7 @@ fn import_one(
             sources: Vec::new(),
             created,
             updated: modified,
+            extra: Default::default(),
         },
         // Rewrite `[[Wiki Links]]` to idea-vault's `[[slug]]` backlink form.
         body: rewrite_wikilinks(body),

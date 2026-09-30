@@ -681,6 +681,7 @@ mod tests {
                 sources: vec![],
                 created: dt(10),
                 updated: dt(11),
+                extra: Default::default(),
             },
             body: body.into(),
         }

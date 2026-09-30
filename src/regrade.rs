@@ -662,6 +662,7 @@ FACT: Invented\nQUOTE: \"never said\"\nMade up.\nTAGS: solo, launch";
                     sources: Vec::new(),
                     created: now,
                     updated: now,
+                    extra: Default::default(),
                 },
                 body: body.into(),
             },

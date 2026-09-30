@@ -57,6 +57,7 @@ fn seed(vault: &std::path::Path, kind: ArtifactKind, body: &str) -> String {
                 sources: vec![],
                 created: now,
                 updated: now,
+                extra: Default::default(),
             },
             body: "The idea body.\n".into(),
         },

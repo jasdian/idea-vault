@@ -256,6 +256,7 @@ mod tests {
                     sources: vec![],
                     created: at,
                     updated: at,
+                    extra: Default::default(),
                 },
                 body: body.into(),
             },
