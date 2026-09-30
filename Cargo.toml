@@ -52,6 +52,9 @@ bytes = "1"
 # assets (single-binary: htmx/CSS embedded — ADR-0001, docs/12)
 rust-embed = "8"
 
+# MCP replay args hash (docs/adr/0033); also used by tests
+sha2 = "0.10"
+
 # errors
 thiserror = "2"
 anyhow = "1"
@@ -60,4 +63,3 @@ anyhow = "1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
-sha2 = "0.10"

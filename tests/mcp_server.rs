@@ -1267,3 +1267,356 @@ async fn search_and_reopen_idea_work_over_mcp() {
         tool_json(&call_tool(&app, &session, "reopen_idea", json!({ "slug": slug })).await);
     assert_eq!(reopened["state"], "reopened");
 }
+
+// ---- Idempotent replay (docs/adr/0033, amending ADR-0028's forget-after-serve) ----
+
+const REPLAY_PREFIX: &str = "(replayed result of task ";
+
+fn text_of(result: &Value) -> String {
+    result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn conversation_of(vault_dir: &std::path::Path, slug: &str) -> String {
+    std::fs::read_to_string(vault_dir.join(slug).join("conversation.md")).unwrap()
+}
+
+/// Poll `tasks/get` until the task leaves `working`, returning the final status.
+async fn wait_task(app: &Router, session: &str, task_id: &str) -> String {
+    for _ in 0..500 {
+        let get = json!({
+            "jsonrpc": "2.0", "id": 101, "method": "tasks/get",
+            "params": { "taskId": task_id }
+        });
+        let (_, _, body) = send(app, mcp_request(get, Some(session), Some(TOKEN))).await;
+        let status = body["result"]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if status != "working" {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("task {task_id} never left working");
+}
+
+async fn task_result(app: &Router, session: &str, task_id: &str) -> Value {
+    let req = json!({
+        "jsonrpc": "2.0", "id": 102, "method": "tasks/result",
+        "params": { "taskId": task_id }
+    });
+    let (_, _, body) = send(app, mcp_request(req, Some(session), Some(TOKEN))).await;
+    body["result"].clone()
+}
+
+/// A planner answer the quick build-plan finish accepts (goal, a settled quote from the owner's
+/// turn, one runnable task) — the same shape `tests/build_plan_flow.rs` uses.
+const PLANNER_ANSWER: &str = "## Goal
+Disprove the strategy cheaply before building.
+
+## Settled
+- S1: Disproof comes before any code.
+  quote: \"the cheapest disproof before any Rust exists\"
+
+## Verify first
+- none
+
+## Open questions
+- Q1: Which market do we backtest first?
+
+## Plan
+- [ ] T1: Write the spec with a dated kill criterion
+  touches: `SPEC.md`
+  accept: `test -s SPEC.md` → exit 0
+
+## Kill criteria
+- none";
+
+fn build_plans(vault_dir: &std::path::Path, slug: &str) -> usize {
+    idea_vault::vault::store::read_artifacts(vault_dir, slug)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.frontmatter.kind == idea_vault::domain::ArtifactKind::BuildPlan)
+        .count()
+}
+
+/// The owner's complaint behind ADR-0033: a plain `run_skill build-prompt` retried after its
+/// result was served used to start a second run and write a second, unrelated plan.
+#[tokio::test]
+async fn plain_run_skill_build_prompt_retry_after_served_replays_without_second_plan() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec![PLANNER_ANSWER.into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    idea_vault::vault::store::append_turn(
+        &vault_dir,
+        &slug,
+        "user",
+        "We run the cheapest disproof before any Rust exists.",
+    )
+    .unwrap();
+    let args = json!({ "slug": slug, "name": "build-prompt" });
+
+    let first = call_until_done(&app, &session, "run_skill", args.clone()).await;
+    assert_ne!(first["isError"], true, "{first}");
+    assert_eq!(build_plans(&vault_dir, &slug), 1);
+    assert_eq!(
+        mock.chat_bodies().len(),
+        1,
+        "a quick plan is one model call"
+    );
+    let turns = conversation_of(&vault_dir, &slug);
+
+    let again = call_until_done(&app, &session, "run_skill", args).await;
+    assert_ne!(again["isError"], true, "{again}");
+    let (first_text, again_text) = (text_of(&first), text_of(&again));
+    assert!(
+        again_text.starts_with(REPLAY_PREFIX) && again_text.ends_with(&first_text),
+        "the retry must replay the served result verbatim: {again_text}"
+    );
+    assert_eq!(build_plans(&vault_dir, &slug), 1, "no second plan");
+    assert_eq!(mock.chat_bodies().len(), 1, "no second model call");
+    assert_eq!(conversation_of(&vault_dir, &slug), turns, "no new turn");
+}
+
+/// The args-hash replay is a retry guess, bounded by the turn count: the same message after an
+/// intervening turn is a new question and runs again.
+#[tokio::test]
+async fn identical_chat_after_intervening_turn_starts_new_run() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["foil reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let args = json!({ "slug": slug, "message": "and what about cost?" });
+
+    let first = call_until_done(&app, &session, "chat", args.clone()).await;
+    assert!(!text_of(&first).starts_with(REPLAY_PREFIX), "{first}");
+    let replay = call_until_done(&app, &session, "chat", args.clone()).await;
+    assert!(
+        text_of(&replay).starts_with(REPLAY_PREFIX),
+        "no turn in between: {replay}"
+    );
+    assert_eq!(mock.chat_bodies().len(), 1);
+
+    idea_vault::vault::store::append_turn(&vault_dir, &slug, "user", "an intervening thought")
+        .unwrap();
+    let rerun = call_until_done(&app, &session, "chat", args).await;
+    assert_ne!(rerun["isError"], true, "{rerun}");
+    assert!(
+        !text_of(&rerun).starts_with(REPLAY_PREFIX),
+        "a turn landed since: {rerun}"
+    );
+    assert_eq!(
+        mock.chat_bodies().len(),
+        2,
+        "the new question reached the model"
+    );
+    let conversation = conversation_of(&vault_dir, &slug);
+    assert_eq!(
+        conversation.matches("and what about cost?").count(),
+        2,
+        "{conversation}"
+    );
+}
+
+#[tokio::test]
+async fn idempotency_key_with_different_args_is_invalid_params() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["foil reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let first = call_until_done(
+        &app,
+        &session,
+        "chat",
+        json!({ "slug": slug, "message": "first words", "idempotency_key": "k1" }),
+    )
+    .await;
+    assert_ne!(first["isError"], true, "{first}");
+
+    let body = call_tool_body(
+        &app,
+        &session,
+        "chat",
+        json!({ "slug": slug, "message": "other words", "idempotency_key": "k1" }),
+    )
+    .await;
+    let err = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("idempotency_key reused with different arguments"),
+        "{body}"
+    );
+    assert!(!conversation_of(&vault_dir, &slug).contains("other words"));
+    assert_eq!(mock.chat_bodies().len(), 1);
+}
+
+/// An explicit key is the client naming the operation, so it replays past later turns.
+#[tokio::test]
+async fn idempotency_key_same_args_replays_after_intervening_turn() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["foil reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let args = json!({ "slug": slug, "message": "keyed words", "idempotency_key": "k2" });
+
+    let first = call_until_done(&app, &session, "chat", args.clone()).await;
+    assert_ne!(first["isError"], true, "{first}");
+    idea_vault::vault::store::append_turn(&vault_dir, &slug, "user", "an intervening thought")
+        .unwrap();
+    let again = call_until_done(&app, &session, "chat", args).await;
+    assert_ne!(again["isError"], true, "{again}");
+    let again_text = text_of(&again);
+    assert!(
+        again_text.starts_with(REPLAY_PREFIX) && again_text.ends_with(&text_of(&first)),
+        "{again}"
+    );
+    assert_eq!(mock.chat_bodies().len(), 1);
+    assert_eq!(
+        conversation_of(&vault_dir, &slug)
+            .matches("keyed words")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn task_mode_replay_hit_is_terminal_immediately() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["foil reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let args = json!({ "slug": slug, "message": "once only" });
+
+    let first = call_until_done(&app, &session, "chat", args.clone()).await;
+    assert_ne!(first["isError"], true, "{first}");
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 103, "method": "tools/call",
+        "params": { "name": "chat", "arguments": args, "task": {} }
+    });
+    let (status, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["result"]["task"]["status"], "completed",
+        "a replay hit is terminal from birth: {body}"
+    );
+    let task_id = body["result"]["task"]["taskId"].as_str().unwrap();
+    let result = task_result(&app, &session, task_id).await;
+    let text = text_of(&result);
+    assert!(
+        text.starts_with(REPLAY_PREFIX) && text.ends_with(&text_of(&first)),
+        "{result}"
+    );
+    assert_eq!(mock.chat_bodies().len(), 1);
+    assert_eq!(
+        count_turns(&conversation_of(&vault_dir, &slug), "user"),
+        2,
+        "the seed turn and the one chat turn"
+    );
+}
+
+#[tokio::test]
+async fn failed_run_is_not_cached_and_retry_runs_again() {
+    let mock = support::spawn_sequence(
+        &["llama3.2"],
+        vec![
+            ChatScript::EofAfter(vec!["partial".into()]),
+            ChatScript::Tokens(vec!["second try".into()]),
+        ],
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let args = json!({ "slug": slug, "message": "try me" });
+
+    let failed = call_until_done(&app, &session, "chat", args.clone()).await;
+    assert_eq!(failed["isError"], true, "{failed}");
+
+    let retry = call_until_done(&app, &session, "chat", args).await;
+    assert_ne!(retry["isError"], true, "{retry}");
+    let text = text_of(&retry);
+    assert!(
+        !text.starts_with(REPLAY_PREFIX) && text.contains("second try"),
+        "{retry}"
+    );
+    assert_eq!(mock.chat_bodies().len(), 2, "the retry reached the model");
+}
+
+/// Render-once: a task's result is fixed when it first turns terminal, so a later turn cannot
+/// be served as this task's reply.
+#[tokio::test]
+async fn tasks_result_after_later_turn_returns_own_reply() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["own reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 104, "method": "tools/call",
+        "params": { "name": "chat", "arguments": { "slug": slug, "message": "hi" }, "task": {} }
+    });
+    let (_, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(wait_task(&app, &session, &task_id).await, "completed");
+
+    idea_vault::vault::store::append_turn(&vault_dir, &slug, "assistant", "a later turn").unwrap();
+    let result = task_result(&app, &session, &task_id).await;
+    let text = text_of(&result);
+    assert!(
+        text.contains("own reply") && !text.contains("a later turn"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn store_idea_retry_after_served_replays() {
+    let mock = spawn_store_ready_mock().await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let args = json!({ "slug": slug });
+
+    let stored = call_until_done(&app, &session, "store_idea", args.clone()).await;
+    assert!(text_of(&stored).starts_with("stored"), "{stored}");
+    let calls = mock.chat_bodies().len();
+
+    let again = call_until_done(&app, &session, "store_idea", args).await;
+    assert_ne!(
+        again["isError"], true,
+        "a served store must replay, not refuse the now-Stored idea: {again}"
+    );
+    let again_text = text_of(&again);
+    assert!(
+        again_text.starts_with(REPLAY_PREFIX) && again_text.ends_with(&text_of(&stored)),
+        "{again}"
+    );
+    assert_eq!(mock.chat_bodies().len(), calls, "no second store run");
+}

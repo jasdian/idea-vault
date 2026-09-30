@@ -19,6 +19,7 @@
 
 mod auth;
 mod handler;
+mod idempotency;
 mod prompts;
 mod tasks;
 mod tools;
