@@ -1,5 +1,5 @@
 //! The Task↔Job bridge (docs/adr/0024): maps the long-running tools' (`chat`, `store_idea`,
-//! `run_skill`, `run_swarm`) MCP-task lifecycle
+//! `run_skill`, `run_swarm`, `build_plan`) MCP-task lifecycle
 //! (`tasks/get`/`tasks/result`/`tasks/cancel`, SEP-1686) onto idea-vault's existing
 //! slug-keyed background-job machinery (`web::jobs`, ADR-0010), without any change to `jobs.rs`
 //! itself — every job-state read/write below goes through its existing public functions.
@@ -45,12 +45,14 @@ use rmcp::model::{
 use rmcp::ErrorData as McpError;
 use serde_json::Value;
 
+use crate::concepts::build_plan::workbench;
 use crate::domain::IdeaState;
 use crate::vault::store;
 use crate::web::jobs::{self, Pending};
 use crate::web::routes::chat::spawn_chat_turn;
 use crate::web::routes::memory::{
-    guard_can_store, guard_skill, guard_swarm, run_store_work, spawn_skill_job, spawn_swarm_job,
+    guard_can_store, guard_skill, guard_swarm, guard_workflow, run_store_work, spawn_skill_job,
+    spawn_swarm_job, spawn_workflow_job,
 };
 use crate::web::state::AppState;
 
@@ -83,6 +85,9 @@ enum TaskKind {
     Store,
     Skill,
     Swarm,
+    /// `build_plan` (docs/adr/0033): the build-prompt capstone skill, or the ready-to-build
+    /// workflow when audited — either way one pointer turn and one new plan version.
+    Plan,
 }
 
 fn kind_for(name: &str) -> Result<TaskKind, McpError> {
@@ -91,6 +96,7 @@ fn kind_for(name: &str) -> Result<TaskKind, McpError> {
         "store_idea" => Ok(TaskKind::Store),
         "run_skill" => Ok(TaskKind::Skill),
         "run_swarm" => Ok(TaskKind::Swarm),
+        "build_plan" => Ok(TaskKind::Plan),
         _ => Err(McpError::invalid_params(
             format!("'{name}' does not support task-based invocation"),
             None,
@@ -106,6 +112,7 @@ fn tool_name(kind: TaskKind) -> &'static str {
         TaskKind::Store => "store_idea",
         TaskKind::Skill => "run_skill",
         TaskKind::Swarm => "run_swarm",
+        TaskKind::Plan => "build_plan",
     }
 }
 
@@ -569,11 +576,10 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
     let terminal = match (terminal, entry.kind) {
         // `Idle` reads as success, but the job appended nothing: its real outcome went to another
         // reader, and the newest turn belongs to someone else.
-        (Terminal::Completed, TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm)
-            if !turn_landed =>
-        {
-            Terminal::Failed(CONSUMED_ELSEWHERE.to_string())
-        }
+        (
+            Terminal::Completed,
+            TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm | TaskKind::Plan,
+        ) if !turn_landed => Terminal::Failed(CONSUMED_ELSEWHERE.to_string()),
         (terminal, _) => terminal,
     };
     entry.is_replayable = match (&terminal, entry.kind) {
@@ -583,7 +589,7 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
         }
         (
             Terminal::Completed | Terminal::Notice(_),
-            TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm,
+            TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm | TaskKind::Plan,
         ) => turn_landed,
     };
     entry.rendered = Some(terminal_result(
@@ -645,7 +651,7 @@ fn claim_counted(
     let key = claim_and_spawn(state, slug, kind, args)?;
     let turns_at_claim = match kind {
         TaskKind::Chat => before + 1,
-        TaskKind::Store | TaskKind::Skill | TaskKind::Swarm => before,
+        TaskKind::Store | TaskKind::Skill | TaskKind::Swarm | TaskKind::Plan => before,
     };
     Ok(Claimed {
         key,
@@ -654,15 +660,35 @@ fn claim_counted(
 }
 
 /// The operation key a plain retry reattaches on: the `chat` message, the skill name, the
-/// swarm's comma-joined angle list (empty for the default set), or the constant `"store"` — one
-/// slug has only one store, and a named key keeps every kind on the same `Some` shape
-/// (docs/adr/0033).
+/// swarm's comma-joined angle list (empty for the default set), the constant `"store"` — one
+/// slug has only one store, and a named key keeps every kind on the same `Some` shape — or the
+/// plan's mode, `"quick"` or `"audited"` (docs/adr/0033).
 fn op_key(kind: TaskKind, args: &Value) -> Result<Option<String>, McpError> {
     match kind {
         TaskKind::Chat => Ok(Some(required_str(args, "message")?.to_string())),
         TaskKind::Skill => Ok(Some(required_str(args, "name")?.to_string())),
         TaskKind::Swarm => Ok(Some(swarm_angles(args)?.join(","))),
         TaskKind::Store => Ok(Some("store".to_string())),
+        TaskKind::Plan => Ok(Some(
+            if plan_audited(args)? {
+                "audited"
+            } else {
+                "quick"
+            }
+            .to_string(),
+        )),
+    }
+}
+
+/// `build_plan`'s optional `audited` flag: absent means the quick capstone.
+fn plan_audited(args: &Value) -> Result<bool, McpError> {
+    match args.get("audited") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(McpError::invalid_params(
+            "'audited' must be a boolean",
+            None,
+        )),
     }
 }
 
@@ -762,8 +788,35 @@ fn claim_and_spawn(
             spawn_swarm_job(state, slug, skills, angles);
             Ok(Some(key))
         }
+        // The same two web seams the idea page's plan buttons use (HND-10): the quick plan is the
+        // build-prompt capstone skill, the audited one the ready-to-build workflow. Lineage
+        // (revises the head, carries owner answers) is `finish`'s job either way (ADR-0032).
+        TaskKind::Plan => {
+            let key = op_key(kind, args)?;
+            if plan_audited(args)? {
+                guard_workflow(&idea, PLAN_WORKFLOW)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                if !jobs::try_claim(&state.jobs, slug) {
+                    return Err(busy_error(slug));
+                }
+                spawn_workflow_job(state, slug, PLAN_WORKFLOW.to_string());
+            } else {
+                let skill = guard_skill(state, &idea, PLAN_SKILL)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                if !jobs::try_claim(&state.jobs, slug) {
+                    return Err(busy_error(slug));
+                }
+                spawn_skill_job(state, slug, skill);
+            }
+            Ok(key)
+        }
     }
 }
+
+/// The capstone skill behind a quick `build_plan`.
+const PLAN_SKILL: &str = "build-prompt";
+/// The workflow behind an audited `build_plan`.
+const PLAN_WORKFLOW: &str = crate::concepts::workflows::READY_TO_BUILD;
 
 fn non_empty(s: String) -> Option<String> {
     (!s.is_empty()).then_some(s)
@@ -823,6 +876,34 @@ fn finish_result(
             }
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
         },
+        TaskKind::Plan => plan_result(state, slug),
+    }
+}
+
+/// A finished `build_plan`: the lineage head the run just wrote, as the same view `get_plan`
+/// returns, so the client can relay its open questions to the owner and answer them with
+/// `answer_plan` (docs/adr/0033). The head is served only when the run's own turn — the newest,
+/// its pointer — links to it: a run whose plan was unusable wrote an explanation but no plan, and
+/// an older head must not pass for this run's output, so that turn is served instead.
+fn plan_result(state: &AppState, slug: &str) -> CallToolResult {
+    let vault_dir = &state.config.vault_dir;
+    let newest = match store::read_conversation(vault_dir, slug) {
+        Ok(conversation) => store::split_turns(&conversation)
+            .into_iter()
+            .last()
+            .unwrap_or_default(),
+        Err(e) => return CallToolResult::error(vec![Content::text(e.to_string())]),
+    };
+    match workbench::plan_view(vault_dir, slug, None) {
+        Ok(view) if newest.contains(&view.stem) => {
+            CallToolResult::success(vec![Content::text(format!(
+                "plan {}\n\n{}\n\nrelay the open questions and owner-blocked tasks to the owner; \
+                 answer with answer_plan in the owner's own words",
+                view.stem,
+                view.to_json()
+            ))])
+        }
+        Ok(_) | Err(_) => CallToolResult::success(vec![Content::text(newest)]),
     }
 }
 
