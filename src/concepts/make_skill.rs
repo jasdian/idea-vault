@@ -8,13 +8,23 @@
 
 use std::path::Path;
 
+use chrono::Utc;
+use tokio::sync::Semaphore;
+
+use crate::ai::budget::ContextBudget;
 use crate::ai::contract;
 use crate::ai::provenance::digest12;
+use crate::ai::LlmBackend;
+use crate::concepts::agents::AgentRole;
+use crate::concepts::skills::{ask_on_contract, hydrate_context, DISTILL_SKILL};
 use crate::concepts::skills::{
     check_candidate, Skill, SkillRegistry, SkillSource, INTERNAL_SKILLS,
 };
+use crate::concepts::ConceptError;
 use crate::domain::evidence::{content_words, grounded, normalize_for_match};
+use crate::domain::frontmatter::ArtifactFrontmatter;
 use crate::domain::frontmatter::{emit_skill, parse_skill};
+use crate::domain::{slug, Artifact, ArtifactKind, OutputContract};
 use crate::vault::store::{self, TurnSource};
 
 /// Most bytes the move trace adds to the distiller's prompt.
@@ -462,6 +472,110 @@ pub fn save_check(
             "the owner skill file cannot be read: {e}"
         ))),
     }
+}
+
+/// What a distil left behind: the draft artifact, the drafted skill's name, and how many of its
+/// evidence quotes did not ground (warned about, never a block: D3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistillOutcome {
+    pub artifact_slug: String,
+    pub name: String,
+    pub ungrounded: usize,
+}
+
+/// Distil one discussion into a `skill_draft` artifact (docs/adr/0042, D42).
+pub async fn distill(
+    llm: &LlmBackend,
+    ai_semaphore: &Semaphore,
+    vault_dir: &Path,
+    idea_slug: &str,
+    skills: &SkillRegistry,
+    budget: ContextBudget,
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<DistillOutcome, ConceptError> {
+    progress("make skill · reading the discussion");
+    let skill = skills
+        .get(DISTILL_SKILL)
+        .ok_or_else(|| ConceptError::UnknownSkill(DISTILL_SKILL.to_string()))?;
+    let conversation = store::read_conversation(vault_dir, idea_slug)?;
+    let trace = trace_block(&move_trace(&conversation), TRACE_BYTES);
+    let book = book_block(skills, BOOK_BYTES);
+    // The two fixed blocks come out of the same window the idea's own context fills (ADR-0014).
+    let own = ContextBudget::new(
+        budget
+            .max_bytes
+            .saturating_sub(trace.len() + book.len())
+            .max(1),
+    );
+    let context = hydrate_context(vault_dir, idea_slug, own)?;
+    let prompt = skill
+        .prompt
+        .replace("{context}", &format!("{trace}\n{book}\n{}", context.text));
+    let role_llm = llm.for_role(AgentRole::from(skill.role).as_str());
+    let (answer, outcome) = ask_on_contract(
+        &role_llm,
+        ai_semaphore,
+        prompt,
+        OutputContract::SkillDraft,
+        "make skill",
+        progress,
+    )
+    .await?;
+
+    progress("make skill · checking the draft");
+    let (file, evidence_md) = contract::split_skill_draft(&answer)
+        .map_err(|v| ConceptError::DraftUnusable(v.to_string()))?;
+    let raw = finalize(&file, idea_slug).map_err(ConceptError::DraftUnusable)?;
+    let name = check_candidate(&raw)
+        .map_err(ConceptError::DraftUnusable)?
+        .name;
+    let evidence = check_evidence(&evidence_md, &conversation);
+    let ungrounded = evidence.iter().filter(|e| !e.grounded).count();
+    let body = render_draft_body(&Draft { raw, evidence });
+    let artifact_slug = slug::disambiguate(&format!("skill-draft-{name}"), |candidate| {
+        store::artifact_exists(vault_dir, idea_slug, candidate).unwrap_or(false)
+    });
+    // No transcript turn: model text written as a turn would become evidence for later quotes
+    // (an `Other` turn is not excluded from the haystacks), and the draft is not a move.
+    store::write_artifact(
+        vault_dir,
+        idea_slug,
+        &Artifact {
+            frontmatter: ArtifactFrontmatter {
+                slug: artifact_slug.clone(),
+                title: format!("Skill draft: {name}"),
+                kind: ArtifactKind::SkillDraft,
+                lens: Some(DISTILL_SKILL.to_string()),
+                created: Utc::now(),
+                model: role_llm.model(),
+                revises: None,
+                version: None,
+                answered: Vec::new(),
+                recipe: Some(skill.recipe(&outcome)),
+            },
+            body,
+        },
+    )?;
+    Ok(DistillOutcome {
+        artifact_slug,
+        name,
+        ungrounded,
+    })
+}
+
+/// The visible skills as `- name: description` lines under `max_bytes`, so the distiller does
+/// not re-invent a move the book already has. Code dedups anyway ([`placement`], [`similar`]).
+fn book_block(skills: &SkillRegistry, max_bytes: usize) -> String {
+    let heading = "## Skill book (already exists — do not re-invent these)\n";
+    let mut out = heading.to_string();
+    for s in skills.visible() {
+        let line = format!("- {}: {}\n", s.name, s.description);
+        if out.len() + line.len() > max_bytes {
+            break;
+        }
+        out.push_str(&line);
+    }
+    out
 }
 
 #[cfg(test)]
