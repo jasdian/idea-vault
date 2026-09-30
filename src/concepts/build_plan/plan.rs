@@ -1323,11 +1323,83 @@ const RUN_PROTOCOL: &str = "## How to run this
 6. Build in wave order, one commit per task, with the commit subject equal to the task title.
 7. Parallel waves: run T0 first when there is one; it is read-only and makes no commit. Tasks in the same wave touch disjoint files and do not depend on each other, so they MAY run in parallel, each in its own isolated worktree or subagent. A task that needs a file outside its files: line stops and reports, because it would break disjointness. At each wave boundary, integrate the finished tasks by merging or cherry-picking each task's commit onto the main line (allowed), re-run every finished task's accept and the project's full gate/test command, and only then start the next wave. A failed task blocks only its dependents; its wave siblings finish.
 8. When a task has red-first, run it before the edit and confirm the stated failure. Take the baseline by copying files to a scratch directory, never with git stash, reset or checkout.
-9. A task passes when its acceptance exits as stated AND the test count matches.
-10. Stop after 3 failed attempts at a task and report it.
-11. Never run destructive commands or rewrite history (reset, rebase, force-push, stash).
-12. End each task's report with: files / accept exit=<code> <counts> / red-first / deviations.
+9. Run each task through one fixed pipeline, in order, never reordered, skipped or continued past a red step: red-first (when stated), edit, acceptance, then the project's full gate from its first step. A task passes when its acceptance exits as stated AND the test count matches.
+10. Act on a failure by what fixing it would change, not by how bad it looks:
+   (a) no-op — a note that changes no file: record it in the report and continue.
+   (b) auto-fix — fixable inside the task's files: without changing any intent field: at most 3 attempts per task, then stop and report. A fix made after the task's commit is its own commit, subject `fix(T#): <what>`. After any fix, re-run the acceptance, then the full gate from its first step.
+   (c) ask-user — fixing it would change an intent field: the Goal, a PINNED item or owner answer, a Q#, a check first:, a task's acceptance: (or its count), red-first:, stop if:, files: or depends:, a K# kill criterion, a Fence path, a Do not build on item, or a wave:, score: or model: value. 0 attempts: stop, quote the failing output verbatim, leave the task [?] and report.
+11. Never make a check pass by weakening it: no edited acceptance or expected value, test expectation, snapshot or golden, no skipped or ignored test, no --no-verify, no commit or success report past a red step. Never run destructive commands or rewrite history (reset, rebase, force-push, stash).
+12. End each task's report with: files / accept exit=<code> <counts> / red-first / deviations / findings (no-op, auto-fix, ask-user). A mistake that escaped a task is encoded, not remembered: name the failing test or acceptance that now catches its class.
 ";
+
+/// What an executor does when going green would change a field (docs/14-no-mistakes-gate.md,
+/// ADR-0041): the classification RUN_PROTOCOL rule 10 states in prose, kept as data so a new
+/// field key cannot ship unclassified (`field_action_covers_every_field_key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingAction {
+    /// Advisory: a failure here changes no intent; note it and continue.
+    NoOp,
+    /// Fixable inside the task's files without touching intent. No field key is auto-fix today —
+    /// every key a model or the owner writes is intent — so the variant is named for rule 10(b).
+    AutoFix,
+    /// The field is intent: stop, quote the failure verbatim and ask the owner.
+    AskUser,
+}
+
+/// One row per [`FIELD_KEYS`] entry. Derived and owner keys are ask-user because a fix that
+/// rewrote one would forge a gate result or an owner answer (ADR-0032); `depends` is ask-user and
+/// `reads` a no-op (owner decision D-c, ADR-0041): an "open first" hint changes no acceptance.
+pub const FIELD_ACTION: &[(&str, FindingAction)] = &[
+    ("quote", FindingAction::AskUser),
+    ("check", FindingAction::AskUser),
+    ("count", FindingAction::AskUser),
+    ("depends", FindingAction::AskUser),
+    ("touches", FindingAction::AskUser),
+    ("accept", FindingAction::AskUser),
+    ("checked by", FindingAction::AskUser),
+    ("gates", FindingAction::AskUser),
+    ("reason", FindingAction::AskUser),
+    ("red", FindingAction::AskUser),
+    ("reads", FindingAction::NoOp),
+    ("stop if", FindingAction::AskUser),
+    ("exempt", FindingAction::AskUser),
+    ("score", FindingAction::AskUser),
+    ("model", FindingAction::AskUser),
+    ("wave", FindingAction::AskUser),
+    ("leaf", FindingAction::AskUser),
+    ("was", FindingAction::AskUser),
+    ("owner", FindingAction::AskUser),
+    ("answers", FindingAction::AskUser),
+    ("asked", FindingAction::AskUser),
+    ("in", FindingAction::AskUser),
+    ("unblocks", FindingAction::AskUser),
+    ("unblocked", FindingAction::AskUser),
+];
+
+/// The label a field key carries in a `PROMPT.md` task brief, or None when the key is not
+/// rendered under a label of its own: a PINNED quote, a Do-not-build-on reason and a kill
+/// criterion's `checked by`/`gates` are named in RUN_PROTOCOL 10(c) by their section
+/// ([`INTENT_SECTIONS`]); `count`, `exempt` and the owner and bookkeeping keys never reach it.
+#[cfg_attr(not(test), allow(dead_code))]
+fn prompt_label(key: &str) -> Option<&'static str> {
+    match key {
+        "accept" => Some("acceptance:"),
+        "red" => Some("red-first:"),
+        "touches" => Some("files:"),
+        "check" => Some("check first:"),
+        "reads" => Some("open first:"),
+        "depends" => Some("depends:"),
+        "stop if" => Some("stop if:"),
+        "wave" => Some("wave:"),
+        "score" => Some("score:"),
+        "model" => Some("model:"),
+        _ => None,
+    }
+}
+
+/// Plan sections that are intent as a whole, named in RUN_PROTOCOL 10(c).
+#[cfg_attr(not(test), allow(dead_code))]
+const INTENT_SECTIONS: &[&str] = &["Goal", "PINNED", "Q#", "K#", "Fence", "Do not build on"];
 
 /// `Waves: 1 → T2, T3 · 2 → T4 · unscheduled → T1` — a task with no derived wave (an owner
 /// task, a cycle) is unscheduled.
@@ -1559,7 +1631,7 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
         GOAL_FIRST_CHARS,
     );
     let mut out = format!(
-        "Goal: {goal}\nRules: PROMPT.md (How to run this, PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\nCommands: a `\\|` inside a cell is the table escape for `|`; run the command with a plain `|` (PROMPT.md has every command unescaped)\n"
+        "Goal: {goal}\nRules: PROMPT.md (How to run this, Findings, PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\nCommands: a `\\|` inside a cell is the table escape for `|`; run the command with a plain `|` (PROMPT.md has every command unescaped)\n"
     );
     let fence: Vec<&str> = plan.fence.iter().map(|f| f.text.as_str()).collect();
     if fence.is_empty() {
@@ -2630,9 +2702,11 @@ Run the cheapest disproof before any Rust exists.
             "Build in wave order, one commit per task, with the commit subject equal to the task title.",
             "never with git stash, reset or checkout",
             "A task passes when its acceptance exits as stated AND the test count matches.",
-            "Stop after 3 failed attempts",
+            "9. Run each task through one fixed pipeline, in order, never reordered, skipped or continued past a red step",
+            "10. Act on a failure by what fixing it would change, not by how bad it looks:",
+            "11. Never make a check pass by weakening it",
             "Never run destructive commands or rewrite history (reset, rebase, force-push, stash)",
-            "files / accept exit=<code> <counts> / red-first / deviations",
+            "12. End each task's report with: files / accept exit=<code> <counts> / red-first / deviations / findings (no-op, auto-fix, ask-user)",
         ] {
             assert!(prompt.contains(rule), "{rule}\n{prompt}");
         }
@@ -2647,6 +2721,102 @@ Run the cheapest disproof before any Rust exists.
             p[at..at + p[at..].find("\nWaves:").unwrap()].to_string()
         };
         assert_eq!(protocol(&prompt), protocol(&other));
+    }
+
+    #[test]
+    fn run_protocol_acts_by_action_not_severity() {
+        let mut from = RUN_PROTOCOL
+            .find("Act on a failure by what fixing it would change, not by how bad it looks")
+            .expect("rule 10");
+        for clause in ["(a) no-op — ", "(b) auto-fix — ", "(c) ask-user — "] {
+            let at = RUN_PROTOCOL[from..]
+                .find(clause)
+                .unwrap_or_else(|| panic!("{clause} missing or out of order"));
+            from += at + clause.len();
+        }
+        assert!(RUN_PROTOCOL.contains("at most 3 attempts per task, then stop and report"));
+        assert!(RUN_PROTOCOL.contains("0 attempts: stop, quote the failing output verbatim"));
+    }
+
+    #[test]
+    fn run_protocol_forbids_weakening_a_check() {
+        for phrase in [
+            "Never make a check pass by weakening it",
+            "no edited acceptance or expected value, test expectation, snapshot or golden",
+            "no skipped or ignored test, no --no-verify",
+            "no commit or success report past a red step",
+        ] {
+            assert!(RUN_PROTOCOL.contains(phrase), "{phrase}");
+        }
+    }
+
+    #[test]
+    fn run_protocol_restarts_the_full_gate_after_any_fix() {
+        assert!(RUN_PROTOCOL.contains(
+            "After any fix, re-run the acceptance, then the full gate from its first step."
+        ));
+        assert!(RUN_PROTOCOL.contains("then the project's full gate from its first step"));
+    }
+
+    #[test]
+    fn field_action_covers_every_field_key() {
+        let rows: Vec<&str> = FIELD_ACTION.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            rows, FIELD_KEYS,
+            "one FIELD_ACTION row per FIELD_KEYS entry, in order"
+        );
+        let action = |key: &str| FIELD_ACTION.iter().find(|(k, _)| *k == key).unwrap().1;
+        assert_eq!(action("reads"), FindingAction::NoOp);
+        for key in DERIVED_KEYS
+            .iter()
+            .chain(OWNER_KEYS)
+            .chain(&["depends", "accept"])
+        {
+            assert_eq!(action(key), FindingAction::AskUser, "{key}");
+        }
+    }
+
+    #[test]
+    fn every_ask_user_label_is_named_in_run_protocol() {
+        for (key, action) in FIELD_ACTION {
+            if let (FindingAction::AskUser, Some(label)) = (action, prompt_label(key)) {
+                assert!(RUN_PROTOCOL.contains(label), "{key} → {label}");
+            }
+        }
+        for section in INTENT_SECTIONS {
+            assert!(RUN_PROTOCOL.contains(section), "{section}");
+        }
+    }
+
+    #[test]
+    fn prompt_labels_are_what_the_brief_renders() {
+        let prompt = render_prompt(&leaf_plan(), &RunHeader::default(), "T", "s");
+        for (key, _) in FIELD_ACTION {
+            if let Some(label) = prompt_label(key) {
+                assert!(
+                    prompt.contains(label),
+                    "{key} → {label} is not rendered\n{prompt}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gate_doc_product_lines_are_in_run_protocol() {
+        let doc = include_str!("../../../docs/14-no-mistakes-gate.md");
+        let checklist = &doc[doc.find("\n## Checklist\n").expect("the checklist")..];
+        let product: Vec<&str> = checklist
+            .lines()
+            .filter(|l| l.ends_with("** [product]"))
+            .map(|l| {
+                let start = l.find("**").unwrap() + 2;
+                &l[start..l.len() - "** [product]".len()]
+            })
+            .collect();
+        assert!(!product.is_empty(), "docs/14 lists [product] phrases");
+        for phrase in product {
+            assert!(RUN_PROTOCOL.contains(phrase), "{phrase}");
+        }
     }
 
     #[test]
@@ -2843,7 +3013,7 @@ Run the cheapest disproof before any Rust exists.
             from += at + phrase.len();
         }
         assert!(
-            out.contains("\nRules: PROMPT.md (How to run this, PINNED, Fence)\n"),
+            out.contains("\nRules: PROMPT.md (How to run this, Findings, PINNED, Fence)\n"),
             "{out}"
         );
     }
@@ -2902,7 +3072,7 @@ Run the cheapest disproof before any Rust exists.
         let header = &out[..table];
         for line in [
             "Goal: Run the cheapest disproof before any Rust exists.\n",
-            "Rules: PROMPT.md (How to run this, PINNED, Fence)\n",
+            "Rules: PROMPT.md (How to run this, Findings, PINNED, Fence)\n",
             "Selection rule: the topmost [ ] whose Depends are all [x]; never [?]\n",
             "Fence: `src/domain/links.rs`\n",
             "STOP if The backtest prints KILL → stop and report; checked by T2; blocks T3\n",

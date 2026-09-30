@@ -15,12 +15,12 @@ template. The template's `{context}` slot is filled with the idea context at inv
 ```markdown
 ---
 name: premortem
-description: "Assume the idea failed; enumerate the most likely causes."
+description: "Assume the idea failed; rank the most likely causes, each with a warning sign and mitigation, then patch the idea."
 stage: attack            # SkillStage — where the move sits on the spine (below)
 role: critic             # SkillRole — the persona it runs under when fanned out
 contract: ranked_list    # OutputContract — the answer's required shape (ADR-0023)
 use_when: "The idea feels finished and nobody has yet asked how it dies."
-avoid_when: "The idea is still one vague sentence — steelman it first."
+avoid_when: "The idea is still one vague sentence — steelman it first so there is something to kill."
 ---
 
 The idea below failed badly 12 months from now. Working backwards from that failure, write its
