@@ -221,7 +221,7 @@ Two more built-ins are read by the workflow engine's own stages, not by the owne
 are `hidden` and flagged `internal` (`concepts::skills::INTERNAL_SKILLS`): a skill file can only be
 `critic`, not `auditor` (`SkillRole` has five roles, no Auditor), so the Panel stage overrides the
 scorer's call role to `AgentRole::Auditor` in code. An internal skill is never a chip, never a swarm
-angle (a `400`), never an interactive skill run (`404`), and a workflow file that names one as a
+angle (a `400`) — an owner override of one stays hidden even if its frontmatter omits `hidden: true` — never an interactive skill run (`404`), and a workflow file that names one as a
 step is rejected ([ADR-0035](../adr/0035-workflows-as-markdown-and-the-workflow-book.md)).
 
 ### Orchestrator-only lenses (`extract-*`)

@@ -14,7 +14,8 @@
 
   {% if !issues.is_empty() %}
   <div class="src__banner book__issues">
-    <p>{{ issues.len() }} skill file{% if issues.len() != 1 %}s{% endif %} skipped — the built-in (if any) stays active:</p>
+    <p>{{ issues.len() }} skill file{% if issues.len() != 1 %}s{% endif %} skipped — a same-named built-in stays active only when the skipped file is your override; a
+        built-in marked <em>disabled by your skill overrides</em> is gone until you fix that skill file:</p>
     <ul>
       {% for issue in issues %}
       <li><code>{{ issue.file }}</code> — {{ issue.message }}</li>

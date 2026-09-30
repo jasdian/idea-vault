@@ -174,7 +174,7 @@ snapshot ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md))
 model call, and returns the refreshed `#skills` panel directly — the same shape as R23/R32. R49
 (`workflow_page`) is a plain read of the live workflow snapshot. **R35** is a single mounted protocol
 endpoint, not a page or partial — it carries its own MCP-level `tools/call`/`tasks/*` dispatch
-(`web::mcp_server`), and its five long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`) still go through the same
+(`web::mcp_server`), and its six long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`, `run_workflow`) still go through the same
 `web::jobs` claim → spawn → poll machinery every other AI route uses, bridged onto the MCP Tasks
 primitive rather than exposed as HTML ([ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md)).
 **R36–R41 (`/sources`, ADR-0021) never run docker** (the app never invokes docker at all, ADR-0020). A mutation only rewrites the generated
@@ -485,7 +485,8 @@ base.html`.
   own worst-case call count, and a cost line `up to N model calls · widest stage W → ⌈W/K⌉ waves at
   K=<AI concurrency>` ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md), ADR-0006). Reload re-reads
   `vault/.workflows/` after the skills; a file that failed validation is listed in an issues banner
-  and the built-in of the same name stays active. The R49 page adds a panel's rubric table, the
+  and the built-in of the same name stays active, while a built-in that a skill override breaks is
+  listed as `built-in disabled by your skill overrides` and is gone until the skill is fixed. The R49 page adds a panel's rubric table, the
   file's markdown body, a note when the workflow opens with a Ground stage, and the definition file
   as loaded, with the path to copy it to. An unknown name, including one present only as an
   invalid owner file, is `404`. The idea page's workflow chips come from the same book: every

@@ -394,8 +394,18 @@ impl RunState {
     fn produced(&mut self, labels: Vec<String>, results: Vec<Option<AgentResult>>) {
         self.fanned.0.extend(labels);
         self.fanned.1.extend(results.iter().cloned());
+        self.extend_results(results);
+    }
+
+    /// Add results to the findings pool and invalidate everything computed from the old pool.
+    /// An earlier audit report is dropped with the findings: its verdicts pair with findings by
+    /// index, so keeping it against a re-gathered, longer list would strike or carry the wrong
+    /// items (docs/adr/0034 — unaudited is reported as unaudited, never as another item's verdict).
+    fn extend_results(&mut self, results: Vec<Option<AgentResult>>) {
         self.step_results.extend(results);
         self.findings = None;
+        self.dropped = 0;
+        self.report = None;
     }
 }
 
@@ -738,8 +748,7 @@ async fn run_stage(
             let run = rounds::run_loop(ctx, spec, &state.carried, calls, note).await?;
             // Loop results are merged items, not angles: they join the findings without adding
             // to the angles line.
-            state.step_results.extend(run.results);
-            state.findings = None;
+            state.extend_results(run.results);
             Ok(run.outcome)
         }
         Stage::Refine(spec) => match state.findings.as_mut() {
@@ -959,6 +968,33 @@ mod tests {
             role: AgentRole::Harvester,
             text: text.to_string(),
         }
+    }
+
+    #[test]
+    fn a_producer_after_an_audit_drops_the_stale_report() {
+        let mut state = RunState {
+            findings: Some(vec![finding("premortem", "old")]),
+            dropped: 3,
+            report: Some(audit::AuditReport {
+                verdicts: vec![],
+                answered: 0,
+                failed: true,
+            }),
+            ..RunState::default()
+        };
+        state.produced(vec!["fan".into()], vec![None]);
+        assert!(state.findings.is_none() && state.report.is_none() && state.dropped == 0);
+
+        state.report = Some(audit::AuditReport {
+            verdicts: vec![],
+            answered: 0,
+            failed: true,
+        });
+        state.extend_results(vec![None]);
+        assert!(
+            state.report.is_none(),
+            "a loop's merged items invalidate the report too"
+        );
     }
 
     #[test]

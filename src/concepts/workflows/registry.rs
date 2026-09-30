@@ -172,17 +172,17 @@ pub fn validate(
                 }
             }
             StageSpec::Audit => {
-                let producer = prior.iter().any(|p| {
-                    matches!(
-                        p,
-                        StageSpec::FanOut(_) | StageSpec::Loop(_) | StageSpec::Panel(_)
-                    )
-                });
-                if !producer {
+                if !has_producer(prior) {
                     push("an audit needs a fan_out, loop or panel before it".into());
                 }
             }
-            StageSpec::Synthesize => {}
+            // Synthesize gathers findings; with no producer before it the run spends the earlier
+            // stages' calls and then fails with nothing to synthesize.
+            StageSpec::Synthesize => {
+                if !has_producer(prior) {
+                    push("a synthesize needs a fan_out, loop or panel before it".into());
+                }
+            }
             StageSpec::Ground(g) => {
                 if i != 0 {
                     push("ground must be the first stage, and only one may run".into());
@@ -252,6 +252,17 @@ pub fn validate(
             }
         }
     }
+    // Only a chain or a synthesize writes the turn a run persists; ending on any other stage
+    // spends the whole call budget and then persists nothing.
+    if let Some(end) = specs.last() {
+        if !matches!(end, StageSpec::Chain(_) | StageSpec::Synthesize) {
+            issues.push(format!(
+                "stages[{last}] ({}): the last stage must be a chain or a synthesize — nothing \
+                 else writes the turn",
+                end.kind().as_str()
+            ));
+        }
+    }
     if is_capstone(specs, skills) && fm.name != READY_TO_BUILD {
         issues.push(format!(
             "it chains a build-plan skill, which makes it a capstone; only {READY_TO_BUILD} may \
@@ -268,6 +279,16 @@ pub fn validate(
         ));
     }
     issues
+}
+
+/// Whether any stage in `prior` produces findings for an audit or a synthesize to consume.
+fn has_producer(prior: &[StageSpec]) -> bool {
+    prior.iter().any(|p| {
+        matches!(
+            p,
+            StageSpec::FanOut(_) | StageSpec::Loop(_) | StageSpec::Panel(_)
+        )
+    })
 }
 
 fn push_some(push: &mut impl FnMut(String), message: Option<String>) {
@@ -322,6 +343,9 @@ fn build_workflow(
     })
 }
 
+/// The prefix on an issue for a built-in workflow that failed validation (ADR-0035).
+pub const BUILTIN_DISABLED: &str = "built-in disabled by your skill overrides";
+
 fn issues_for(file: &str, messages: Vec<String>) -> impl Iterator<Item = WorkflowIssue> + '_ {
     messages.into_iter().map(move |message| WorkflowIssue {
         file: file.to_string(),
@@ -352,7 +376,14 @@ impl WorkflowRegistry {
         for (stem, raw) in BUILTIN {
             match build_workflow(raw, stem, WorkflowSource::BuiltIn, skills) {
                 Ok(w) => workflows.push(w),
-                Err(m) => issues.extend(issues_for(&format!("{stem}.md"), m)),
+                // A built-in only fails against owner skill overrides, and unlike an invalid owner
+                // file nothing stays active in its place — say so, so the owner fixes the skill.
+                Err(m) => issues.extend(issues_for(
+                    &format!("{stem}.md"),
+                    m.into_iter()
+                        .map(|m| format!("{BUILTIN_DISABLED}: {m}"))
+                        .collect(),
+                )),
             }
         }
         (Self { workflows }, issues)
@@ -749,8 +780,8 @@ mod tests {
             (
                 "unknown stage key",
                 "w",
-                doc("w", &format!("{SIMPLE}  - kind: audit\n    deep: true\n")),
-                "stages[2] (audit)",
+                doc("w", &format!("{}  - kind: audit\n    deep: true\n  - kind: synthesize\n", fan(1))),
+                "stages[1] (audit)",
             ),
             (
                 "unknown skill",
@@ -778,6 +809,24 @@ mod tests {
                 "my-plan",
                 doc("my-plan", &format!("{harvest}  - kind: audit\n{plan}")),
                 "capstone",
+            ),
+            (
+                "ends on an audit",
+                "w",
+                doc("w", &format!("{}  - kind: audit\n", fan(1))),
+                "stages[1] (audit): the last stage must be a chain or a synthesize",
+            ),
+            (
+                "ends on a loop",
+                "w",
+                doc("w", "  - kind: loop\n    steps:\n      - {role: critic, skill: premortem}\n    max_calls: 4\n"),
+                "stages[0] (loop): the last stage must be a chain or a synthesize",
+            ),
+            (
+                "synthesize with no producer",
+                "w",
+                doc("w", "  - kind: chain\n    role: advocate\n    skill: steelman\n  - kind: synthesize\n"),
+                "stages[1] (synthesize): a synthesize needs a fan_out, loop or panel before it",
             ),
             (
                 "fan_out of 9",
@@ -827,7 +876,7 @@ mod tests {
         );
         for (stages, needle) in [
             (
-                format!("{SIMPLE}{ground}"),
+                format!("{SIMPLE}{ground}  - kind: synthesize\n"),
                 "ground must be the first stage",
             ),
             (
@@ -835,11 +884,11 @@ mod tests {
                 "a panel must be followed",
             ),
             (
-                format!("{SIMPLE}{refine}"),
+                format!("{SIMPLE}{refine}  - kind: synthesize\n"),
                 "a refine must come right after an audit",
             ),
             (
-                "  - kind: audit\n  - kind: synthesize\n".to_string(),
+                "  - kind: audit\n  - kind: chain\n    role: critic\n".to_string(),
                 "an audit needs",
             ),
         ] {
@@ -891,6 +940,30 @@ mod tests {
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].file, "uses-mine.md");
         assert!(issues[0].message.contains("unknown skill my-lens"));
+    }
+
+    #[test]
+    fn a_skill_override_that_breaks_a_builtin_says_the_builtin_is_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (skills_dir, flows_dir) = (tmp.path().join(".skills"), tmp.path().join(".workflows"));
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            skills_dir.join("premortem.md"),
+            "---\nname: premortem\ndescription: \"d\"\nstage: extract\n---\n\nX\n{context}\n",
+        )
+        .unwrap();
+        let skills = LiveSkills::load(skills_dir);
+        let live = LiveWorkflows::load(flows_dir, &skills);
+        assert!(live.snapshot().workflows.get("exhaust").is_none());
+        let issues = live.issues();
+        let exhaust: Vec<_> = issues.iter().filter(|i| i.file == "exhaust.md").collect();
+        assert!(!exhaust.is_empty(), "{issues:?}");
+        assert!(
+            issues
+                .iter()
+                .all(|i| i.message.starts_with(BUILTIN_DISABLED)),
+            "{issues:?}"
+        );
     }
 
     #[test]

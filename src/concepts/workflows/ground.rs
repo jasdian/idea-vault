@@ -45,6 +45,16 @@ const KNOWN_EXTENSIONS: [&str; 12] = [
     "rs", "md", "sh", "toml", "html", "py", "ts", "js", "json", "yml", "yaml", "css",
 ];
 
+/// Widest cited range (in lines) the verifier will test; a wider anchor stays unverified.
+const MAX_ANCHOR_SPAN: usize = 40;
+
+/// Symbols that occur in nearly every source file, so finding one proves nothing about a claim.
+const COMMON_SYMBOLS: [&str; 24] = [
+    "use", "pub", "let", "mut", "new", "self", "Self", "impl", "mod", "for", "and", "the", "not",
+    "struct", "enum", "async", "await", "return", "match", "const", "true", "false", "None",
+    "Some",
+];
+
 /// The skill every reader runs through.
 const READER_SKILL: &str = "ground-read";
 
@@ -150,15 +160,49 @@ impl GroundMap {
     }
 }
 
+fn has_known_extension(token: &str) -> bool {
+    token.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && KNOWN_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    })
+}
+
 fn is_path_like(token: &str) -> bool {
     if token.contains("://") || token.contains(char::is_whitespace) || token.len() < 3 {
         return false;
     }
-    let has_ext = token.rsplit_once('.').is_some_and(|(stem, ext)| {
-        !stem.is_empty() && KNOWN_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
-    });
     let slashed = token.contains('/') && token.chars().any(char::is_alphanumeric);
-    has_ext || slashed
+    has_known_extension(token) || slashed
+}
+
+/// A bare prose word that is slashed but has no known extension (`src/web`, but also `and/or`,
+/// `client/server`, `24/7`): only a candidate. Every component must be path-shaped and at least one
+/// must carry a letter; [`code_map`] then keeps it only if it resolves to an attached file.
+fn is_loose_path(token: &str) -> bool {
+    let parts: Vec<&str> = token
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .split('/')
+        .collect();
+    parts.len() >= 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        })
+        && parts
+            .iter()
+            .any(|p| p.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
+/// What [`mine_tokens`] found: `paths` the author plainly meant as paths (backticked, or carrying
+/// a [`KNOWN_EXTENSIONS`] extension), `loose` the slashed prose words that might be directories,
+/// and `idents` the backticked identifiers. Each list is deduped in first-seen order and capped
+/// on its own, so prose like `and/or` can never crowd a real path out.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Mined {
+    pub paths: Vec<String>,
+    pub loose: Vec<String>,
+    pub idents: Vec<String>,
 }
 
 fn is_identifier(token: &str) -> bool {
@@ -169,12 +213,12 @@ fn is_identifier(token: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
 }
 
-/// Path-like tokens and backticked identifiers in `text`, each deduped in first-seen order and
-/// capped. A path is backticked text or a whitespace token that contains `/` or ends in a
-/// [`KNOWN_EXTENSIONS`] extension; an identifier is backticked text that is not a path.
-pub fn mine_tokens(text: &str) -> (Vec<String>, Vec<String>) {
-    let mut paths: Vec<String> = Vec::new();
-    let mut idents: Vec<String> = Vec::new();
+/// Path-like tokens and backticked identifiers in `text`, sorted into [`Mined`]. A path is
+/// backticked text that looks like one, or a whitespace token ending in a [`KNOWN_EXTENSIONS`]
+/// extension; a slashed whitespace token without one is only a loose candidate; an identifier is
+/// backticked text that is not a path.
+pub fn mine_tokens(text: &str) -> Mined {
+    let mut mined = Mined::default();
     let push = |into: &mut Vec<String>, t: &str| {
         if !into.iter().any(|o| o == t) && into.len() < MAX_MINED_TOKENS {
             into.push(t.to_string());
@@ -185,9 +229,9 @@ pub fn mine_tokens(text: &str) -> (Vec<String>, Vec<String>) {
             let span = span.trim();
             let span = parse_anchor(span).map_or(span, |(p, _, _)| p);
             if is_path_like(span) {
-                push(&mut paths, span);
+                push(&mut mined.paths, span);
             } else if is_identifier(span) {
-                push(&mut idents, span);
+                push(&mut mined.idents, span);
             }
         }
         for word in line.split_whitespace() {
@@ -201,18 +245,28 @@ pub fn mine_tokens(text: &str) -> (Vec<String>, Vec<String>) {
                 )
             });
             let word = word.trim_end_matches(['.', '!', '?']);
-            if is_path_like(word) {
-                push(&mut paths, word);
+            if !is_path_like(word) {
+                continue;
+            }
+            if has_known_extension(word) {
+                push(&mut mined.paths, word);
+            } else if is_loose_path(word) {
+                push(&mut mined.loose, word);
             }
         }
     }
-    (paths, idents)
+    mined
 }
 
-/// The code map over `probe` for `text` (the idea statement and recent discussion). Blocking
-/// file I/O — call from `spawn_blocking`.
+/// The code map over `probe` for `text` (the idea statement and recent discussion). A loose
+/// candidate is kept only when it lands on an attached file, so prose such as `client/server` is
+/// never listed as a path that does not exist. Blocking file I/O — call from `spawn_blocking`.
 pub fn code_map(probe: &SourceProbe, text: &str) -> CodeMap {
-    let (paths, idents) = mine_tokens(text);
+    let Mined {
+        paths,
+        loose,
+        idents,
+    } = mine_tokens(text);
     let scan = probe.find_tokens(&idents);
     let missing_symbols = if scan.complete {
         idents
@@ -222,15 +276,28 @@ pub fn code_map(probe: &SourceProbe, text: &str) -> CodeMap {
     } else {
         Vec::new()
     };
+    let mut resolved: Vec<(String, PathResolution)> = paths
+        .into_iter()
+        .map(|p| {
+            let at = probe.resolve_path(&p);
+            (p, at)
+        })
+        .collect();
+    for p in loose {
+        if resolved.len() >= MAX_MINED_TOKENS {
+            break;
+        }
+        let at = probe.resolve_path(&p);
+        if matches!(
+            at,
+            PathResolution::Unique(..) | PathResolution::Ambiguous(_)
+        ) {
+            resolved.push((p, at));
+        }
+    }
     CodeMap {
         outline: probe.outline(OUTLINE_DEPTH, OUTLINE_MAX),
-        paths: paths
-            .into_iter()
-            .map(|p| {
-                let at = probe.resolve_path(&p);
-                (p, at)
-            })
-            .collect(),
+        paths: resolved,
         missing_symbols,
     }
 }
@@ -334,6 +401,13 @@ pub fn verify(claims: Vec<Claim>, probe: &SourceProbe) -> GroundMap {
     let checked = claims
         .into_iter()
         .map(|mut claim| {
+            if let Some(why) = too_loose_to_check(&claim) {
+                return CheckedClaim {
+                    claim,
+                    verdict: ClaimVerdict::Unverified,
+                    note: why.to_string(),
+                };
+            }
             let (verdict, note) =
                 match probe.check_anchor(&claim.path, claim.first, claim.last, &claim.symbol) {
                     AnchorCheck::Resolved { .. } => (ClaimVerdict::Verified, String::new()),
@@ -367,6 +441,25 @@ pub fn verify(claims: Vec<Claim>, probe: &SourceProbe) -> GroundMap {
         claims: checked,
         complete: probe.is_complete(),
     }
+}
+
+/// Why an anchor proves nothing even if the probe finds it: a range so wide it covers most of a
+/// file, or a symbol so short or common (`e`, `use`, `self`) it occurs in almost any file. Such a
+/// claim stays unverified — never carried under "verified anchors" (docs/adr/0034).
+fn too_loose_to_check(c: &Claim) -> Option<&'static str> {
+    if c.first.abs_diff(c.last) >= MAX_ANCHOR_SPAN {
+        return Some("range too wide to check");
+    }
+    let symbol = c.symbol.as_str();
+    let identifier_like = symbol.chars().count() >= 3
+        && symbol.chars().any(char::is_alphabetic)
+        && symbol
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | ':' | '.' | '-'));
+    if !identifier_like || COMMON_SYMBOLS.contains(&symbol) {
+        return Some("symbol too common to check");
+    }
+    None
 }
 
 fn located(c: &Claim) -> String {
@@ -844,13 +937,41 @@ mod tests {
     }
 
     #[test]
+    fn wide_ranges_and_trivial_symbols_stay_unverified() {
+        let (_dir, probe) = fixture();
+        let map = verify(
+            vec![
+                claim("src/web/routes/chat.rs", 1, 99_999, "post_chat", "wide"),
+                claim("src/web/routes/chat.rs", 1, 3, "e", "one letter"),
+                claim("src/web/routes/chat.rs", 1, 1, "use", "keyword"),
+                claim("src/web/routes/chat.rs", 1, 5, "post_chat", "tight"),
+            ],
+            &probe,
+        );
+        let verdicts: Vec<(&str, ClaimVerdict)> = map
+            .claims
+            .iter()
+            .map(|c| (c.claim.claim.as_str(), c.verdict))
+            .collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("wide", ClaimVerdict::Unverified),
+                ("one letter", ClaimVerdict::Unverified),
+                ("keyword", ClaimVerdict::Unverified),
+                ("tight", ClaimVerdict::Verified),
+            ]
+        );
+    }
+
+    #[test]
     fn token_mining_resolves_chat_rs_suffix_and_lists_src_chat_rs_absent() {
         let (_dir, probe) = fixture();
         let text = "Change chat.rs so the route streams, and move `src/chat.rs` logic.\n\
                     Also check scripts/gate.sh, `post_chat` and `missing_symbol`; see https://x.io/a.rs.";
-        let (paths, idents) = mine_tokens(text);
-        assert_eq!(paths, ["src/chat.rs", "chat.rs", "scripts/gate.sh"]);
-        assert_eq!(idents, ["post_chat", "missing_symbol"]);
+        let mined = mine_tokens(text);
+        assert_eq!(mined.paths, ["src/chat.rs", "chat.rs", "scripts/gate.sh"]);
+        assert_eq!(mined.idents, ["post_chat", "missing_symbol"]);
         let map = code_map(&probe, text);
         assert_eq!(
             map.paths,
@@ -883,6 +1004,30 @@ mod tests {
         let absent = block.split("Does not exist").nth(1).unwrap();
         assert!(absent.contains("`src/chat.rs`"), "{block}");
         assert!(absent.contains("`missing_symbol`"), "{block}");
+    }
+
+    #[test]
+    fn slashed_prose_never_crowds_out_a_real_path_nor_is_listed_absent() {
+        let (_dir, probe) = fixture();
+        let prose: String = (0..30).map(|i| format!("a{i}/b{i} ")).collect();
+        let text = format!(
+            "It is client/server, and/or 24/7 over TCP/IP. {prose}\n\
+             Then edit src/web/routes/chat.rs and look in src/web."
+        );
+        let mined = mine_tokens(&text);
+        assert_eq!(mined.paths, ["src/web/routes/chat.rs"]);
+        assert!(
+            !mined.loose.contains(&"24/7".to_string()),
+            "{:?}",
+            mined.loose
+        );
+        let map = code_map(&probe, &text);
+        let listed: Vec<&str> = map.paths.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(listed, ["src/web/routes/chat.rs"], "{:?}", map.paths);
+        assert!(map
+            .paths
+            .iter()
+            .all(|(_, at)| !matches!(at, PathResolution::Absent)));
     }
 
     #[test]

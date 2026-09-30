@@ -22,7 +22,7 @@ A workflow is an ordered list of `Stage`s:
 |---|---|
 | `FanOut(steps)` | Parallel agents over the same context, via the swarm's bounded fan-out primitive. Their answers become **findings**. |
 | `Chain(step)` | One agent alone. Mid-workflow, its output is **carried forward** as a `## Prior stage: <skill>` block into every later stage. As the last stage, its output is the result. A chained step after a fan-out reads the findings (with verdicts, if audited) as a `## Prior stage: findings` block. |
-| `Audit` | The factored audit over the findings so far ([ADR-0023](../adr/0023-verification-layer.md)). Skipped while the Settings toggle is off, and skipped without a model call when the fan-out harvested nothing, except before a build-plan planner, whose run fails on an empty harvest (see Failure handling). |
+| `Audit` | The factored audit over the findings so far ([ADR-0023](../adr/0023-verification-layer.md)). Skipped while the Settings toggle is off, and skipped without a model call when the fan-out harvested nothing, except before a build-plan planner, whose run fails on an empty harvest (see Failure handling). A fan_out, loop or panel after an audit discards its report: the re-gathered findings are unaudited, never paired with the old verdicts by index. |
 | `Synthesize` | Converge the findings into one position. Straight after a Panel it runs in **graft mode**: the winning proposal is the spine and only the listed grafts are added. |
 | `Ground` | Map the idea's attached [reference sources](../adr/0021-reference-sources.md) and verify, in code, every anchor a reader cites ([D35](#d35--the-ground-stage)). Skipped, with no model call, when no source is attached. |
 | `Panel` | Competing proposals, each scored alone against a weighted rubric; code picks the winner and the grafts ([D36](#d36--the-panel-stage)). |
@@ -133,7 +133,7 @@ never meaning — the audit stays the check on meaning. Parameters: `readers` 0�
 flowchart TD
     G0(["Ground stage"]) --> SRC{"any source attached to the idea?"}
     SRC -->|"no"| SKIP["note 'no sources attached — ground skipped'<br/>0 calls, nothing carried, no artifact<br/>StageLog: skipped"]
-    SRC -->|"yes"| MAP["code map, no model call, one blocking task:<br/>outline (depth 2, ≤80 lines) + path-like and backticked tokens<br/>mined from the idea and the last 6 turns, each resolved"]
+    SRC -->|"yes"| MAP["code map, no model call, one blocking task:<br/>outline (depth 2, ≤80 lines) + path-like and backticked tokens<br/>mined from the idea and the last 6 turns, each resolved;<br/>a slashed prose word with no known extension is kept only if it lands on a file"]
     MAP --> RD{"readers > 0?"}
     RD -->|"no"| VER
     RD -->|"yes"| READ["fan-out of ≤3 readers: hidden skill ground-read, role Researcher,<br/>tool budget 2 rounds × 2 calls, each with the outline and one angle<br/>contract ground_claims (≤8 lines), one repair, then 0 claims"]
@@ -142,7 +142,7 @@ flowchart TD
     VER --> V1["Resolved → verified"]
     VER --> V2["Moved → verified, re-anchored"]
     VER --> V3["NoFile, SymbolMissing, Ambiguous → disproved"]
-    VER --> V4["Unverified (capped walk, unreadable) → unverified, never disproved"]
+    VER --> V4["Unverified (capped walk, unreadable, a range over 40 lines,<br/>a symbol under 3 chars or a keyword) → unverified, never disproved"]
     V1 --> CARRY
     V2 --> CARRY
     V3 --> CARRY
@@ -350,7 +350,10 @@ Built-ins live in `src/concepts/workflows/*.md` and are compiled in; the owner's
 `IDEA_VAULT_WORKFLOWS_DIR`, default `<vault>/.workflows/` — a dot-dir reindex never enters. Loading
 follows the skill loader (ADR-0022): a new name is appended in file-name order after the built-ins, a
 file whose name matches a built-in replaces it in place (keeping its chip position), and a file that
-fails validation is an issue on the book while the built-in of that name stays active.
+fails validation is an issue on the book while the built-in of that name stays active. A built-in
+revalidates against the owner's skill overrides too; one an override breaks (say `premortem` moved to
+stage `extract`) is left out, and its issue is prefixed `built-in disabled by your skill overrides`,
+since nothing stays active in its place.
 
 ```mermaid
 flowchart TD
@@ -366,7 +369,7 @@ flowchart TD
     PARSE -->|"error"| ISS
     PARSE -->|"ok"| NAME{"name is a slug and equals the file stem?"}
     NAME -->|"no"| ISS
-    NAME -->|"yes"| VAL["validate against the SkillRegistry, pure:<br/>skills resolve, extract lenses only in harvester fan_out or loop steps,<br/>ground-read and panel-score are internal, caps of every stage, at most 8 stages,<br/>ground first and alone, panel then synthesize or audit then synthesize,<br/>audit after a fan_out, loop or panel, refine right after an audit,<br/>build-plan chain last, only the name ready-to-build may be a capstone, ceiling ≤ 32"]
+    NAME -->|"yes"| VAL["validate against the SkillRegistry, pure:<br/>skills resolve, extract lenses only in harvester fan_out or loop steps,<br/>ground-read and panel-score are internal, caps of every stage, at most 8 stages,<br/>ground first and alone, panel then synthesize or audit then synthesize,<br/>audit and synthesize each after a fan_out, loop or panel, refine right after an audit,<br/>last stage a chain or synthesize, build-plan chain last, only the name ready-to-build may be a capstone, ceiling ≤ 32"]
     VAL -->|"any rule broken"| ISS
     VAL -->|"clean"| REG["registered: appended, or replaces the built-in of the same name in place"]
     REG --> FILES

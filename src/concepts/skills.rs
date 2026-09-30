@@ -154,7 +154,9 @@ fn parse_skill_doc(raw: &str, source: SkillSource) -> Result<Skill, String> {
         contract: fm.contract,
         use_when: fm.use_when,
         avoid_when: fm.avoid_when,
-        hidden: fm.hidden,
+        // An internal skill is never a move, whatever an owner override's frontmatter says:
+        // guard_skill refuses it, so surfacing it as a chip would only offer a 404.
+        hidden: fm.hidden || internal,
         internal,
         prompt,
         source,
@@ -803,6 +805,23 @@ mod tests {
         assert_eq!(added.name, "my-move");
         assert_eq!(added.source, SkillSource::Vault);
         assert_eq!(registry.list().len(), BUILTIN.len() + 1);
+    }
+
+    #[test]
+    fn an_internal_override_without_hidden_stays_off_the_move_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "panel-score.md",
+            &skill_doc("panel-score", "converge", "Score it.\n{context}"),
+        );
+        let (registry, issues) = SkillRegistry::load(tmp.path());
+        assert!(issues.is_empty(), "{issues:?}");
+        let s = registry.get("panel-score").unwrap();
+        assert_eq!(s.source, SkillSource::VaultOverride);
+        assert!(s.internal && s.hidden);
+        assert!(registry.visible().all(|s| !s.internal));
+        assert!(!registry.move_names().contains(&"panel-score".to_string()));
     }
 
     #[test]
