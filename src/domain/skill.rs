@@ -32,6 +32,17 @@ impl SkillStage {
         SkillStage::Capstone,
     ];
 
+    /// Every stage, in declaration order; tests/doc_examples.rs holds the skills doc's field
+    /// table to this list (CORE-5).
+    pub const ALL: [SkillStage; 6] = [
+        SkillStage::Steelman,
+        SkillStage::Attack,
+        SkillStage::Consequence,
+        SkillStage::Converge,
+        SkillStage::Capstone,
+        SkillStage::Extract,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             SkillStage::Steelman => "steelman",
@@ -56,6 +67,18 @@ pub enum SkillRole {
     Advocate,
     Harvester,
     Synthesizer,
+}
+
+impl SkillRole {
+    /// Every role, in declaration order; the skills doc's field table is held to it
+    /// (tests/doc_examples.rs).
+    pub const ALL: [SkillRole; 5] = [
+        SkillRole::Critic,
+        SkillRole::Researcher,
+        SkillRole::Advocate,
+        SkillRole::Harvester,
+        SkillRole::Synthesizer,
+    ];
 }
 
 /// The shape a skill's output must take (docs/adr/0023). `ai::contract` validates it and, for a
@@ -84,4 +107,19 @@ pub enum OutputContract {
     /// A Panel scorer's rubric answer (ADR-0034): one `C<i>: <0|1|2> — reason` line per
     /// criterion.
     Scorecard,
+}
+
+impl OutputContract {
+    /// Every contract, in declaration order; the skills doc's field table is held to it
+    /// (tests/doc_examples.rs).
+    pub const ALL: [OutputContract; 8] = [
+        OutputContract::Free,
+        OutputContract::BulletsOrEmpty,
+        OutputContract::RankedList,
+        OutputContract::FencedMarkdown,
+        OutputContract::BuildPlan,
+        OutputContract::GroundClaims,
+        OutputContract::Proposal,
+        OutputContract::Scorecard,
+    ];
 }

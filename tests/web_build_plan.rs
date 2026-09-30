@@ -131,7 +131,28 @@ async fn artifact_page_prompt_block_carries_the_run_protocol_and_trust_line() {
     );
 }
 
-const PREMISE_BODY: &str = "# Build plan — Movable
+/// ADR-0041: the findings protocol reaches the owner's copy of `PROMPT.md` before the pinned
+/// items it governs, and `plan.md` still points at the run protocol and names the Findings rule.
+#[tokio::test]
+async fn prompt_md_carries_findings_protocol_end_to_end() {
+    let (state, vault) = test_state();
+    let uri = seed(&vault, ArtifactKind::BuildPlan, PLAN_BODY);
+    let (status, body) = get(state, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    let blocks = copy_blocks(&body);
+    assert_eq!(blocks.len(), 2, "{body}");
+    let prompt = blocks[0];
+    let ask = prompt.find("(c) ask-user — ").expect("the ask-user clause");
+    let pinned = prompt.find("## PINNED").expect("the PINNED section");
+    assert!(ask < pinned, "{prompt}");
+    assert!(
+        blocks[1].contains("Rules: PROMPT.md (How to run this, Findings, PINNED, Fence)"),
+        "{}",
+        blocks[1]
+    );
+}
+
+const PREMISE_BODY: &str ="# Build plan — Movable
 _quick · unaudited · m · 2026-09-28 21:40 · 0 capstone turn(s) excluded from evidence · consulted: none · sources: none · audit: none_
 _gates: premises 1 · tasks 1_
 
