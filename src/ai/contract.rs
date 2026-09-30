@@ -497,7 +497,7 @@ pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation
             if text.is_empty() {
                 return Err(Violation::Empty);
             }
-            let (file, evidence) = skill_draft_parts(text)?;
+            let (file, evidence) = split_skill_draft(text)?;
             check_drafted_skill(&file).map_err(Violation::NotASkillFile)?;
             let quotes = evidence_quotes(&evidence);
             if quotes.is_empty() {
@@ -531,7 +531,7 @@ const DRAFTABLE_CONTRACTS: [OutputContract; 4] = [
 /// Split a make-skill answer into the skill file inside its `~~~skill` fence and the text after
 /// the `## Evidence` heading. The fence closes at the last bare `~~~` line before that heading,
 /// so a stray tilde line inside the drafted prompt cannot cut it short.
-fn skill_draft_parts(text: &str) -> Result<(String, String), Violation> {
+pub fn split_skill_draft(text: &str) -> Result<(String, String), Violation> {
     let lines: Vec<&str> = text.lines().collect();
     let is_open = |l: &str| {
         l.trim()

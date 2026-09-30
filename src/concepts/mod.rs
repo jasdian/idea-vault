@@ -6,6 +6,7 @@ pub mod audit;
 pub mod build_plan;
 pub mod coverage;
 pub mod knowledge;
+pub mod make_skill;
 pub mod skills;
 pub mod swarm;
 pub mod workflows;
