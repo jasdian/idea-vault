@@ -2320,3 +2320,127 @@ async fn run_workflow_replay_is_idempotent() {
     .await;
     assert_eq!(reused["error"]["code"], -32602, "{reused}");
 }
+
+/// A distiller answer `validate(SkillDraft)` accepts, quoting the owner turn
+/// [`distillable_idea`] adds.
+const DISTILL_ANSWER: &str = "~~~skill\n---\nname: hostile-regulator\ndescription: \"Attack an idea as a regulator who wants it dead.\"\nstage: attack\n---\n\nAssume a regulator hates the idea below and list its first rules.\n~~~\n\n## Evidence\n- \"assume a regulator hates it\"\n";
+
+/// An in-discussion idea with the two owner turns and one move a distil needs (ADR-0042).
+async fn distillable_idea(app: &Router, session: &str, vault_dir: &std::path::Path) -> String {
+    let slug = create_in_discussion(app, session, vault_dir).await;
+    idea_vault::vault::store::append_turn(vault_dir, &slug, "assistant (skill: premortem)", "1. x")
+        .unwrap();
+    idea_vault::vault::store::append_turn(
+        vault_dir,
+        &slug,
+        "user",
+        "now assume a regulator hates it",
+    )
+    .unwrap();
+    slug
+}
+
+fn skill_drafts(vault_dir: &std::path::Path, slug: &str) -> Vec<String> {
+    idea_vault::vault::store::read_artifacts(vault_dir, slug)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.frontmatter.kind == idea_vault::domain::ArtifactKind::SkillDraft)
+        .map(|a| a.frontmatter.slug)
+        .collect()
+}
+
+#[tokio::test]
+async fn make_skill_is_a_task_optional_tool_and_there_is_no_save_tool() {
+    let (state, _vault) = test_state();
+    let app = build_router(with_mcp_token(state, TOKEN));
+    let session = handshake(&app).await;
+    let req = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} });
+    let (_, _, body) = send(&app, mcp_request(req, Some(&session), Some(TOKEN))).await;
+    let tools = body["result"]["tools"].as_array().expect("tools array");
+    let make = tools
+        .iter()
+        .find(|t| t["name"] == "make_skill")
+        .unwrap_or_else(|| panic!("make_skill missing: {body}"));
+    assert_eq!(make["execution"]["taskSupport"], "optional", "{make}");
+    assert!(make["inputSchema"]["properties"]["idempotency_key"].is_object());
+    assert!(
+        tools
+            .iter()
+            .all(|t| !t["name"].as_str().unwrap().contains("save")),
+        "D5: saving a skill stays an owner click"
+    );
+}
+
+#[tokio::test]
+async fn make_skill_names_the_draft_artifact_and_a_retry_replays_without_a_second_call() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec![DISTILL_ANSWER.into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let app = build_router(with_mcp_token(state, TOKEN));
+    let session = handshake(&app).await;
+    let slug = distillable_idea(&app, &session, &vault_dir).await;
+    let turns = conversation_of(&vault_dir, &slug);
+    let args = json!({ "slug": slug });
+
+    let first = call_until_done(&app, &session, "make_skill", args.clone()).await;
+    assert_ne!(first["isError"], true, "{first}");
+    let drafts = skill_drafts(&vault_dir, &slug);
+    assert_eq!(drafts.len(), 1);
+    assert!(text_of(&first).contains(&drafts[0]), "{first}");
+    assert!(text_of(&first).contains("get_artifact"), "{first}");
+    assert_eq!(conversation_of(&vault_dir, &slug), turns, "no turn");
+
+    let again = call_until_done(&app, &session, "make_skill", args).await;
+    assert!(text_of(&again).starts_with(REPLAY_PREFIX), "{again}");
+    assert_eq!(mock.chat_bodies().len(), 1, "no second model call");
+    assert_eq!(skill_drafts(&vault_dir, &slug).len(), 1, "no second draft");
+}
+
+#[tokio::test]
+async fn make_skill_as_a_task_completes_with_the_draft_slug() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec![DISTILL_ANSWER.into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let app = build_router(with_mcp_token(state, TOKEN));
+    let session = handshake(&app).await;
+    let slug = distillable_idea(&app, &session, &vault_dir).await;
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+        "params": { "name": "make_skill", "arguments": { "slug": slug }, "task": {} }
+    });
+    let (_, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    assert_eq!(wait_task(&app, &session, &task_id).await, "completed");
+    let result = task_result(&app, &session, &task_id).await;
+    let drafts = skill_drafts(&vault_dir, &slug);
+    assert_eq!(drafts.len(), 1);
+    assert!(text_of(&result).contains(&drafts[0]), "{result}");
+}
+
+#[tokio::test]
+async fn make_skill_refuses_a_draft_idea_and_an_undistillable_one_before_any_call() {
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Tokens(vec![DISTILL_ANSWER.into()]),
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let app = build_router(with_mcp_token(state, TOKEN));
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let body = call_tool_body(&app, &session, "make_skill", json!({ "slug": slug })).await;
+    assert!(body["error"].is_object(), "one owner turn, no move: {body}");
+    set_state(&vault_dir, &slug, idea_vault::domain::IdeaState::Draft);
+    let body = call_tool_body(&app, &session, "make_skill", json!({ "slug": slug })).await;
+    assert!(body["error"].is_object(), "a draft idea: {body}");
+    assert!(mock.chat_bodies().is_empty());
+}
