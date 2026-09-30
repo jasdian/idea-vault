@@ -8,6 +8,7 @@
 
 use rusqlite::Connection;
 use std::path::Path;
+use std::time::Duration;
 
 use super::IndexError;
 
@@ -98,6 +99,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
 );
 "#;
 
+/// How long a statement waits on a lock held by another connection before failing with
+/// `SQLITE_BUSY` (DA-003, BE-011): a reindex write and a search read may overlap under WAL.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Open (creating if absent) the index database at `path`, enable WAL, and apply the schema.
 ///
 /// Creates the parent directory and the database file as needed. The database is a rebuildable
@@ -109,6 +114,8 @@ pub fn open_or_create(path: &Path) -> Result<Connection, IndexError> {
         }
     }
     let conn = Connection::open(path)?;
+    // Explicit rather than rusqlite's matching default, so a dependency bump cannot change it.
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     // WAL: better read/write concurrency for the server; safe for a derived index.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     apply_schema(&conn)?;
@@ -135,6 +142,16 @@ pub fn apply_schema(conn: &Connection) -> Result<(), IndexError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_or_create_waits_out_a_busy_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_or_create(&dir.path().join("index.db")).unwrap();
+        let ms: u64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(u128::from(ms), BUSY_TIMEOUT.as_millis());
+    }
 
     #[test]
     fn open_or_create_is_idempotent() {
