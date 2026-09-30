@@ -119,15 +119,28 @@ fn checked_idea_dir(vault_dir: &Path, slug: &str) -> Result<PathBuf, VaultError>
 /// never left half-written and concurrent writers to the same target cannot consume each
 /// other's temp file. The suffix keeps temp files out of every `.md`-extension scan. The temp
 /// file is fsynced before the rename and the directory after it, so a power loss right after a
-/// successful write leaves either the old file or the new one, never an empty one.
+/// successful write leaves either the old file or the new one, never an empty one. A failure
+/// before the rename removes the temp file (best effort), so retries never pile up orphans. An
+/// error from the directory fsync means the new content is already in place but not yet known to
+/// be durable; every caller rewrites the whole file, so a retry cannot apply a change twice.
 fn write_atomic(path: &Path, contents: &str) -> Result<(), VaultError> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".tmp-{}-{}", std::process::id(), n));
     let tmp = PathBuf::from(tmp);
-    write_synced(&mut fs::File::create(&tmp)?, contents.as_bytes())?;
-    fs::rename(&tmp, path)?;
+    let placed = fs::File::create(&tmp)
+        .map_err(VaultError::from)
+        .and_then(|mut file| write_synced(&mut file, contents.as_bytes()))
+        .and_then(|()| fs::rename(&tmp, path).map_err(VaultError::from));
+    if let Err(e) = placed {
+        if let Err(cleanup) = fs::remove_file(&tmp) {
+            if cleanup.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(tmp = %tmp.display(), error = %cleanup, "could not remove temp file");
+            }
+        }
+        return Err(e);
+    }
     sync_parent_dir(path)
 }
 
@@ -1191,6 +1204,21 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["idea.md".to_string()]);
         assert_eq!(read_idea(tmp.path(), "i").unwrap(), sample_idea("i"));
+    }
+
+    #[test]
+    fn atomic_fsync_failed_write_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory where the file belongs: the rename onto it fails, even as root.
+        let target = tmp.path().join("idea.md");
+        fs::create_dir(&target).unwrap();
+
+        assert!(write_atomic(&target, "new").is_err());
+        let names: Vec<String> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["idea.md".to_string()], "no *.tmp-* left behind");
     }
 
     #[test]
