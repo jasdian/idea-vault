@@ -11,8 +11,9 @@
 //! 3. **Duplicate memories** — no two facts of one idea share a title or a body, compared with
 //!    case and whitespace folded.
 //!
-//! Parse failures are findings, not errors: the report names every problem instead of stopping at
-//! the first. Only I/O failures are returned as errors. Nothing is ever written.
+//! A file that cannot be read or parsed is a finding, not an error: the report names every problem
+//! instead of stopping at the first. Only directory-level I/O failures are returned as errors.
+//! Nothing is ever written.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -141,8 +142,10 @@ fn validate_idea(vault_dir: &Path, slug: &str, dir: &Path) -> Result<Vec<Finding
         detail,
     };
 
-    let idea_findings = match frontmatter::parse_idea(&fs::read_to_string(dir.join("idea.md"))?) {
-        Err(e) => vec![finding(FindingKind::Frontmatter, "idea.md", e.to_string())],
+    let idea_findings = match read_file(&dir.join("idea.md"))
+        .and_then(|raw| frontmatter::parse_idea(&raw).map_err(|e| e.to_string()))
+    {
+        Err(problem) => vec![finding(FindingKind::Frontmatter, "idea.md", problem)],
         Ok((fm, _)) if fm.slug != slug => vec![finding(
             FindingKind::Frontmatter,
             "idea.md",
@@ -197,8 +200,10 @@ fn read_facts(memory_dir: &Path) -> Result<ParsedFacts, VaultError> {
             continue;
         };
         let file = format!("memory/{stem}.md");
-        match frontmatter::parse_memory_fact(&fs::read_to_string(&path)?) {
-            Err(e) => problems.push((file, e.to_string())),
+        match read_file(&path)
+            .and_then(|raw| frontmatter::parse_memory_fact(&raw).map_err(|e| e.to_string()))
+        {
+            Err(problem) => problems.push((file, problem)),
             Ok((fm, _)) if fm.slug != stem => problems.push((
                 file,
                 format!("slug {:?} does not match its file name", fm.slug),
@@ -213,6 +218,12 @@ fn read_facts(memory_dir: &Path) -> Result<ParsedFacts, VaultError> {
         }
     }
     Ok((facts, problems))
+}
+
+/// Read one truth file, turning a per-file failure (not UTF-8, unreadable) into the problem text
+/// of a finding, so one bad file never ends the scan.
+fn read_file(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|e| format!("unreadable: {e}"))
 }
 
 /// Both directions of the `MEMORY.md` ↔ `memory/` pointer contract. A fact whose frontmatter
@@ -410,6 +421,40 @@ created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\nBody.\n";
         assert_eq!(report.findings[0].slug, "headless");
         assert!(
             report.findings[0].detail.contains("missing"),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn validate_reports_unreadable_files_and_keeps_going() {
+        let tmp = tempfile::tempdir().unwrap();
+        idea(tmp.path(), "a");
+        fs::write(tmp.path().join("a/idea.md"), [0xff, 0xfe]).unwrap();
+        idea(tmp.path(), "b");
+        fact(tmp.path(), "b", "good", "Good", "Fine.");
+        fs::write(tmp.path().join("b/memory/latin1.md"), [0x2d, 0xe9, 0xff]).unwrap();
+        memory_md(tmp.path(), "b", &["good"]);
+        idea(tmp.path(), "c");
+        fact(tmp.path(), "c", "orphan", "Orphan", "Unlisted.");
+
+        let report = validate_vault(tmp.path()).unwrap();
+        assert_eq!(report.ideas, 3);
+        assert_eq!(
+            kinds(&report),
+            vec![
+                (FindingKind::Frontmatter, "idea.md"),
+                (FindingKind::Frontmatter, "memory/latin1.md"),
+                (FindingKind::MemoryIndex, "MEMORY.md"),
+            ]
+        );
+        assert!(
+            report.findings[0].detail.contains("unreadable"),
+            "{:?}",
+            report.findings
+        );
+        assert!(
+            report.findings[1].detail.contains("unreadable"),
             "{:?}",
             report.findings
         );

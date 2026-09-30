@@ -222,6 +222,8 @@ impl SyncAll for fs::File {
 
 /// Write `bytes` and fsync before returning, so an appended turn survives a crash or power loss
 /// right after the request that wrote it reports success. A failed fsync is the write's error.
+/// This covers appends to an existing `conversation.md` (`create_idea` writes it with the idea);
+/// the directory entry of a file created here is not fsynced.
 fn write_synced<F: Write + SyncAll>(file: &mut F, bytes: &[u8]) -> Result<(), VaultError> {
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -1145,7 +1147,7 @@ mod tests {
         let mut file = SyncRecorder::default();
         write_synced(&mut file, b"## user\nhi\n").unwrap();
         assert_eq!(file.written, b"## user\nhi\n");
-        assert_eq!(file.events.into_inner().last(), Some(&"sync_all"));
+        assert_eq!(file.events.into_inner(), vec!["write", "sync_all"]);
     }
 
     #[test]

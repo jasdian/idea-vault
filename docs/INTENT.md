@@ -19,7 +19,8 @@ validated: consecutive user turns are legitimate (ADR-0032).
   struct order, then unknown keys sorted (`cargo test frontmatter_roundtrip`).
 - A newly written `idea.md` carries a frontmatter format version; an `idea.md` without one still
   loads (`cargo test frontmatter_version`).
-- Every append to `conversation.md` is fsynced before it returns (`cargo test chat_fsync`).
+- Every append to an existing `conversation.md` is fsynced before it returns (`cargo test
+  chat_fsync`).
 - `scripts/gate.sh` runs `validate` on a temporary copy of the golden vault fixture and fails on any
   finding, and `bash scripts/gate.sh` is green.
 
