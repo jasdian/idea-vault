@@ -782,7 +782,7 @@ fn run_record(
     }
     if !stage_slugs.is_empty() {
         let links: Vec<String> = stage_slugs.iter().map(|s| format!("[[{s}]]")).collect();
-        out.push_str(&format!("\nStage artifacts: {}\n", links.join(" · ")));
+        out.push_str(&format!("\n{STAGE_ARTIFACTS_LABEL}{}\n", links.join(" · ")));
     }
     out
 }
@@ -851,6 +851,11 @@ fn staged_artifacts(
     out
 }
 
+/// The label of the line naming a run's stage artifacts as `[[slug]]` links joined by ` · ` —
+/// the last line of a workflow turn that staged any (ADR-0034), which MCP `run_workflow` reads
+/// back to return the slugs (ADR-0036).
+pub const STAGE_ARTIFACTS_LABEL: &str = "Stage artifacts: ";
+
 fn artifact_line(staged: &[Artifact]) -> String {
     if staged.is_empty() {
         return String::new();
@@ -859,7 +864,7 @@ fn artifact_line(staged: &[Artifact]) -> String {
         .iter()
         .map(|a| format!("[[{}]]", a.frontmatter.slug))
         .collect();
-    format!("\n\nStage artifacts: {}", links.join(" · "))
+    format!("\n\n{STAGE_ARTIFACTS_LABEL}{}", links.join(" · "))
 }
 
 /// The persist boundary (docs/adr/0034): only the final output becomes a turn (or, for a

@@ -1,6 +1,7 @@
 //! The tool catalog (docs/adr/0024) and the synchronous half of tool dispatch.
 //!
-//! The long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`) are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
+//! The long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`,
+//! `run_workflow`) are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
 //! with `task:{}` takes the Task lifecycle in `tasks.rs` (`enqueue_task` → `tasks/get` →
 //! `tasks/result`), while a plain `tools/call` from a Task-unaware client is routed by
 //! `call_sync` to [`super::tasks::TaskRegistry::call_sync_bounded`] — the same claim/spawn and
@@ -230,6 +231,35 @@ pub(super) fn catalog() -> Vec<Tool> {
         )
         .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
         Tool::new(
+            "list_workflows",
+            "List the workflow book: every named, deterministic staged run (name, description, \
+             use-when/avoid-when guidance, stage kinds, worst-case model calls, whether it wants \
+             attached sources, source). Pass a name to run_workflow; a capstone (ready-to-build) \
+             runs through build_plan with audited:true instead.",
+            to_schema(schema_empty()),
+        ),
+        Tool::new(
+            "run_workflow",
+            "Run one named workflow (see list_workflows) on an in-discussion idea: its stages run \
+             in a fixed order and one turn is appended and returned, with the slugs of the stage \
+             artifacts and run record it wrote (read them with get_artifact). The capstone \
+             ready-to-build is refused — use build_plan. Long-running (up to the workflow's \
+             call ceiling): prefer invoking it as a task; a plain call waits a few seconds and \
+             otherwise returns a 'still running' note — call again with the same arguments to \
+             collect it.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "name": { "type": "string", "description": "workflow name from list_workflows" },
+                    "idempotency_key": idempotency_key_schema(),
+                },
+                "required": ["slug", "name"],
+                "additionalProperties": false,
+            })),
+        )
+        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
+        Tool::new(
             "get_plan",
             "Read one build-plan version as structured JSON: its lineage, open questions (with \
              the tasks each blocks), owner-blocked tasks (with reasons and whether an answer can \
@@ -297,7 +327,7 @@ pub(super) async fn call_sync(
 ) -> Result<CallToolResult, McpError> {
     if matches!(
         name,
-        "chat" | "store_idea" | "run_skill" | "run_swarm" | "build_plan"
+        "chat" | "store_idea" | "run_skill" | "run_swarm" | "build_plan" | "run_workflow"
     ) {
         return tasks.call_sync_bounded(state, name, args).await;
     }
@@ -309,6 +339,7 @@ pub(super) async fn call_sync(
         "create_idea" => create_idea(state, &args),
         "reopen_idea" => reopen_idea(state, &args).await,
         "list_skills" => Ok(list_skills(state)),
+        "list_workflows" => Ok(list_workflows(state)),
         "get_artifact" => get_artifact(state, &args),
         "get_plan" => get_plan(state, &args),
         "answer_plan" => answer_plan(state, &args).await,
@@ -423,6 +454,31 @@ fn list_skills(state: &AppState) -> CallToolResult {
                 "use_when": s.use_when,
                 "avoid_when": s.avoid_when,
                 "source": s.source.as_str(),
+            })
+        })
+        .collect();
+    CallToolResult::success(vec![Content::text(Value::Array(payload).to_string())])
+}
+
+/// `list_workflows` (docs/adr/0036): the visible workflows of the current book, in chip order,
+/// with the worst-case call count the idea page shows before a run (ADR-0034). A capstone is
+/// listed, flagged, so a client learns it exists and that `build_plan` runs it.
+fn list_workflows(state: &AppState) -> CallToolResult {
+    let book = state.workflows.snapshot();
+    let payload: Vec<Value> = book
+        .workflows
+        .visible()
+        .map(|w| {
+            json!({
+                "name": w.name,
+                "description": w.description,
+                "use_when": w.use_when,
+                "avoid_when": w.avoid_when,
+                "stages": w.stages.iter().map(|s| s.kind().as_str()).collect::<Vec<_>>(),
+                "call_ceiling": w.call_ceiling(),
+                "needs_sources": w.needs_sources(),
+                "capstone": w.capstone,
+                "source": w.source.as_str(),
             })
         })
         .collect();
@@ -641,7 +697,7 @@ mod tests {
     #[test]
     fn catalog_is_stable_and_marks_long_running_tools_as_task_optional() {
         let tools = catalog();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
         let mut seen = std::collections::HashSet::new();
         for t in &tools {
             assert!(
@@ -652,7 +708,14 @@ mod tests {
         }
         // `Required` until ADR-0028 (a Task-unaware client could not call these at all); the
         // Task path is unchanged, the plain path is the bounded wait in `tasks.rs`.
-        for name in ["chat", "store_idea", "run_skill", "run_swarm", "build_plan"] {
+        for name in [
+            "chat",
+            "store_idea",
+            "run_skill",
+            "run_swarm",
+            "build_plan",
+            "run_workflow",
+        ] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(
                 t.task_support(),
@@ -674,6 +737,7 @@ mod tests {
             "create_idea",
             "reopen_idea",
             "list_skills",
+            "list_workflows",
             "get_artifact",
             // Deterministic plan workbench (docs/adr/0032): no model call, so no task.
             "get_plan",

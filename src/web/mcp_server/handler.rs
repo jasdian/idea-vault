@@ -49,15 +49,18 @@ impl ServerHandler for IdeaVaultMcpServer {
         )
         .with_instructions(
             "idea-vault: a localhost ideation vault. list_ideas/get_idea/get_artifact/search \
-             read the vault; list_skills reads the skill book; create_idea starts a new Draft. \
+             read the vault; list_skills and list_workflows read the skill and workflow books; \
+             create_idea starts a new Draft. \
              The foil is idea-vault's own model: a chat message is saved as the owner's turn and \
              the foil answers it, so relay the owner's words rather than arguing in their place. \
-             chat, run_skill, run_swarm, store_idea and build_plan run model turns and can take \
-             a while — prefer calling them with task:{} and polling tasks/get, then \
+             chat, run_skill, run_swarm, run_workflow, store_idea and build_plan run model turns \
+             and can take a while — prefer calling them with task:{} and polling tasks/get, then \
              tasks/result once complete. Called plainly, they wait a few seconds and otherwise \
              answer with a 'still running' note: call again with the same arguments to collect \
              the result; a retry after the result was served replays it rather than running \
-             again (pass a fresh idempotency_key to force a new run). build_plan writes a new \
+             again (pass a fresh idempotency_key to force a new run). run_workflow returns the \
+             workflow's turn and the slugs of its stage artifacts (read them with get_artifact); \
+             the ready-to-build capstone runs only through build_plan. build_plan writes a new \
              plan version; get_plan reads its open questions and owner-blocked tasks; \
              answer_plan records the owner's answers as a new version with no model call. \
              Relay the owner's own words to answer_plan; never compose them.",
