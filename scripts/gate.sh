@@ -8,7 +8,8 @@
 #                    on a branch it changed since merge-base(HEAD, main)
 #   2. invariants  — scripts/check-invariants.sh --strict (collect-all, WARN promoted)
 #   3. build       — cargo build
-#   4. tests       — cargo test, refused while PARSER_CORPUS_BLESS is set
+#   4. tests       — cargo test, then `validate` on a scratch copy of the golden vault; refused
+#                    while PARSER_CORPUS_BLESS is set
 #   5. fmt         — cargo fmt --check
 #   6. clippy      — cargo clippy --all-targets -D warnings
 #   7. honesty     — every changed fixture/snapshot, rising floor and removed or downgraded
@@ -28,7 +29,7 @@ HOOK_MARKER='# idea-vault gate pre-push hook v1'
 STEPS='1|intent|top intent block: acceptance bullets, an ADR/D token, changed since main on a branch
 2|invariants|scripts/check-invariants.sh --strict
 3|build|cargo build
-4|tests|cargo test (red first if PARSER_CORPUS_BLESS is set)
+4|tests|cargo test, then validate on a golden vault copy (red first if PARSER_CORPUS_BLESS is set)
 5|fmt|cargo fmt --check
 6|clippy|cargo clippy --all-targets -- -D warnings
 7|honesty|changed fixtures, snapshots, rising floors and removed/downgraded rules are declared; parser corpus replay'
@@ -134,6 +135,14 @@ step "4/7 tests"
 [ -z "${PARSER_CORPUS_BLESS+x}" ] ||
     fail "tests (PARSER_CORPUS_BLESS set: blessing is an ask-user change, never inside the gate)"
 cargo test --quiet || fail "cargo test"
+# The vault's own consistency check (frontmatter, MEMORY.md coverage, duplicate memories) on a
+# scratch copy of the golden vault, never on the checked-in fixture itself; any finding is red.
+golden=$(mktemp -d)
+cp -R tests/fixtures/golden-vault/. "$golden" || fail "tests (no golden vault fixture to validate)"
+echo "  validate: golden vault copy"
+IDEA_VAULT_VAULT_DIR="$golden" cargo run --quiet -- validate ||
+    fail "tests (validate found problems in the golden vault)"
+rm -rf "$golden"
 
 step "5/7 fmt"
 cargo fmt --check || fail "cargo fmt --check"

@@ -71,6 +71,13 @@ pub fn clean_tree(root: &Path) {
         &allows_rs(floor("CLIPPY_ALLOW_FLOOR")),
     );
     write(root, "tests/it.rs", "#[test]\nfn it() {}\n");
+    // Step 4 validates a scratch copy of the golden vault; the stub cargo only needs it to exist.
+    write(
+        root,
+        "tests/fixtures/golden-vault/seed/idea.md",
+        "---\ntitle: Seed\nslug: seed\nstate: draft\n\
+created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\n\nSeed.\n",
+    );
     write(root, "docker-compose.yml", COMPOSE);
     write(root, "CLAUDE.md", CLAUDE_MD);
     write(

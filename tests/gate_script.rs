@@ -296,6 +296,40 @@ fn intent_unchanged_since_main_fails_on_branch() {
 }
 
 #[test]
+fn gate_step4_runs_validate_on_a_golden_vault_copy() {
+    let repo = Repo::new();
+    let out = repo.gate(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        text(&out).contains("validate: golden vault copy"),
+        "{}",
+        text(&out)
+    );
+    let log = repo.cargo_log();
+    let calls: Vec<&str> = log.lines().collect();
+    let test = calls.iter().position(|l| l.starts_with("test"));
+    let validate = calls.iter().position(|l| l.ends_with("-- validate"));
+    assert!(
+        matches!((test, validate), (Some(t), Some(v)) if t < v),
+        "validate runs after cargo test: {log}"
+    );
+}
+
+#[test]
+fn gate_step4_fails_without_the_golden_vault_fixture() {
+    let repo = Repo::new();
+    fs::remove_dir_all(repo.root().join("tests/fixtures/golden-vault")).unwrap();
+    repo.commit("drop the fixture");
+    let out = repo.gate(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        text(&out).contains("GATE FAILED at: tests"),
+        "{}",
+        text(&out)
+    );
+}
+
+#[test]
 fn intent_freshness_skipped_on_main() {
     let repo = Repo::new();
     let out = repo.gate(&[]);
