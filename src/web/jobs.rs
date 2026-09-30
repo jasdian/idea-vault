@@ -116,6 +116,23 @@ pub fn try_claim(jobs: &Jobs, slug: &str) -> bool {
     true
 }
 
+/// Whether a job is `Running` for this idea. Non-consuming, unlike [`peek`]: a `Failed`/`Notice`
+/// slot is left for the poll that owns it, so a synchronous action that only needs "is the foil
+/// busy?" (the plan workbench's answer path, docs/adr/0032) can ask without eating an unshown
+/// outcome. A poisoned lock reads as running, so the caller refuses rather than races.
+pub fn is_running(jobs: &Jobs, slug: &str) -> bool {
+    let Ok(map) = jobs.lock() else {
+        return true;
+    };
+    matches!(
+        map.get(slug),
+        Some(Job {
+            status: JobStatus::Running,
+            ..
+        })
+    )
+}
+
 /// Spawn a claimed job's detached task with a panic backstop. Every call site already converts
 /// `work`'s own `Result` to [`mark_done`]/[`mark_failed`] internally — but if `work` itself
 /// *panics* partway through (a template render, an unexpected slice index, ...), a bare

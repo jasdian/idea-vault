@@ -1620,3 +1620,302 @@ async fn store_idea_retry_after_served_replays() {
     );
     assert_eq!(mock.chat_bodies().len(), calls, "no second store run");
 }
+
+// ---- Plan tools (docs/adr/0033 over the docs/adr/0032 workbench) ----
+
+/// A plan with a question that holds a task back: T2 depends on Q1, T3 inherits through T2.
+const WORKBENCH_PLAN: &str = "## Goal
+Ship the zone snapshot tool.
+
+## Settled
+- S1: Disproof comes before any code.
+  quote: \"the cheapest disproof before any Rust exists\"
+
+## Open questions
+- Q1: Freeze the zone snapshot at entry, or dwell on the live label?
+- Q2: Which exchange feeds the backtest data?
+
+## Plan
+- [ ] T1: Write the spec
+  touches: `SPEC.md`
+  accept: `test -s SPEC.md` → exit 0
+- [ ] T2: Build the snapshot freezer
+  depends: T1, Q1
+  touches: `src/snap.rs`
+  accept: `cargo test snap` → exit 0
+- [ ] T3: Wire the freezer into the runner
+  depends: T2
+  touches: `src/run.rs`
+  accept: `cargo test run` → exit 0
+
+## Kill criteria
+- K1: The spec cannot name a dated kill → stop
+  checked by: T1
+  gates: T2";
+
+const Q1_ANSWER: &str = "Freeze it at entry; dwell makes the backtest lie about fills.";
+
+fn plan_stems(vault_dir: &std::path::Path, slug: &str) -> Vec<String> {
+    let mut stems: Vec<String> = idea_vault::vault::store::read_artifacts(vault_dir, slug)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.frontmatter.kind == idea_vault::domain::ArtifactKind::BuildPlan)
+        .map(|a| a.frontmatter.slug)
+        .collect();
+    stems.sort();
+    stems
+}
+
+/// What a plan-tool test runs against: the router, its MCP session, the vault, the idea, the
+/// mock and a handle on the shared state (for claiming a job slot directly).
+struct PlanFixture {
+    app: Router,
+    session: String,
+    vault_dir: std::path::PathBuf,
+    slug: String,
+    mock: support::MockOllama,
+    state: idea_vault::web::state::AppState,
+}
+
+/// An in-discussion idea with the owner turn the plans quote, over a mock playing `scripts` in
+/// order.
+async fn plan_ready(scripts: Vec<ChatScript>) -> PlanFixture {
+    let mock = support::spawn_sequence(&["llama3.2"], scripts).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state.clone());
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    idea_vault::vault::store::append_turn(
+        &vault_dir,
+        &slug,
+        "user",
+        "We run the cheapest disproof before any Rust exists.",
+    )
+    .unwrap();
+    PlanFixture {
+        app,
+        session,
+        vault_dir,
+        slug,
+        mock,
+        state,
+    }
+}
+
+fn plan_tokens(text: &str) -> ChatScript {
+    ChatScript::Tokens(vec![text.to_string()])
+}
+
+/// Quick-plan the idea over MCP and return the new plan's stem.
+async fn quick_plan_over_mcp(f: &PlanFixture) -> String {
+    let built = call_until_done(&f.app, &f.session, "build_plan", json!({ "slug": f.slug })).await;
+    assert_ne!(built["isError"], true, "{built}");
+    let stems = plan_stems(&f.vault_dir, &f.slug);
+    let stem = stems.last().expect("build_plan wrote a plan").clone();
+    assert!(
+        text_of(&built).starts_with(&format!("plan {stem}")),
+        "build_plan answers with the head it wrote: {built}"
+    );
+    stem
+}
+
+#[tokio::test]
+async fn get_plan_returns_open_and_blocked_by() {
+    let f = plan_ready(vec![plan_tokens(WORKBENCH_PLAN)]).await;
+    let stem = quick_plan_over_mcp(&f).await;
+
+    let view =
+        tool_json(&call_tool(&f.app, &f.session, "get_plan", json!({ "slug": f.slug })).await);
+    assert_eq!(view["plan"], stem.as_str(), "defaults to the head: {view}");
+    assert_eq!(view["is_head"], true);
+    let q1 = view["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["id"] == "Q1")
+        .unwrap_or_else(|| panic!("Q1 is open: {view}"));
+    assert_eq!(q1["blocks"], json!(["T2"]), "{view}");
+    let t2 = view["blocked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "T2")
+        .unwrap_or_else(|| panic!("T2 is held: {view}"));
+    assert!(
+        t2["blocked_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b == "Q1"),
+        "{view}"
+    );
+
+    let by_name = tool_json(
+        &call_tool(
+            &f.app,
+            &f.session,
+            "get_plan",
+            json!({ "slug": f.slug, "plan": format!("{stem}.md") }),
+        )
+        .await,
+    );
+    assert_eq!(by_name["plan"], stem.as_str(), "a .md suffix is accepted");
+}
+
+#[tokio::test]
+async fn answer_plan_twice_same_answers_one_version() {
+    let f = plan_ready(vec![plan_tokens(WORKBENCH_PLAN)]).await;
+    let base = quick_plan_over_mcp(&f).await;
+    let calls = f.mock.chat_bodies().len();
+    let args = json!({ "slug": f.slug, "plan": base, "answers": { "Q1": Q1_ANSWER } });
+
+    let first = tool_json(&call_tool(&f.app, &f.session, "answer_plan", args.clone()).await);
+    assert_eq!(first["reused"], false, "{first}");
+    assert_eq!(first["version"], 2);
+    assert_eq!(first["revises"], base.as_str());
+    assert_eq!(first["answered"], json!(["Q1"]));
+    let conversation = conversation_of(&f.vault_dir, &f.slug);
+    assert!(
+        conversation.contains(&format!("## user\nRe Q1 ({base}): {Q1_ANSWER}")),
+        "the answer is the owner's turn: {conversation}"
+    );
+    assert!(conversation.contains("via MCP"), "{conversation}");
+
+    let again = tool_json(&call_tool(&f.app, &f.session, "answer_plan", args).await);
+    assert_eq!(again["reused"], true, "{again}");
+    assert_eq!(again["plan"], first["plan"]);
+    assert_eq!(
+        plan_stems(&f.vault_dir, &f.slug).len(),
+        2,
+        "one new version"
+    );
+    assert_eq!(
+        conversation_of(&f.vault_dir, &f.slug),
+        conversation,
+        "no new turn"
+    );
+    assert_eq!(
+        f.mock.chat_bodies().len(),
+        calls,
+        "answering makes no model call"
+    );
+}
+
+#[tokio::test]
+async fn answer_plan_on_superseded_base_names_head() {
+    let f = plan_ready(vec![plan_tokens(WORKBENCH_PLAN)]).await;
+    let base = quick_plan_over_mcp(&f).await;
+    let first = tool_json(
+        &call_tool(
+            &f.app,
+            &f.session,
+            "answer_plan",
+            json!({ "slug": f.slug, "plan": base, "answers": { "Q1": Q1_ANSWER } }),
+        )
+        .await,
+    );
+    let head = first["plan"].as_str().unwrap().to_string();
+    let before = conversation_of(&f.vault_dir, &f.slug);
+
+    let body = call_tool_body(
+        &f.app,
+        &f.session,
+        "answer_plan",
+        json!({
+            "slug": f.slug,
+            "plan": base,
+            "answers": { "Q2": "Binance spot, because its archive goes back furthest." },
+        }),
+    )
+    .await;
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("superseded") && message.contains(&head),
+        "the refusal names the head to answer on: {body}"
+    );
+    assert_eq!(
+        conversation_of(&f.vault_dir, &f.slug),
+        before,
+        "nothing written"
+    );
+    assert_eq!(plan_stems(&f.vault_dir, &f.slug).len(), 2);
+}
+
+#[tokio::test]
+async fn answer_plan_while_job_running_is_refused() {
+    let f = plan_ready(vec![plan_tokens(WORKBENCH_PLAN)]).await;
+    let base = quick_plan_over_mcp(&f).await;
+    let before = conversation_of(&f.vault_dir, &f.slug);
+    assert!(idea_vault::web::jobs::try_claim(&f.state.jobs, &f.slug));
+
+    let body = call_tool_body(
+        &f.app,
+        &f.session,
+        "answer_plan",
+        json!({ "slug": f.slug, "plan": base, "answers": { "Q1": Q1_ANSWER } }),
+    )
+    .await;
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("busy")),
+        "{body}"
+    );
+    assert_eq!(
+        conversation_of(&f.vault_dir, &f.slug),
+        before,
+        "nothing written"
+    );
+    assert_eq!(plan_stems(&f.vault_dir, &f.slug).len(), 1);
+}
+
+#[tokio::test]
+async fn build_plan_audited_as_task_writes_linked_plan() {
+    let mut scripts = vec![plan_tokens(WORKBENCH_PLAN)];
+    scripts.extend((0..4).map(|_| plan_tokens("")));
+    scripts.push(plan_tokens("- Disproof comes before any code"));
+    scripts.push(plan_tokens("F1: CONFIRMED — the owner said it"));
+    scripts.push(plan_tokens(WORKBENCH_PLAN));
+    let f = plan_ready(scripts).await;
+    let base = quick_plan_over_mcp(&f).await;
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 105, "method": "tools/call",
+        "params": {
+            "name": "build_plan",
+            "arguments": { "slug": f.slug, "audited": true },
+            "task": {}
+        }
+    });
+    let (status, _, body) = send(&f.app, mcp_request(enqueue, Some(&f.session), Some(TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a task was minted: {body}"))
+        .to_string();
+    assert_eq!(wait_task(&f.app, &f.session, &task_id).await, "completed");
+    let result = task_result(&f.app, &f.session, &task_id).await;
+    assert_ne!(result["isError"], true, "{result}");
+    assert_eq!(
+        f.mock.chat_bodies().len(),
+        8,
+        "1 quick + 5 harvesters + auditor + planner"
+    );
+
+    let stems = plan_stems(&f.vault_dir, &f.slug);
+    assert_eq!(stems.len(), 2, "{stems:?}");
+    let audited = stems.iter().find(|s| **s != base).unwrap();
+    let artifact = idea_vault::vault::store::read_artifact(&f.vault_dir, &f.slug, audited).unwrap();
+    assert_eq!(artifact.frontmatter.lens.as_deref(), Some("ready-to-build"));
+    assert_eq!(
+        artifact.frontmatter.revises.as_deref(),
+        Some(base.as_str()),
+        "the audited run revises the head"
+    );
+    assert_eq!(artifact.frontmatter.version, Some(2));
+    assert!(
+        text_of(&result).starts_with(&format!("plan {audited}")),
+        "{result}"
+    );
+}

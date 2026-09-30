@@ -1,6 +1,6 @@
 //! The tool catalog (docs/adr/0024) and the synchronous half of tool dispatch.
 //!
-//! The long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`) are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
+//! The long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`) are declared [`TaskSupport::Optional`] in [`catalog`]: a `tools/call`
 //! with `task:{}` takes the Task lifecycle in `tasks.rs` (`enqueue_task` → `tasks/get` →
 //! `tasks/result`), while a plain `tools/call` from a Task-unaware client is routed by
 //! `call_sync` to [`super::tasks::TaskRegistry::call_sync_bounded`] — the same claim/spawn and
@@ -19,10 +19,15 @@ use rmcp::model::{CallToolResult, Content, JsonObject, TaskSupport, Tool, ToolEx
 use rmcp::ErrorData as McpError;
 use serde_json::{json, Value};
 
+use chrono::Utc;
+
+use crate::concepts::build_plan::workbench::{self, AnswerChannel, AnswerRequest, WorkbenchError};
 use crate::index::{self, queries};
 use crate::vault::{store, VaultError};
+use crate::web::jobs;
 use crate::web::routes::ideas::create_idea_core;
-use crate::web::routes::memory::reopen_idea_core;
+use crate::web::routes::memory::{guard_discussion_state, reopen_idea_core};
+use crate::web::routes::{reindex_logged, scoped_llm};
 use crate::web::state::AppState;
 
 use super::tasks::TaskRegistry;
@@ -200,9 +205,75 @@ pub(super) fn catalog() -> Vec<Tool> {
         )
         .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
         Tool::new(
+            "build_plan",
+            "Build (or re-build) the idea's plan: the build-prompt capstone, or with audited:true \
+             the ready-to-build workflow (fan-out, audit, then plan). Each run is a new version \
+             linked to the current plan, carrying the owner's earlier answers forward. Returns \
+             the plan's open questions and owner-blocked tasks — answer them with answer_plan. \
+             Long-running: prefer invoking it as a task; a plain call waits a few seconds and \
+             otherwise returns a 'still running' note — call again with the same arguments to \
+             collect it.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "audited": {
+                        "type": "boolean",
+                        "description": "run the audited ready-to-build workflow instead of the \
+                                        quick capstone (default false)",
+                    },
+                    "idempotency_key": idempotency_key_schema(),
+                },
+                "required": ["slug"],
+                "additionalProperties": false,
+            })),
+        )
+        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
+        Tool::new(
+            "get_plan",
+            "Read one build-plan version as structured JSON: its lineage, open questions (with \
+             the tasks each blocks), owner-blocked tasks (with reasons and whether an answer can \
+             release them) and settled items. Defaults to the newest version (the head).",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string", "description": "idea slug" },
+                    "plan": {
+                        "type": "string",
+                        "description": "plan artifact slug; omit for the head",
+                    },
+                },
+                "required": ["slug"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "answer_plan",
+            "Answer open questions (Q#) and answerable owner-blocked tasks (T#) on the head plan \
+             in the owner's own words. Each answer is saved as the owner's turn and a new plan \
+             version is made deterministically (no model call). Relay the owner's words; never \
+             compose an answer yourself. Resubmitting identical answers returns the same \
+             version.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string", "description": "idea slug" },
+                    "plan": { "type": "string", "description": "the head plan's artifact slug" },
+                    "answers": {
+                        "type": "object",
+                        "description": "id → the owner's words, e.g. {\"Q6\": \"…\", \"T4\": \"…\"}",
+                        "additionalProperties": { "type": "string" },
+                    },
+                },
+                "required": ["slug", "plan", "answers"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
             "get_artifact",
-            "Read one markdown artifact of an idea (a swarm/extract finding or synthesis, or \
-             quarantined memory facts) by its slug from get_idea's artifact list.",
+            "Read one markdown artifact of an idea (a swarm/extract finding or synthesis, a \
+             build plan version, or quarantined memory facts) by its slug from get_idea's \
+             artifact list. For a build plan's structured open questions, use get_plan.",
             to_schema(json!({
                 "type": "object",
                 "properties": {
@@ -224,7 +295,10 @@ pub(super) async fn call_sync(
     name: &str,
     args: Option<JsonObject>,
 ) -> Result<CallToolResult, McpError> {
-    if matches!(name, "chat" | "store_idea" | "run_skill" | "run_swarm") {
+    if matches!(
+        name,
+        "chat" | "store_idea" | "run_skill" | "run_swarm" | "build_plan"
+    ) {
         return tasks.call_sync_bounded(state, name, args).await;
     }
     let args = args.map(Value::Object).unwrap_or(Value::Null);
@@ -236,6 +310,8 @@ pub(super) async fn call_sync(
         "reopen_idea" => reopen_idea(state, &args).await,
         "list_skills" => Ok(list_skills(state)),
         "get_artifact" => get_artifact(state, &args),
+        "get_plan" => get_plan(state, &args),
+        "answer_plan" => answer_plan(state, &args).await,
         _ => Err(McpError::invalid_params(
             format!("unknown tool '{name}'"),
             None,
@@ -373,6 +449,119 @@ fn get_artifact(state: &AppState, args: &Value) -> Result<CallToolResult, McpErr
     }
 }
 
+/// A plan artifact slug as a client may pass it: with or without the `.md` the web links carry.
+fn plan_stem(raw: &str) -> &str {
+    raw.strip_suffix(".md").unwrap_or(raw)
+}
+
+/// `get_plan` (docs/adr/0033): the workbench's view of one plan version — the same model the
+/// artifact page renders, so an MCP client sees exactly what the owner would answer.
+fn get_plan(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
+    let slug = required_str(args, "slug")?;
+    let stem = optional_str(args, "plan")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(plan_stem);
+    match workbench::plan_view(&state.config.vault_dir, slug, stem) {
+        Ok(view) => Ok(CallToolResult::success(vec![Content::text(
+            view.to_json().to_string(),
+        )])),
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+    }
+}
+
+/// `answer_plan`'s `answers` object as the workbench takes it: `(id, words)` pairs in id order
+/// (Q# before T#, then numerically), so one submission always writes its turns in one order.
+fn plan_answers(args: &Value) -> Result<Vec<(String, String)>, McpError> {
+    let bad = || {
+        McpError::invalid_params(
+            "'answers' must be an object of id → the owner's words",
+            None,
+        )
+    };
+    let mut answers = args
+        .get("answers")
+        .and_then(Value::as_object)
+        .ok_or_else(bad)?
+        .iter()
+        .map(|(id, words)| {
+            words
+                .as_str()
+                .map(|w| (id.trim().to_ascii_uppercase(), w.to_string()))
+                .ok_or_else(bad)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    answers.sort_by_key(|(id, _)| {
+        let mut chars = id.chars();
+        let letter = chars.next();
+        (
+            letter,
+            chars.as_str().parse::<u32>().unwrap_or(u32::MAX),
+            id.clone(),
+        )
+    });
+    Ok(answers)
+}
+
+/// `answer_plan` (docs/adr/0032, docs/adr/0033): the plan workbench's deterministic answer path —
+/// no model call and no job slot, so it runs inline (on the blocking pool) like the web R46.
+/// Refused while a model job runs for the idea, since that job may be about to write the next
+/// plan version. Idempotent from the vault itself: an identical resubmission finds the version it
+/// made (`reused`), so no replay cache is needed.
+async fn answer_plan(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
+    let slug = required_str(args, "slug")?.to_string();
+    let base = plan_stem(required_str(args, "plan")?).to_string();
+    let answers = plan_answers(args)?;
+    let idea = store::read_idea(&state.config.vault_dir, &slug)
+        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+    guard_discussion_state(idea.frontmatter.state)
+        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+    if jobs::is_running(&state.jobs, &slug) {
+        return Err(McpError::invalid_params(
+            format!("idea '{slug}' is busy — the foil is thinking; answer when it finishes"),
+            None,
+        ));
+    }
+    let probe = scoped_llm(state, &slug).source_probe();
+    let vault_dir = state.config.vault_dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        workbench::answer(AnswerRequest {
+            vault_dir: &vault_dir,
+            idea_slug: &slug,
+            base: &base,
+            answers: &answers,
+            probe: &probe,
+            now: Utc::now(),
+            via: AnswerChannel::Mcp,
+        })
+    })
+    .await
+    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    match outcome {
+        Ok(v) => {
+            if !v.reused {
+                reindex_logged(state);
+            }
+            Ok(CallToolResult::success(vec![Content::text(
+                json!({
+                    "plan": v.stem,
+                    "version": v.version,
+                    "revises": v.revises,
+                    "answered": v.answered,
+                    "unblocked": v.unblocked,
+                    "still_open": v.still_open,
+                    "reused": v.reused,
+                })
+                .to_string(),
+            )]))
+        }
+        // A vault failure is the server's; everything else is the caller's input, and
+        // `Superseded`'s message names the head to answer on instead.
+        Err(WorkbenchError::Concept(e)) => Err(McpError::internal_error(e.to_string(), None)),
+        Err(e) => Err(McpError::invalid_params(e.to_string(), None)),
+    }
+}
+
 fn search(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
     let query = required_str(args, "query")?;
     let conn = state
@@ -443,7 +632,7 @@ mod tests {
     #[test]
     fn catalog_is_stable_and_marks_long_running_tools_as_task_optional() {
         let tools = catalog();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 14);
         let mut seen = std::collections::HashSet::new();
         for t in &tools {
             assert!(
@@ -454,7 +643,7 @@ mod tests {
         }
         // `Required` until ADR-0028 (a Task-unaware client could not call these at all); the
         // Task path is unchanged, the plain path is the bounded wait in `tasks.rs`.
-        for name in ["chat", "store_idea", "run_skill", "run_swarm"] {
+        for name in ["chat", "store_idea", "run_skill", "run_swarm", "build_plan"] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(
                 t.task_support(),
@@ -477,6 +666,9 @@ mod tests {
             "reopen_idea",
             "list_skills",
             "get_artifact",
+            // Deterministic plan workbench (docs/adr/0032): no model call, so no task.
+            "get_plan",
+            "answer_plan",
         ] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(
@@ -485,6 +677,16 @@ mod tests {
                 "{name} must stay synchronous"
             );
         }
+    }
+
+    #[test]
+    fn plan_answers_sorts_by_id_and_rejects_non_strings() {
+        let answers =
+            plan_answers(&json!({"answers": {"T4": "d", "q10": "c", "Q2": "b"}})).unwrap();
+        let ids: Vec<&str> = answers.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["Q2", "Q10", "T4"]);
+        assert!(plan_answers(&json!({"answers": {"Q1": 3}})).is_err());
+        assert!(plan_answers(&json!({"answers": ["Q1"]})).is_err());
     }
 
     #[test]
