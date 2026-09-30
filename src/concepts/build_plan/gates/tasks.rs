@@ -1228,6 +1228,7 @@ mod tests {
         assert_eq!(plan.open.len(), 1);
 
         let mut again = crate::concepts::build_plan::plan::parse_artifact(&render(&plan)).unwrap();
+        crate::concepts::build_plan::plan::reset_derived(&mut again);
         run_with(&mut again, conversation);
         let asked = again
             .open
