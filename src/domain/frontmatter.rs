@@ -220,16 +220,57 @@ fn emit_fence(yaml: &str, body: &str) -> String {
 /// Parse an `idea.md` document into its frontmatter and body.
 pub fn parse_idea(input: &str) -> Result<(IdeaFrontmatter, String), DomainError> {
     let (yaml, body) = split_fence(input)?;
-    let fm: IdeaFrontmatter = serde_norway::from_str(yaml)?;
+    let mut fm: IdeaFrontmatter = serde_norway::from_str(yaml)?;
+    // The format version belongs to the file, not the idea: read it off, never carry it in
+    // `extra`, where a rewrite would emit it twice.
+    check_idea_version(fm.extra.remove(VERSION_KEY))?;
     Ok((fm, body.to_string()))
 }
 
-/// Render an `idea.md` document from frontmatter and body.
+/// The `idea.md` frontmatter format version every write carries as its first key. An `idea.md`
+/// without one predates versioning and loads as-is (no migration); a later format bumps this.
+pub const IDEA_FORMAT_VERSION: u32 = 1;
+
+const VERSION_KEY: &str = "version";
+
+/// Accept a missing version (a file written before versioning) or any version up to
+/// [`IDEA_FORMAT_VERSION`]. A newer or malformed version is an error, so an older app never
+/// silently rewrites a newer file down to its own format.
+fn check_idea_version(version: Option<serde_norway::Value>) -> Result<(), DomainError> {
+    let invalid = |msg: String| DomainError::Yaml(serde::de::Error::custom(msg));
+    match version {
+        None => Ok(()),
+        Some(v) => match v.as_u64() {
+            Some(n) if n <= u64::from(IDEA_FORMAT_VERSION) => Ok(()),
+            Some(n) => Err(invalid(format!(
+                "idea.md format version {n} is newer than this idea-vault supports \
+                 ({IDEA_FORMAT_VERSION})"
+            ))),
+            None => Err(invalid(format!(
+                "idea.md format version must be a whole number, got {v:?}"
+            ))),
+        },
+    }
+}
+
+/// What `emit_idea` serializes: the format version first, then the idea's own keys.
+#[derive(serde::Serialize)]
+struct VersionedIdea<'a> {
+    version: u32,
+    #[serde(flatten)]
+    fm: &'a IdeaFrontmatter,
+}
+
+/// Render an `idea.md` document from frontmatter and body, stamped with
+/// [`IDEA_FORMAT_VERSION`].
 ///
 /// Serialization of these plain-data fields cannot fail in practice; the error is propagated
 /// anyway (defense in depth — no panic paths in library code).
 pub fn emit_idea(fm: &IdeaFrontmatter, body: &str) -> Result<String, DomainError> {
-    let yaml = serde_norway::to_string(fm)?;
+    let yaml = serde_norway::to_string(&VersionedIdea {
+        version: IDEA_FORMAT_VERSION,
+        fm,
+    })?;
     Ok(emit_fence(&yaml, body))
 }
 
@@ -361,6 +402,7 @@ Body text here.\n";
 
     /// An `idea.md` exactly as `emit_idea` writes it, carrying keys the app does not know.
     const UNKNOWN_KEYS: &str = "---\n\
+version: 1\n\
 title: Distributed idea market\n\
 slug: distributed-idea-market\n\
 state: in_discussion\n\
@@ -394,7 +436,7 @@ created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\n---\n\nB.\n";
         let (fm, body) = parse_idea(shuffled).unwrap();
         assert_eq!(
             emit_idea(&fm, &body).unwrap(),
-            "---\ntitle: T\nslug: t\nstate: draft\ntags: []\n\
+            "---\nversion: 1\ntitle: T\nslug: t\nstate: draft\ntags: []\n\
 created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\nalpha: a\nzeta: 1\n---\n\nB.\n"
         );
     }
@@ -408,6 +450,37 @@ created: 2026-07-07T10:15:00Z\nupdated: 2026-07-07T10:15:00Z\nalpha: a\nzeta: 1\
             !emitted.contains("extra"),
             "no stray key from the flattened map: {emitted}"
         );
+    }
+
+    #[test]
+    fn frontmatter_version_is_written_first_on_every_new_file() {
+        let (fm, body) = parse_idea(DOC_EXAMPLE).unwrap();
+        let emitted = emit_idea(&fm, &body).unwrap();
+        assert!(
+            emitted.starts_with(&format!("---\nversion: {IDEA_FORMAT_VERSION}\ntitle: ")),
+            "{emitted}"
+        );
+        // Read back, the version is consumed by the codec, never left in `extra`.
+        let (fm2, _) = parse_idea(&emitted).unwrap();
+        assert!(fm2.extra.is_empty());
+        assert_eq!(emit_idea(&fm2, &body).unwrap(), emitted);
+    }
+
+    #[test]
+    fn frontmatter_version_missing_still_loads() {
+        // DOC_EXAMPLE predates versioning: no `version:` key.
+        assert!(!DOC_EXAMPLE.contains("version"));
+        let (fm, _) = parse_idea(DOC_EXAMPLE).unwrap();
+        assert_eq!(fm.slug, "distributed-idea-market");
+    }
+
+    #[test]
+    fn frontmatter_version_newer_or_malformed_is_refused() {
+        let with = |v: &str| DOC_EXAMPLE.replacen("---\n", &format!("---\nversion: {v}\n"), 1);
+        assert!(parse_idea(&with("1")).is_ok());
+        let newer = parse_idea(&with("2")).unwrap_err().to_string();
+        assert!(newer.contains("newer"), "{newer}");
+        assert!(parse_idea(&with("one")).is_err());
     }
 
     #[test]
