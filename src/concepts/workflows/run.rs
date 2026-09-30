@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use chrono::Utc;
 use tokio::sync::Semaphore;
@@ -22,7 +23,7 @@ use crate::concepts::audit::{self, AuditReport, Finding};
 use crate::concepts::build_plan::finish::PlanMode;
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::skills::{
-    ask_on_contract_counted, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
+    ask_on_contract, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
 };
 use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize_brief, Brief};
 use crate::concepts::workflows::ground::{self, GroundMap, GROUND_DIVISOR};
@@ -64,11 +65,16 @@ pub struct WorkflowOutcome {
 
 /// The run's model-call account (docs/adr/0034): calls used so far against the workflow's
 /// worst-case ceiling, with the ceilings of the stages after the current one held in reserve.
-/// Atomic, so a fan-out's completion callbacks can charge it.
+///
+/// Charged by billed requests, not by steps (docs/adr/0037): the run's backend view carries
+/// [`meter`](Self::meter), so every request it sends — a retry, each Ollama tool round, one
+/// claude process — is counted as it goes out, failed ones included. A tool-using call can
+/// therefore cost more than the one call its stage's ceiling assumed, and the reserve check then
+/// funds fewer elastic rounds.
 pub(crate) struct CallBudget {
     ceilings: Vec<u32>,
     stage: AtomicUsize,
-    used: AtomicU32,
+    used: Arc<AtomicU32>,
 }
 
 impl CallBudget {
@@ -77,8 +83,13 @@ impl CallBudget {
         CallBudget {
             ceilings: ceilings.to_vec(),
             stage: AtomicUsize::new(0),
-            used: AtomicU32::new(0),
+            used: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// The counter the run's backend view charges (`LlmBackend::with_call_meter`).
+    pub(crate) fn meter(&self) -> Arc<AtomicU32> {
+        self.used.clone()
     }
 
     /// The workflow's worst case: every stage's ceiling.
@@ -90,6 +101,7 @@ impl CallBudget {
         self.used.load(Ordering::SeqCst)
     }
 
+    #[cfg(test)]
     pub(crate) fn charge(&self, calls: u32) {
         self.used.fetch_add(calls, Ordering::SeqCst);
     }
@@ -138,6 +150,37 @@ pub struct StageLog {
     pub status: StageStatus,
     pub calls: u32,
     pub detail: String,
+    /// Where the stage's calls sit in the run journal (docs/adr/0037), so the record points at
+    /// the verbatim answers instead of re-summarizing them. `None` when the run is unjournaled
+    /// or the stage made no call.
+    pub journal: Option<JournalSpan>,
+}
+
+/// A contiguous range of one run journal's call seqs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalSpan {
+    pub run_id: String,
+    pub first_seq: u32,
+    pub last_seq: u32,
+}
+
+/// The journal's run id and next call seq, when the backend view is journaled.
+fn journal_mark(llm: &LlmBackend) -> Option<(String, u32)> {
+    let w = llm.journal()?.lock().ok()?;
+    Some((w.run_id().to_string(), w.next_seq()))
+}
+
+/// The seqs recorded between two [`journal_mark`]s; `None` when nothing was.
+fn journal_span(
+    before: Option<(String, u32)>,
+    after: Option<(String, u32)>,
+) -> Option<JournalSpan> {
+    let ((run_id, first), (_, next)) = (before?, after?);
+    (next > first).then(|| JournalSpan {
+        run_id,
+        first_seq: first,
+        last_seq: next - 1,
+    })
 }
 
 /// A stage artifact held back until the run's final persist succeeds (docs/adr/0034).
@@ -466,6 +509,11 @@ pub async fn run_workflow(ctx: &RunCtx<'_>, name: &str) -> Result<WorkflowOutcom
 
     let ceilings: Vec<u32> = workflow.stages.iter().map(Stage::call_ceiling).collect();
     let calls = CallBudget::new(&ceilings);
+    let metered = ctx.llm.with_call_meter(calls.meter());
+    let ctx = &RunCtx {
+        llm: &metered,
+        ..*ctx
+    };
     let total = workflow.stages.len();
     let mut state = RunState::default();
 
@@ -482,6 +530,7 @@ pub async fn run_workflow(ctx: &RunCtx<'_>, name: &str) -> Result<WorkflowOutcom
             ))
         };
         let before = calls.used();
+        let mark = journal_mark(ctx.llm);
         let last = i + 1 == total;
         let outcome = run_stage(ctx, workflow, stage, last, &mut state, &calls, &note).await?;
         if let Some(artifact) = outcome.artifact {
@@ -492,6 +541,7 @@ pub async fn run_workflow(ctx: &RunCtx<'_>, name: &str) -> Result<WorkflowOutcom
             status: outcome.status,
             calls: calls.used() - before,
             detail: outcome.detail,
+            journal: journal_span(mark, journal_mark(ctx.llm)),
         });
     }
 
@@ -528,7 +578,6 @@ async fn run_stage(
                 })
                 .collect();
             let on_done = |done: usize, of: usize, angle: &str| {
-                calls.charge(1);
                 note(&format!("fanned out {done}/{of} {angle}"));
             };
             let results = fan_out(ctx.llm, ctx.sem, registry, tasks, &on_done).await;
@@ -608,11 +657,8 @@ async fn run_stage(
             };
             let prompt = build_prompt(registry, &task)?;
             let llm = ctx.llm.for_role(step.role.as_str());
-            match ask_on_contract_counted(&llm, ctx.sem, prompt, contract, label, ctx.progress)
-                .await
-            {
-                Ok((answer, n)) => {
-                    calls.charge(n);
+            match ask_on_contract(&llm, ctx.sem, prompt, contract, label, ctx.progress).await {
+                Ok((answer, _)) => {
                     if last {
                         state.output = answer;
                     } else {
@@ -625,7 +671,6 @@ async fn run_stage(
                 Err(e) if last => Err(e),
                 Err(ConceptError::SemaphoreClosed) => Err(ConceptError::SemaphoreClosed),
                 Err(e) => {
-                    calls.charge(1);
                     tracing::warn!(
                         workflow = %workflow.name,
                         step = label,
@@ -666,9 +711,6 @@ async fn run_stage(
                 ctx.budget,
             )
             .await?;
-            if !findings.is_empty() {
-                calls.charge(1);
-            }
             let detail = format!(
                 "{} findings · {}",
                 findings.len(),
@@ -694,7 +736,6 @@ async fn run_stage(
             };
             let synthesis =
                 synthesize_brief(ctx.llm, ctx.sem, registry, &brief, ctx.budget).await?;
-            calls.charge(1);
             let (synthesis, detail) = match &verdict {
                 Some(v) => {
                     let (kept, dropped) =
@@ -722,7 +763,7 @@ async fn run_stage(
             Ok(StageOutcome::ran(detail))
         }
         Stage::Ground(spec) => {
-            let (outcome, map) = ground::run_ground(ctx, spec, calls, note).await?;
+            let (outcome, map) = ground::run_ground(ctx, spec, note).await?;
             if let Some(map) = map {
                 state.carried.push(ground::carried_block(
                     &map,
@@ -733,7 +774,7 @@ async fn run_stage(
             Ok(outcome)
         }
         Stage::Panel(p) => {
-            let run = panel::run_panel(ctx, p, &state.carried, calls, note).await?;
+            let run = panel::run_panel(ctx, p, &state.carried, note).await?;
             let labels = (1..=p.proposers.len())
                 .map(|k| format!("panel-p{k}"))
                 .collect();
@@ -753,7 +794,7 @@ async fn run_stage(
         }
         Stage::Refine(spec) => match state.findings.as_mut() {
             Some(findings) => {
-                rounds::run_refine(ctx, spec, findings, &mut state.report, calls, note).await
+                rounds::run_refine(ctx, spec, findings, &mut state.report, note).await
             }
             None => {
                 note("nothing to refine — refine skipped");
@@ -780,13 +821,20 @@ fn run_record(
         calls.ceiling()
     );
     for (i, log) in logs.iter().enumerate() {
+        let detail = match &log.journal {
+            Some(span) => format!(
+                "{} · journal {} #{}–#{}",
+                log.detail, span.run_id, span.first_seq, span.last_seq
+            ),
+            None => log.detail.clone(),
+        };
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             i + 1,
             log.kind.as_str(),
             ground::cell(&log.status.label()),
             log.calls,
-            ground::cell(&log.detail)
+            ground::cell(&detail)
         ));
     }
     if !stage_slugs.is_empty() {
@@ -1101,5 +1149,20 @@ mod tests {
         calls.enter(2);
         calls.charge(4);
         assert!(calls.can_fund(1) && !calls.can_fund(2));
+    }
+
+    #[test]
+    fn journal_span_covers_only_the_seqs_a_stage_recorded() {
+        let mark = |seq| Some(("20260930T000000000Z-workflow".to_string(), seq));
+        assert_eq!(
+            journal_span(mark(3), mark(6)),
+            Some(JournalSpan {
+                run_id: "20260930T000000000Z-workflow".into(),
+                first_seq: 3,
+                last_seq: 5,
+            })
+        );
+        assert_eq!(journal_span(mark(4), mark(4)), None, "no call, no span");
+        assert_eq!(journal_span(None, None), None, "unjournaled");
     }
 }

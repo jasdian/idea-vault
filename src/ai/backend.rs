@@ -17,15 +17,22 @@
 //! name) so one flat definitions array can route back to the right server.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use futures::StreamExt as _;
+
 use crate::ai::budget::ContextBudget;
+use crate::ai::call::{fill_slot, read_slot, CallMeta, CallUsage, MetaSlot};
 use crate::ai::claude_code::{ClaudeCodeClient, ClaudeCodeConfig};
+use crate::ai::contract::ContractOutcome;
+use crate::ai::journal::{self, CallRecord, JournalHandle, ToolRecord};
 use crate::ai::mcp::{McpClient, McpSession, McpTool};
 use crate::ai::ollama::{ChatMessage, ChatOptions, OllamaClient, TokenStream};
 use crate::ai::untrusted::{fence_untrusted, FENCE_NOTE};
 use crate::ai::{AiError, AiHealth};
+use crate::domain::OutputContract;
 use crate::mcp::{McpRegistry, McpServerConfig};
 use crate::sources::ResolvedSource;
 
@@ -172,6 +179,14 @@ pub struct LlmBackend {
     /// ([`MAX_TOOL_ROUNDS`], [`MAX_CALLS_PER_ROUND`]); narrowed per call site by
     /// [`with_tool_budget`](Self::with_tool_budget).
     tool_budget: (usize, usize),
+    /// This job's run journal (docs/adr/0037), attached by the web job layer via
+    /// [`with_journal`](Self::with_journal); `None` on the shared instance and in test rigs, whose
+    /// calls go unjournaled.
+    journal: Option<JournalHandle>,
+    /// Billed requests made through this clone, for a workflow's call budget (docs/adr/0034):
+    /// every Ollama request (each tool round included) and every claude process adds one, counted
+    /// when the request is sent, so a failed request is charged too.
+    api_meter: Option<Arc<AtomicU32>>,
 }
 
 /// Per-server cached tool list: fetch instant (TTL anchor) + the tools, keyed `name@url`.
@@ -193,7 +208,101 @@ impl LlmBackend {
             turn_dir: None,
             call_role: None,
             tool_budget: (MAX_TOOL_ROUNDS, MAX_CALLS_PER_ROUND),
+            journal: None,
+            api_meter: None,
         }
+    }
+
+    /// A per-turn view whose calls are recorded in run journal `j` (docs/adr/0037). Settings,
+    /// caches, registries and sources are shared with `self`.
+    pub fn with_journal(&self, j: JournalHandle) -> Self {
+        let mut scoped = self.clone();
+        scoped.journal = Some(j);
+        scoped
+    }
+
+    /// The run journal this view records into, if any.
+    pub fn journal(&self) -> Option<&JournalHandle> {
+        self.journal.as_ref()
+    }
+
+    /// A view that adds every billed request to `meter` (docs/adr/0034): how a workflow charges
+    /// its call budget by what the backends actually sent, tool rounds included.
+    pub fn with_call_meter(&self, meter: Arc<AtomicU32>) -> Self {
+        let mut scoped = self.clone();
+        scoped.api_meter = Some(meter);
+        scoped
+    }
+
+    /// Charge one request to the call meter, if one is attached.
+    fn count_request(&self) {
+        if let Some(meter) = &self.api_meter {
+            meter.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Record how call `meta`'s answer met `contract` in the run journal (docs/adr/0037). A no-op
+    /// for an unjournaled call.
+    pub fn record_contract(
+        &self,
+        meta: &CallMeta,
+        contract: OutputContract,
+        outcome: &ContractOutcome,
+    ) {
+        let (Some(j), Some(seq)) = (&self.journal, meta.journal_seq) else {
+            return;
+        };
+        // The contract's frontmatter spelling (`ranked_list`, …), so the journal reads like a skill.
+        let name = serde_json::to_value(contract)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        if let Ok(mut w) = j.lock() {
+            w.record_contract(seq, &name, outcome.clone());
+        }
+    }
+
+    /// The journal fields of one call that are known before it runs; `None` when unjournaled.
+    fn call_record(&self, s: &LlmSettings, messages: &[ChatMessage]) -> Option<CallRecord> {
+        self.journal.as_ref()?;
+        let request = serde_json::to_string(messages).unwrap_or_default();
+        let (backend, temperature_milli) = match s.backend {
+            LlmBackendKind::Ollama => (
+                "ollama",
+                // Thousandths, never a float in the journal (docs/adr/0037).
+                Some((s.temperature.max(0.0) * 1000.0).round() as u32),
+            ),
+            LlmBackendKind::ClaudeCode => ("claude-code", None),
+        };
+        Some(CallRecord {
+            role: self.call_role.as_deref().map(str::to_string),
+            backend: backend.to_string(),
+            model: self.model_label(s),
+            temperature_milli,
+            request_sha256: journal::sha256_hex(&request),
+            response_text: String::new(),
+            meta: CallMeta::default(),
+        })
+    }
+
+    /// Write one finished call to the journal; returns its seq.
+    fn journal_call(
+        &self,
+        record: Option<CallRecord>,
+        text: &str,
+        meta: &CallMeta,
+        tools: Vec<ToolRecord>,
+    ) -> Option<u32> {
+        let record = record?;
+        let mut w = self.journal.as_ref()?.lock().ok()?;
+        Some(w.record_call(
+            CallRecord {
+                response_text: text.to_string(),
+                meta: meta.clone(),
+                ..record
+            },
+            tools,
+        ))
     }
 
     /// A per-turn scoped view of the backend: same settings/caches/registries (shared `Arc`s),
@@ -456,7 +565,11 @@ impl LlmBackend {
 
     /// A human-facing model label for the active backend (degraded hint, meter, logs).
     pub fn model(&self) -> String {
-        let s = self.effective_settings();
+        self.model_label(&self.effective_settings())
+    }
+
+    /// [`model`](Self::model) from a caller-held settings snapshot.
+    fn model_label(&self, s: &LlmSettings) -> String {
         match s.backend {
             LlmBackendKind::Ollama => self.ollama.model().to_string(),
             LlmBackendKind::ClaudeCode => {
@@ -635,8 +748,22 @@ impl LlmBackend {
     /// any MCP server enabled, the Ollama path runs the bounded tool loop instead of a plain
     /// one-shot call.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
+        self.chat_meta(messages).await.map(|(text, _)| text)
+    }
+
+    /// [`chat`](Self::chat) plus how the call stopped and what it cost (docs/adr/0037): the stop
+    /// reason, token counts, the window sent and every billed request of a tool loop. A journaled
+    /// view also records the call, its verbatim answer and its tool rounds; the returned meta then
+    /// carries the journal seq.
+    pub async fn chat_meta(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Result<(String, CallMeta), AiError> {
+        let started = Instant::now();
         let s = self.effective_settings();
-        match s.backend {
+        let record = self.call_record(&s, &messages);
+        let mut tools: Vec<ToolRecord> = Vec::new();
+        let (text, mut meta) = match s.backend {
             LlmBackendKind::Ollama => {
                 // Cold cache: this very call refreshes the window while the prompt was assembled
                 // at the fallback budget; the next turn assembles at the real window. Accepted —
@@ -645,18 +772,37 @@ impl LlmBackend {
                 // Both notes BEFORE ollama_options, so the num_ctx floor counts them.
                 let messages = self.with_sources_note(messages);
                 let mcp_servers = self.enabled_mcp_servers();
-                if s.web_access || !mcp_servers.is_empty() || !self.turn_sources.is_empty() {
-                    let messages = with_fence_note(messages);
-                    let options = self.ollama_options(&s, &messages);
-                    self.ollama_chat_with_tools(options, messages, s.web_access, &mcp_servers)
-                        .await
-                } else {
-                    let options = self.ollama_options(&s, &messages);
-                    self.ollama.chat_with(options, messages).await
-                }
+                let (options, reply) =
+                    if s.web_access || !mcp_servers.is_empty() || !self.turn_sources.is_empty() {
+                        let messages = with_fence_note(messages);
+                        let options = self.ollama_options(&s, &messages);
+                        let reply = self
+                            .ollama_chat_with_tools(
+                                options,
+                                messages,
+                                s.web_access,
+                                &mcp_servers,
+                                &mut tools,
+                            )
+                            .await;
+                        (options, reply)
+                    } else {
+                        let options = self.ollama_options(&s, &messages);
+                        self.count_request();
+                        (options, self.ollama.chat_with(options, messages).await)
+                    };
+                let (text, mut meta) = reply?;
+                meta.num_ctx = options.num_ctx.and_then(|n| u32::try_from(n).ok());
+                (text, meta)
             }
-            LlmBackendKind::ClaudeCode => self.claude(&s).chat(messages).await,
-        }
+            LlmBackendKind::ClaudeCode => {
+                self.count_request();
+                self.claude(&s).chat_meta(messages).await?
+            }
+        };
+        meta.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        meta.journal_seq = self.journal_call(record, &text, &meta, tools);
+        Ok((text, meta))
     }
 
     /// The Ollama tool loop (ADR-0017 web tools + MCP + ADR-0021 reference sources): offer
@@ -675,13 +821,17 @@ impl LlmBackend {
     /// support ("does not support tools") falls back to the plain offline call; and every failed
     /// tool execution — web or MCP — returns as readable tool-result text the model can route
     /// around, never a turn failure.
+    ///
+    /// The returned meta sums every round (docs/adr/0037): each request is one `api_call`, and the
+    /// stop reason is the final round's. Every executed tool call is appended to `tool_log`.
     async fn ollama_chat_with_tools(
         &self,
         options: ChatOptions,
         messages: Vec<ChatMessage>,
         web_access: bool,
         mcp_servers: &[McpServerConfig],
-    ) -> Result<String, AiError> {
+        tool_log: &mut Vec<ToolRecord>,
+    ) -> Result<(String, CallMeta), AiError> {
         // Clients first, sessions second: an `McpSession` borrows its `McpClient`, so the client
         // list must be fully built (and never mutated again) before any session exists.
         let mut clients: Vec<(String, McpClient)> = Vec::new();
@@ -746,6 +896,7 @@ impl LlmBackend {
         let tools = merged_tool_definitions(web_defs.as_ref(), source_defs.as_ref(), &mcp_tools);
         if tools.as_array().is_none_or(Vec::is_empty) {
             // Web off, no sources attached, every MCP server degraded away: nothing to offer.
+            self.count_request();
             return self.ollama.chat_with(options, messages).await;
         }
 
@@ -754,10 +905,28 @@ impl LlmBackend {
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect();
 
+        let mut usage = CallUsage::default();
         let (max_rounds, max_calls) = self.tool_budget;
         for round in 0..max_rounds {
+            self.count_request();
             let msg = match self.ollama.chat_tools(options, &convo, Some(&tools)).await {
-                Ok(msg) => msg,
+                Ok((msg, meta)) => {
+                    usage += meta.usage;
+                    if msg
+                        .get("tool_calls")
+                        .and_then(|c| c.as_array())
+                        .is_none_or(Vec::is_empty)
+                    {
+                        // No (more) tool use — the content is the reply.
+                        let text = msg
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        return Ok((text, CallMeta { usage, ..meta }));
+                    }
+                    msg
+                }
                 // First round only: a model without tool support answers 400 — run the turn as
                 // a plain offline call instead of failing it.
                 Err(AiError::Backend(detail))
@@ -768,7 +937,12 @@ impl LlmBackend {
                         "tools are configured (web access and/or MCP servers) but the model \
                          does not support tool calling; falling back to a plain call"
                     );
-                    return self.ollama.chat_with(options, messages).await;
+                    // The refused round was a request too.
+                    usage.api_calls += 1;
+                    self.count_request();
+                    let (text, meta) = self.ollama.chat_with(options, messages).await?;
+                    usage += meta.usage;
+                    return Ok((text, CallMeta { usage, ..meta }));
                 }
                 Err(e) => return Err(e),
             };
@@ -778,14 +952,6 @@ impl LlmBackend {
                 .and_then(|c| c.as_array())
                 .cloned()
                 .unwrap_or_default();
-            if calls.is_empty() {
-                // No (more) tool use — the content is the reply.
-                return Ok(msg
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or_default()
-                    .to_string());
-            }
 
             convo.push(msg.clone());
             for call in calls.iter().take(max_calls) {
@@ -801,6 +967,7 @@ impl LlmBackend {
                 // `mcp__<server>__<tool>` routes to that server's live session; `source_*` is a
                 // deterministic reference-source leaf (ADR-0021); everything else is a built-in
                 // web tool. Every failure path is content, never a turn failure.
+                let mut is_error = false;
                 let result = match split_mcp_tool_name(name) {
                     Some((server, tool)) => {
                         // Lazily open this server's session on its first call (cache-hit turns
@@ -821,12 +988,17 @@ impl LlmBackend {
                             }
                         }
                         match sessions.get_mut(server) {
-                            Some(session) => session
-                                .call_tool(tool, &args)
-                                .await
-                                .unwrap_or_else(|e| format!("mcp tool error: {e}")),
+                            Some(session) => {
+                                session.call_tool(tool, &args).await.unwrap_or_else(|e| {
+                                    is_error = true;
+                                    format!("mcp tool error: {e}")
+                                })
+                            }
                             // The model invented a server, or that server is unreachable.
-                            None => format!("mcp server '{server}' is not available"),
+                            None => {
+                                is_error = true;
+                                format!("mcp server '{server}' is not available")
+                            }
                         }
                     }
                     // A hallucinated `source_*` call on an unscoped turn still answers as
@@ -836,6 +1008,13 @@ impl LlmBackend {
                     }
                     None => crate::ai::web::execute_tool(name, &args).await,
                 };
+                tool_log.push(ToolRecord {
+                    round: u32::try_from(round).unwrap_or(u32::MAX),
+                    name: name.to_string(),
+                    args_sha256: journal::sha256_hex(&args.to_string()),
+                    result_text: journal::cap_tool_result(&result),
+                    is_error,
+                });
                 // Tool output is untrusted data (ADR-0039): fenced so an injected "ignore the
                 // above" reads as quoted text, never as the owner or the system speaking.
                 convo.push(serde_json::json!({
@@ -848,26 +1027,97 @@ impl LlmBackend {
 
         // Rounds exhausted: one final call WITHOUT tools so the model must answer in prose off
         // everything it gathered.
-        let msg = self.ollama.chat_tools(options, &convo, None).await?;
-        Ok(msg
+        self.count_request();
+        let (msg, meta) = self.ollama.chat_tools(options, &convo, None).await?;
+        usage += meta.usage;
+        let text = msg
             .get("content")
             .and_then(|c| c.as_str())
             .unwrap_or_default()
-            .to_string())
+            .to_string();
+        Ok((text, CallMeta { usage, ..meta }))
     }
 
     /// Streaming completion (D11). Terminal on error; aborts its backend when dropped, so a partial
-    /// reply is never persisted.
+    /// reply is never persisted. On a journaled view the call is recorded once the stream ends
+    /// cleanly (docs/adr/0037); an error or a drop records nothing.
     pub async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<TokenStream, AiError> {
+        let started = Instant::now();
         let s = self.effective_settings();
-        match s.backend {
+        let record = self.call_record(&s, &messages);
+        let (stream, num_ctx) = match s.backend {
             LlmBackendKind::Ollama => {
                 self.refresh_ollama_ctx().await;
                 let options = self.ollama_options(&s, &messages);
-                self.ollama.chat_stream_with(options, messages).await
+                self.count_request();
+                let stream = self.ollama.chat_stream_with(options, messages).await?;
+                (stream, options.num_ctx.and_then(|n| u32::try_from(n).ok()))
             }
-            LlmBackendKind::ClaudeCode => self.claude(&s).chat_stream(messages).await,
-        }
+            LlmBackendKind::ClaudeCode => {
+                self.count_request();
+                (self.claude(&s).chat_stream(messages).await?, None)
+            }
+        };
+        let Some(record) = record else {
+            return Ok(stream);
+        };
+        let slot = stream.meta();
+        let pending = PendingCall {
+            backend: self.clone(),
+            record,
+            started,
+            num_ctx,
+            slot: slot.clone(),
+        };
+        let journaled = futures::stream::unfold(
+            (stream, String::new(), Some(pending)),
+            |(mut stream, mut text, mut pending)| async move {
+                match stream.next().await {
+                    Some(Ok(token)) => {
+                        text.push_str(&token);
+                        Some((Ok(token), (stream, text, pending)))
+                    }
+                    // Terminal: a failed call is not recorded.
+                    Some(Err(e)) => Some((Err(e), (stream, text, None))),
+                    None => {
+                        if let Some(p) = pending.take() {
+                            p.record(&text);
+                        }
+                        None
+                    }
+                }
+            },
+        )
+        .boxed();
+        Ok(TokenStream::new(journaled, slot))
+    }
+}
+
+/// A streamed call waiting for its end to be journaled.
+struct PendingCall {
+    backend: LlmBackend,
+    record: CallRecord,
+    started: Instant,
+    num_ctx: Option<u32>,
+    slot: MetaSlot,
+}
+
+impl PendingCall {
+    /// Journal the finished call and leave its seq in the stream's meta slot.
+    fn record(self, text: &str) {
+        let mut meta = read_slot(&self.slot).unwrap_or_else(|| CallMeta {
+            usage: CallUsage {
+                api_calls: 1,
+                ..CallUsage::default()
+            },
+            ..CallMeta::default()
+        });
+        meta.num_ctx = self.num_ctx;
+        meta.ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        meta.journal_seq = self
+            .backend
+            .journal_call(Some(self.record), text, &meta, Vec::new());
+        fill_slot(&self.slot, meta);
     }
 }
 

@@ -45,6 +45,7 @@ use rmcp::model::{
 use rmcp::ErrorData as McpError;
 use serde_json::Value;
 
+use crate::ai::journal::RunKind;
 use crate::concepts::build_plan::workbench;
 use crate::concepts::workflows::run::STAGE_ARTIFACTS_LABEL;
 use crate::domain::IdeaState;
@@ -52,8 +53,8 @@ use crate::vault::store;
 use crate::web::jobs::{self, Pending};
 use crate::web::routes::chat::spawn_chat_turn;
 use crate::web::routes::memory::{
-    guard_can_store, guard_skill, guard_swarm, guard_workflow, run_store_work, spawn_skill_job,
-    spawn_swarm_job, spawn_workflow_job,
+    guard_can_store, guard_skill, guard_swarm, guard_workflow, run_store_work, skill_run_kind,
+    spawn_skill_job, spawn_swarm_job, spawn_workflow_job,
 };
 use crate::web::state::AppState;
 
@@ -795,7 +796,8 @@ fn claim_and_spawn(
             }
             let task_state = state.clone();
             let task_slug = slug.to_string();
-            let abort = jobs::spawn_job(&state.jobs, slug, async move {
+            let run = crate::web::routes::open_run(state, slug, RunKind::Store);
+            let abort = jobs::spawn_job(&state.jobs, slug, run, async move {
                 match run_store_work(&task_state, &task_slug).await {
                     Ok(None) => jobs::mark_done(&task_state.jobs, &task_slug),
                     Ok(Some(notice)) => jobs::mark_notice(&task_state.jobs, &task_slug, notice),
@@ -814,7 +816,8 @@ fn claim_and_spawn(
             if !jobs::try_claim(&state.jobs, slug) {
                 return Err(busy_error(slug));
             }
-            spawn_skill_job(state, slug, skill);
+            let kind = skill_run_kind(&skill);
+            spawn_skill_job(state, slug, skill, kind);
             Ok(Some(name))
         }
         TaskKind::Swarm => {
@@ -839,14 +842,20 @@ fn claim_and_spawn(
                 if !jobs::try_claim(&state.jobs, slug) {
                     return Err(busy_error(slug));
                 }
-                spawn_workflow_job(state, slug, PLAN_WORKFLOW.to_string(), book);
+                spawn_workflow_job(
+                    state,
+                    slug,
+                    PLAN_WORKFLOW.to_string(),
+                    book,
+                    RunKind::BuildPlan,
+                );
             } else {
                 let skill = guard_skill(state, &idea, PLAN_SKILL)
                     .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
                 if !jobs::try_claim(&state.jobs, slug) {
                     return Err(busy_error(slug));
                 }
-                spawn_skill_job(state, slug, skill);
+                spawn_skill_job(state, slug, skill, RunKind::BuildPlan);
             }
             Ok(key)
         }
@@ -869,7 +878,7 @@ fn claim_and_spawn(
             if !jobs::try_claim(&state.jobs, slug) {
                 return Err(busy_error(slug));
             }
-            spawn_workflow_job(state, slug, name.clone(), book);
+            spawn_workflow_job(state, slug, name.clone(), book, RunKind::Workflow);
             Ok(Some(name))
         }
     }

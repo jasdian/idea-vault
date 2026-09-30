@@ -29,6 +29,7 @@ use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 
+use crate::ai::call::{fill_slot, meta_slot, read_slot, CallMeta, CallUsage, MetaSlot};
 use crate::ai::ollama::{ChatMessage, TokenStream};
 use crate::ai::{AiError, AiHealth};
 
@@ -357,12 +358,28 @@ impl ClaudeCodeClient {
     /// Non-streaming completion: consume [`chat_stream`](Self::chat_stream) to the end and return
     /// the concatenated text. Any stream error aborts the whole call (nothing partial returned).
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
+        self.chat_meta(messages).await.map(|(text, _)| text)
+    }
+
+    /// [`chat`](Self::chat) plus the call's [`CallMeta`] from the `result` line (docs/adr/0037):
+    /// one CLI process is one request.
+    pub async fn chat_meta(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Result<(String, CallMeta), AiError> {
         let mut stream = self.chat_stream(messages).await?;
         let mut out = String::new();
         while let Some(item) = stream.next().await {
             out.push_str(&item?);
         }
-        Ok(out)
+        let meta = read_slot(&stream.meta()).unwrap_or_else(|| CallMeta {
+            usage: CallUsage {
+                api_calls: 1,
+                ..CallUsage::default()
+            },
+            ..CallMeta::default()
+        });
+        Ok((out, meta))
     }
 
     /// Flatten the (usually single) budgeted user message into one prompt string for the CLI.
@@ -459,7 +476,10 @@ impl ClaudeCodeClient {
             .ok_or_else(|| AiError::Backend("claude stdout unavailable".into()))?;
         let lines = BufReader::new(stdout).lines();
 
+        let meta = meta_slot();
         let state = StreamState {
+            started,
+            meta: meta.clone(),
             child,
             lines,
             token_timeout: self.cfg.token_timeout,
@@ -473,7 +493,10 @@ impl ClaudeCodeClient {
             _mcp_config: mcp_guard,
         };
 
-        Ok(futures::stream::unfold(state, next_token).boxed())
+        Ok(TokenStream::new(
+            futures::stream::unfold(state, next_token).boxed(),
+            meta,
+        ))
     }
 }
 
@@ -492,6 +515,10 @@ impl Drop for TempFile {
 }
 
 struct StreamState {
+    /// When the process was spawned: the call's wall clock for its [`CallMeta`].
+    started: Instant,
+    /// Filled from the `result` line (docs/adr/0037).
+    meta: MetaSlot,
     /// Held only to keep the process alive; dropping the state kills it (`kill_on_drop`), which is
     /// how a client disconnect / done / deadline aborts the `claude` run (D11 persist-nothing).
     #[allow(dead_code)]
@@ -567,7 +594,7 @@ async fn next_token(mut st: StreamState) -> Option<(Result<String, AiError>, Str
         };
 
         let line = classify_line(&line);
-        if !st.init_checked && matches!(line, Line::Token(_) | Line::Result(_)) {
+        if !st.init_checked && matches!(line, Line::Token(_) | Line::Result { .. }) {
             return fail(
                 st,
                 AiError::Backend(
@@ -603,8 +630,22 @@ async fn next_token(mut st: StreamState) -> Option<(Result<String, AiError>, Str
             Line::ErrorResult(detail) => {
                 return fail(st, AiError::Backend(format!("claude error: {detail}")))
             }
-            Line::Result(result_text) => {
+            Line::Result {
+                text: result_text,
+                usage,
+                subtype,
+            } => {
                 st.finished = true;
+                let ms = u64::try_from(st.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                fill_slot(
+                    &st.meta,
+                    CallMeta {
+                        usage,
+                        stop_reason: subtype,
+                        ms,
+                        ..CallMeta::default()
+                    },
+                );
                 // If partial-message streaming produced nothing, fall back to the result text so
                 // the turn is never silently empty.
                 if !st.emitted_any {
@@ -628,7 +669,13 @@ enum Line {
     Init(serde_json::Value),
     Token(String),
     AuthError(String),
-    Result(Option<String>),
+    /// The terminal success event: its fallback text, what the session cost (one CLI process is
+    /// one request) and its subtype, which is the call's stop reason (docs/adr/0037).
+    Result {
+        text: Option<String>,
+        usage: CallUsage,
+        subtype: Option<String>,
+    },
     /// A terminal `result` with `is_error: true` — carries the error text (e.g. "Invalid API key ·
     /// Please run /login" for a bad/expired token) so the turn fails visibly instead of ending as
     /// a misleading empty reply.
@@ -675,10 +722,37 @@ fn classify_line(line: &str) -> Line {
             if v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
                 Line::ErrorResult(text.unwrap_or_else(|| "unknown error".into()))
             } else {
-                Line::Result(text)
+                Line::Result {
+                    text,
+                    usage: result_usage(&v),
+                    subtype: v
+                        .get("subtype")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string),
+                }
             }
         }
         _ => Line::Ignore,
+    }
+}
+
+/// The `usage` of a `result` event: prompt tokens are the fresh input plus both cache counts, since
+/// all three filled the window; a missing count stays unknown.
+fn result_usage(v: &serde_json::Value) -> CallUsage {
+    let usage = v.get("usage");
+    let count = |key: &str| usage.and_then(|u| u.get(key)).and_then(|n| n.as_u64());
+    let prompt = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|k| count(k))
+    .reduce(u64::saturating_add);
+    CallUsage {
+        prompt_tokens: prompt,
+        output_tokens: count("output_tokens"),
+        api_calls: 1,
     }
 }
 
@@ -707,7 +781,28 @@ mod tests {
     #[test]
     fn classify_result_carries_fallback_text() {
         let line = r#"{"type":"result","result":"final text"}"#;
-        assert!(matches!(classify_line(line), Line::Result(Some(t)) if t == "final text"));
+        assert!(
+            matches!(classify_line(line), Line::Result { text: Some(t), .. } if t == "final text")
+        );
+    }
+
+    #[test]
+    fn result_line_carries_usage_and_subtype() {
+        let line = r#"{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":10,"cache_creation_input_tokens":200,"cache_read_input_tokens":3000,"output_tokens":42}}"#;
+        let Line::Result { usage, subtype, .. } = classify_line(line) else {
+            panic!("a result line");
+        };
+        assert_eq!(subtype.as_deref(), Some("success"));
+        assert_eq!(usage.prompt_tokens, Some(3210));
+        assert_eq!(usage.output_tokens, Some(42));
+        assert_eq!(usage.api_calls, 1);
+
+        let bare = r#"{"type":"result","result":"ok"}"#;
+        let Line::Result { usage, subtype, .. } = classify_line(bare) else {
+            panic!("a result line");
+        };
+        assert_eq!((usage.prompt_tokens, usage.output_tokens), (None, None));
+        assert_eq!(subtype, None);
     }
 
     #[test]

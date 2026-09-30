@@ -17,6 +17,7 @@ use axum::Form;
 use chrono::Utc;
 use serde::Deserialize;
 
+use crate::ai::journal::RunKind;
 use crate::ai::ollama::ChatMessage;
 use crate::domain::{Idea, IdeaState};
 use crate::memory;
@@ -112,7 +113,8 @@ pub(crate) fn spawn_chat_turn(
     // Detached: the reply outlives this request.
     let task_state = state.clone();
     let task_slug = slug.to_string();
-    let abort = jobs::spawn_job(&state.jobs, slug, async move {
+    let run = crate::web::routes::open_run(state, slug, RunKind::Chat);
+    let abort = jobs::spawn_job(&state.jobs, slug, run, async move {
         // Phase 0: pre-emptive, best-effort compaction (auto-compact, docs/adr/0012). It runs
         // BEFORE the reply so the very turn that tripped the threshold is answered off the freshly
         // compacted context — but a compaction failure NEVER fails the turn: it is logged and the

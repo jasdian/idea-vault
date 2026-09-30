@@ -10,7 +10,8 @@ use tokio::sync::Semaphore;
 use crate::ai::budget::{
     assemble_context, related_allowance, AssembledContext, ContextBudget, ContextInput,
 };
-use crate::ai::contract;
+use crate::ai::call::CallMeta;
+use crate::ai::contract::{self, ContractOutcome};
 use crate::ai::ollama::ChatMessage;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::AgentRole;
@@ -458,11 +459,16 @@ fn plan_usable(score: Option<(usize, usize)>) -> bool {
 
 /// One model call held to an output contract (docs/adr/0023): call, validate/repair, and on a
 /// violation ask exactly ONCE more — under the same permit — with the violation read back. If the
-/// retry still misses (or fails), the best answer is kept and a warning logged: a wrong-shaped
-/// answer beats none. For [`OutputContract::BuildPlan`] a validated answer with no parsed task also
-/// counts as a violation; the first answer is then kept only on a strictly higher
-/// (tasks, settled) score and a tie goes to the retry. Used by single interactive skill calls and by a workflow's chained step;
+/// retry still misses (or fails), the best answer is kept: a wrong-shaped answer beats none. For
+/// [`OutputContract::BuildPlan`] a validated answer with no parsed task also counts as a
+/// violation; the first answer is then kept only on a strictly higher (tasks, settled) score and a
+/// tie goes to the retry. Used by single interactive skill calls and by a workflow's chained step;
 /// fan-out agents never retry (`agents::run_agent` repairs only). Callers must NOT hold a permit.
+///
+/// Truncation is a violation too (docs/adr/0037): an answer cut off at the output limit gets the
+/// one retry; a prompt that filled the window gets none, because the same window would drop the
+/// same head again. The [`ContractOutcome`] comes back with the answer and is recorded in the run
+/// journal against the call whose text was kept.
 pub(crate) async fn ask_on_contract(
     llm: &LlmBackend,
     ai_semaphore: &Semaphore,
@@ -470,24 +476,9 @@ pub(crate) async fn ask_on_contract(
     contract: OutputContract,
     label: &str,
     progress: &(dyn Fn(&str) + Sync),
-) -> Result<String, ConceptError> {
-    ask_on_contract_counted(llm, ai_semaphore, prompt, contract, label, progress)
-        .await
-        .map(|(answer, _)| answer)
-}
-
-/// [`ask_on_contract`] plus how many model calls it made (1, or 2 with the retry), so a workflow
-/// can charge its call budget exactly (docs/adr/0034).
-pub(crate) async fn ask_on_contract_counted(
-    llm: &LlmBackend,
-    ai_semaphore: &Semaphore,
-    prompt: String,
-    contract: OutputContract,
-    label: &str,
-    progress: &(dyn Fn(&str) + Sync),
-) -> Result<(String, u32), ConceptError> {
+) -> Result<(String, ContractOutcome), ConceptError> {
     let ask = |content: String| {
-        llm.chat(vec![ChatMessage {
+        llm.chat_meta(vec![ChatMessage {
             role: "user".to_string(),
             content,
         }])
@@ -496,41 +487,78 @@ pub(crate) async fn ask_on_contract_counted(
         .acquire()
         .await
         .map_err(|_| ConceptError::SemaphoreClosed)?;
-    let first = ask(prompt.clone()).await?;
+    let (first, first_meta) = ask(prompt.clone()).await?;
+    let settle = |kept: String, meta: &CallMeta, outcome: ContractOutcome| {
+        llm.record_contract(meta, contract, &outcome);
+        Ok((kept, outcome))
+    };
     let plan_contract = contract == OutputContract::BuildPlan;
     let first_score = plan_contract.then(|| plan_score(&first));
-    let violation = match contract::validate(contract, &first) {
+    let validated = contract::validate(contract, &first);
+    if first_meta.input_truncated() {
+        tracing::warn!(
+            label,
+            "the prompt filled the context window; answer kept without a retry"
+        );
+        let outcome = ContractOutcome::OffContract(
+            contract::Violation::Truncated {
+                output: first_meta.output_truncated(),
+                input: true,
+            }
+            .to_string(),
+        );
+        let kept = match validated {
+            Ok(repaired) => repaired,
+            Err(_) => first.trim().to_string(),
+        };
+        return settle(kept, &first_meta, outcome);
+    }
+    let violation = match validated {
+        _ if first_meta.output_truncated() => contract::Violation::Truncated {
+            output: true,
+            input: false,
+        },
         Ok(_) if first_score.is_some_and(|score| !plan_usable(score)) => {
             contract::Violation::NoUsablePlan
         }
-        Ok(repaired) => return Ok((repaired, 1)),
+        Ok(repaired) => {
+            let outcome = ContractOutcome::of_valid(&first, &repaired);
+            return settle(repaired, &first_meta, outcome);
+        }
         Err(violation) => violation,
     };
     progress(&format!("{label} · reshaping the answer"));
     tracing::info!(label, %violation, "contract violated; retrying once");
     let retried = ask(format!("{prompt}{}", contract::retry_note(&violation))).await;
     let first_wins = |second: &str| first_score.is_some_and(|before| before > plan_score(second));
-    let outcome = retried.as_deref().map(|r| contract::validate(contract, r));
-    if let Ok(Ok(repaired)) = &outcome {
-        let kept = if first_wins(repaired) {
-            first.trim().to_string()
+    let off = ContractOutcome::OffContract(violation.to_string());
+    if let Ok((second, meta)) = &retried {
+        let checked = if meta.output_truncated() {
+            Err(contract::Violation::Truncated {
+                output: true,
+                input: false,
+            })
         } else {
-            repaired.clone()
+            contract::validate(contract, second)
         };
-        return Ok((kept, 2));
-    }
-    tracing::warn!(
-        label,
-        ?outcome,
-        "retry did not produce an on-contract answer; keeping the best one"
-    );
-    let kept = match retried {
-        Ok(second) if !second.trim().is_empty() && !first_wins(&second) => {
-            second.trim().to_string()
+        match checked {
+            Ok(_) if first_wins(second) => {
+                return settle(first.trim().to_string(), &first_meta, off)
+            }
+            Ok(repaired) => return settle(repaired, meta, ContractOutcome::Retried),
+            Err(again) => {
+                tracing::warn!(label, %again, "retry did not produce an on-contract answer; keeping the best one")
+            }
         }
-        _ => first.trim().to_string(),
-    };
-    Ok((kept, 2))
+    } else {
+        tracing::warn!(label, "retry failed; keeping the first answer");
+    }
+    match retried {
+        Ok((second, meta)) if !second.trim().is_empty() && !first_wins(&second) => {
+            settle(second.trim().to_string(), &meta, off)
+        }
+        _ => settle(first.trim().to_string(), &first_meta, off),
+    }
     // permit released on return — before any vault write, which needs no AI slot
 }
 
@@ -642,7 +670,9 @@ pub async fn invoke(
         .prompt
         .replace("{context}", &format!("{block}{prior}{}", context.text));
     let llm = ollama.for_role(AgentRole::from(skill.role).as_str());
-    let output = ask_on_contract(
+    // The outcome is already in the run journal (docs/adr/0037); a single skill turn shows no
+    // badge of its own.
+    let (output, _) = ask_on_contract(
         &llm,
         ai_semaphore,
         prompt,

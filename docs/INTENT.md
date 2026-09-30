@@ -61,3 +61,11 @@ expectation changes are red.
   src/ai goes through `fence_untrusted`) and `no-skip-permissions` (no
   `--dangerously-skip-permissions` in src/), each with a seed in `tests/gate_invariants.rs`
   (ADR-0039); nothing removed or downgraded.
+- check-invariants catalog: one new error rule, `runs-not-truth` (no run-journal path in
+  src/index, src/memory, src/concepts or src/ai/budget.rs), with its seed in
+  `tests/gate_invariants.rs` (ADR-0037); nothing removed or downgraded.
+- tests/support/mod.rs: gains `ChatScript::Finished`, whose terminal line carries `done_reason`
+  and the eval counts (ADR-0037); existing scripts answer byte-for-byte as before.
+- concepts::workflows::rounds::tests::refine_skips_with_zero_calls_when_clean: the call budget is
+  charged by the backend's request meter instead of by `charge` calls (ADR-0037), so the test's
+  dead backend carries the budget's meter; the zero-calls assertion stays.

@@ -386,12 +386,14 @@ pub fn appendix(findings: &[Finding], report: &AuditReport, dropped: usize) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::contract::ContractOutcome;
 
     fn result(lens: &str, role: AgentRole, content: &str) -> AgentResult {
         AgentResult {
             role,
             lens: Some(lens.to_string()),
             content: content.to_string(),
+            contract: ContractOutcome::Clean,
         }
     }
 

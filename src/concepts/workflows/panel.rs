@@ -11,13 +11,13 @@
 
 use futures::future::join_all;
 
-use crate::ai::contract::{self, score_line};
+use crate::ai::contract::{self, score_line, ContractOutcome};
 use crate::concepts::agents::{run_agent, AgentResult, AgentRole, AgentTask};
 use crate::concepts::audit;
 use crate::concepts::swarm::fan_out;
 use crate::concepts::workflows::ground::cell;
 use crate::concepts::workflows::run::{
-    stage_context, CallBudget, PendingArtifact, RunCtx, StageOutcome, StageStatus,
+    stage_context, PendingArtifact, RunCtx, StageOutcome, StageStatus,
 };
 use crate::concepts::workflows::PanelStage;
 use crate::concepts::ConceptError;
@@ -349,7 +349,6 @@ pub(crate) async fn run_panel(
     ctx: &RunCtx<'_>,
     panel: &PanelStage,
     carried: &[String],
-    calls: &CallBudget,
     note: &(dyn Fn(&str) + Sync),
 ) -> Result<PanelRun, ConceptError> {
     let n = panel.proposers.len();
@@ -377,7 +376,6 @@ pub(crate) async fn run_panel(
         })
         .collect();
     let on_done = |done: usize, of: usize, _: &str| {
-        calls.charge(1);
         note(&format!("proposal {done}/{of}"));
     };
     let raw = fan_out(ctx.llm, ctx.sem, &ctx.book.skills, tasks, &on_done).await;
@@ -400,6 +398,7 @@ pub(crate) async fn run_panel(
                 format!("panel-p{}", i + 1)
             }),
             content: text.clone(),
+            contract: ContractOutcome::Clean,
         })
     };
 
@@ -445,7 +444,6 @@ pub(crate) async fn run_panel(
                 let done = &done;
                 async move {
                     let answer = run_agent(ctx.llm, ctx.sem, &ctx.book.skills, task).await;
-                    calls.charge(1);
                     let k = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     note(&format!("scoring {k}/{total}"));
                     answer

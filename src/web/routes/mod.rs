@@ -41,8 +41,26 @@ pub(crate) fn scoped_llm(state: &AppState, slug: &str) -> crate::ai::LlmBackend 
 /// The shared backend with the claude-code foil's cwd set to the idea's own folder (ADR-0039),
 /// without attaching sources: for the idea turns that deliberately run source-free (store-time
 /// extraction, compaction), so `--restricted` still confines the foil to this one idea.
+///
+/// While a job runs for `slug`, the view also records into that job's run journal
+/// (docs/adr/0037): every job scopes its backend here, so every call it makes is journaled
+/// without the concepts layer knowing a journal exists.
 pub(crate) fn idea_llm(state: &AppState, slug: &str) -> crate::ai::LlmBackend {
-    state.llm.with_turn_dir(state.config.vault_dir.join(slug))
+    let llm = state.llm.with_turn_dir(state.config.vault_dir.join(slug));
+    match crate::web::jobs::run_of(&state.jobs, slug) {
+        Some(run) => llm.with_journal(run),
+        None => llm,
+    }
+}
+
+/// Open the run journal of a job about to start on `slug` (docs/adr/0037, D39), for
+/// [`jobs::spawn_job`](crate::web::jobs::spawn_job). `None` runs it unjournaled.
+pub(crate) fn open_run(
+    state: &AppState,
+    slug: &str,
+    kind: crate::ai::journal::RunKind,
+) -> Option<crate::ai::journal::JournalHandle> {
+    crate::ai::journal::open_run(&state.config.vault_dir, slug, kind)
 }
 
 /// The related-ideas block for `slug` in at most `allowance` bytes (`memory::related`), or `""`.

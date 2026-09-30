@@ -7,6 +7,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use chrono::Utc;
 
+use crate::ai::journal::RunKind;
 use crate::concepts;
 use crate::domain::{Idea, IdeaState};
 use crate::memory;
@@ -41,7 +42,8 @@ pub async fn store_idea(
     }
     let ts = state.clone();
     let tslug = slug.clone();
-    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
+    let run = crate::web::routes::open_run(&state, &slug, RunKind::Store);
+    let abort = jobs::spawn_job(&state.jobs, &slug, run, async move {
         jobs::set_note(
             &ts.jobs,
             &tslug,
@@ -245,7 +247,8 @@ pub async fn run_skill(
     if !jobs::try_claim(&state.jobs, &slug) {
         return respond_with_transcript(&state, &slug);
     }
-    spawn_skill_job(&state, &slug, skill);
+    let kind = skill_run_kind(&skill);
+    spawn_skill_job(&state, &slug, skill, kind);
     respond_with_transcript(&state, &slug)
 }
 
@@ -267,12 +270,38 @@ pub(crate) fn guard_skill(
         .ok_or_else(|| WebError::NotFound(format!("skill: {name}")))
 }
 
-/// Spawn R6's detached skill job on an already-claimed slot (ADR-0010). The caller owns the
-/// claim, so the web route and the MCP tool can each answer a lost claim their own way (HND-6).
-pub(crate) fn spawn_skill_job(state: &AppState, slug: &str, skill: concepts::skills::Skill) {
+/// The journal kind of a skill run (docs/adr/0037): the build-plan capstone journals as a build
+/// plan, every other skill as a skill. A re-plan (R48) says so itself.
+pub(crate) fn skill_run_kind(skill: &concepts::skills::Skill) -> RunKind {
+    if skill.contract == crate::domain::OutputContract::BuildPlan {
+        RunKind::BuildPlan
+    } else {
+        RunKind::Skill
+    }
+}
+
+/// The journal kind of a workflow run: a capstone journals as a build plan.
+pub(crate) fn workflow_run_kind(book: &concepts::workflows::Book, name: &str) -> RunKind {
+    if book.workflows.get(name).is_some_and(|w| w.capstone) {
+        RunKind::BuildPlan
+    } else {
+        RunKind::Workflow
+    }
+}
+
+/// Spawn R6's detached skill job on an already-claimed slot (ADR-0010), journaled as `kind`. The
+/// caller owns the claim, so the web route and the MCP tool can each answer a lost claim their
+/// own way (HND-6).
+pub(crate) fn spawn_skill_job(
+    state: &AppState,
+    slug: &str,
+    skill: concepts::skills::Skill,
+    kind: RunKind,
+) {
     let ts = state.clone();
     let tslug = slug.to_string();
-    let abort = jobs::spawn_job(&state.jobs, slug, async move {
+    let run = crate::web::routes::open_run(state, slug, kind);
+    let abort = jobs::spawn_job(&state.jobs, slug, run, async move {
         match run_skill_work(&ts, &tslug, skill).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
@@ -399,7 +428,8 @@ pub(crate) fn spawn_swarm_job(
 ) {
     let ts = state.clone();
     let tslug = slug.to_string();
-    let abort = jobs::spawn_job(&state.jobs, slug, async move {
+    let run = crate::web::routes::open_run(state, slug, RunKind::Swarm);
+    let abort = jobs::spawn_job(&state.jobs, slug, run, async move {
         match run_swarm_work(&ts, &tslug, &skills, angles).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
@@ -422,7 +452,8 @@ pub async fn run_workflow(
     if !jobs::try_claim(&state.jobs, &slug) {
         return respond_with_transcript(&state, &slug);
     }
-    spawn_workflow_job(&state, &slug, name, book);
+    let kind = workflow_run_kind(&book, &name);
+    spawn_workflow_job(&state, &slug, name, book, kind);
     respond_with_transcript(&state, &slug)
 }
 
@@ -444,16 +475,19 @@ pub(crate) fn guard_workflow(
     Ok(book)
 }
 
-/// Spawn R22's detached workflow job on an already-claimed slot — see [`spawn_skill_job`].
+/// Spawn R22's detached workflow job on an already-claimed slot, journaled as `kind` — see
+/// [`spawn_skill_job`].
 pub(crate) fn spawn_workflow_job(
     state: &AppState,
     slug: &str,
     name: String,
     book: Arc<concepts::workflows::Book>,
+    kind: RunKind,
 ) {
     let ts = state.clone();
     let tslug = slug.to_string();
-    let abort = jobs::spawn_job(&state.jobs, slug, async move {
+    let run = crate::web::routes::open_run(state, slug, kind);
+    let abort = jobs::spawn_job(&state.jobs, slug, run, async move {
         match run_workflow_work(&ts, &tslug, &name, &book).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),

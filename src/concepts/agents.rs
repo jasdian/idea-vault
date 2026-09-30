@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use tokio::sync::Semaphore;
 
-use crate::ai::contract;
+use crate::ai::contract::{self, ContractOutcome};
 use crate::ai::ollama::ChatMessage;
 use crate::ai::{LlmBackend, RoleProfile};
 use crate::concepts::skills::SkillRegistry;
@@ -150,6 +150,10 @@ pub struct AgentResult {
     /// say which angle produced a finding.
     pub lens: Option<String>,
     pub content: String,
+    /// How the answer met its lens's output contract (docs/adr/0037) — what an off-contract badge
+    /// is rendered from. `Clean` for a result with no contract, and for one an orchestrator
+    /// assembled rather than a model wrote.
+    pub contract: ContractOutcome,
 }
 
 /// Build the full prompt for a task: role persona, then the optional skill lens hydrated with
@@ -191,24 +195,48 @@ pub async fn run_agent(
             .acquire()
             .await
             .map_err(|_| ConceptError::SemaphoreClosed)?;
-        llm.chat(vec![ChatMessage {
+        llm.chat_meta(vec![ChatMessage {
             role: "user".to_string(),
             content: prompt,
         }])
         .await?
     };
+    let (content, meta) = content;
 
     // Repair only, never retry (docs/adr/0023): a retry per fan-out agent would double the
-    // fan-out's model calls. A lens whose answer can't be repaired degrades to the raw text.
-    let content = match task.skill.as_deref().and_then(|name| registry.get(name)) {
-        Some(skill) => match contract::validate(skill.contract, &content) {
-            Ok(repaired) => repaired,
-            Err(violation) => {
-                tracing::warn!(skill = %skill.name, %violation, "agent answer off-contract; kept raw");
-                content.trim().to_string()
-            }
-        },
-        None => content.trim().to_string(),
+    // fan-out's model calls. A lens whose answer can't be repaired degrades to the raw text, and
+    // the outcome says so (docs/adr/0037).
+    let (content, outcome) = match task.skill.as_deref().and_then(|name| registry.get(name)) {
+        Some(skill) => {
+            let checked = if meta.output_truncated() {
+                Err(contract::Violation::Truncated {
+                    output: true,
+                    input: meta.input_truncated(),
+                })
+            } else if meta.input_truncated() {
+                Err(contract::Violation::Truncated {
+                    output: false,
+                    input: true,
+                })
+            } else {
+                contract::validate(skill.contract, &content)
+            };
+            let (kept, outcome) = match checked {
+                Ok(repaired) => {
+                    let outcome = ContractOutcome::of_valid(&content, &repaired);
+                    (repaired, outcome)
+                }
+                Err(violation) => {
+                    tracing::warn!(skill = %skill.name, %violation, "agent answer off-contract; kept raw");
+                    let kept = contract::validate(skill.contract, &content)
+                        .unwrap_or_else(|_| content.trim().to_string());
+                    (kept, ContractOutcome::OffContract(violation.to_string()))
+                }
+            };
+            llm.record_contract(&meta, skill.contract, &outcome);
+            (kept, outcome)
+        }
+        None => (content.trim().to_string(), ContractOutcome::Clean),
     };
     if content.is_empty() {
         tracing::warn!(role = task.role.as_str(), "agent returned empty output");
@@ -217,6 +245,7 @@ pub async fn run_agent(
         role: task.role,
         lens: task.skill,
         content,
+        contract: outcome,
     })
 }
 

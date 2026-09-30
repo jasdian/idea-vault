@@ -13,6 +13,9 @@
 //!   one API.
 //! - [`stream`] — adapts a backend's token stream into SSE events (D11).
 //! - [`budget`] — assembles a prompt within the model's context limit (D21).
+//! - [`call`] — what one model call cost and how it stopped ([`call::CallMeta`], docs/adr/0037).
+//! - [`journal`] — the per-job run journal under `vault/<slug>/.runs/` (docs/adr/0037, D39):
+//!   diagnostics only, never read back into a prompt or the index.
 //! - [`contract`] — pure output-shape checks + repair for skill answers (docs/adr/0023).
 //! - [`untrusted`] — the fence every tool result passes through before it reaches the Ollama
 //!   tool loop as a `role: "tool"` message (ADR-0039).
@@ -29,8 +32,10 @@
 
 pub mod backend;
 pub mod budget;
+pub mod call;
 pub mod claude_code;
 pub mod contract;
+pub mod journal;
 pub mod mcp;
 pub mod ollama;
 pub mod sources;

@@ -23,6 +23,42 @@ pub enum Violation {
     NoClaims,
     /// A Panel scorer's answer held no `C<i>: <0|1|2>` line.
     NoScores,
+    /// The call ran out of room (docs/adr/0037): `output` when generation hit its length limit,
+    /// so the answer's tail is missing; `input` when the prompt filled the window, so its head was
+    /// dropped. Only an output truncation earns the retry — the same window would drop the same
+    /// head again.
+    Truncated {
+        output: bool,
+        input: bool,
+    },
+}
+
+/// How one answer met its output contract (docs/adr/0023, recorded per ADR-0037 rather than only
+/// logged): valid as returned, valid after repair, valid on the one retry, or kept although it
+/// never met the contract, with the violation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", content = "violation", rename_all = "snake_case")]
+pub enum ContractOutcome {
+    Clean,
+    Repaired,
+    Retried,
+    OffContract(String),
+}
+
+impl ContractOutcome {
+    /// The outcome of a first answer that validated: `Clean` when validation kept it as the model
+    /// wrote it, `Repaired` when it had to strip or reshape something.
+    pub fn of_valid(raw: &str, validated: &str) -> Self {
+        if raw.trim() == validated {
+            ContractOutcome::Clean
+        } else {
+            ContractOutcome::Repaired
+        }
+    }
+
+    pub fn is_clean(&self) -> bool {
+        matches!(self, ContractOutcome::Clean)
+    }
 }
 
 impl std::fmt::Display for Violation {
@@ -52,6 +88,13 @@ impl std::fmt::Display for Violation {
             ),
             Violation::NoScores => f.write_str(
                 "the answer must be one line per criterion of the form C1: 0|1|2 — reason",
+            ),
+            // An input truncation is never read back to the model (it earns no retry), so its
+            // wording is the short label the run journal and the off-contract badge show.
+            Violation::Truncated { input: true, .. } => f.write_str("input truncated"),
+            Violation::Truncated { input: false, .. } => f.write_str(
+                "the answer was cut off at the output limit; answer more briefly so it ends where \
+                 you mean it to",
             ),
         }
     }

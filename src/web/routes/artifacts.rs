@@ -47,7 +47,8 @@ pub async fn run_extract(
     let ts = state.clone();
     let tslug = slug.clone();
     let want_html = form.html;
-    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
+    let run = crate::web::routes::open_run(&state, &slug, crate::ai::journal::RunKind::Extract);
+    let abort = jobs::spawn_job(&state.jobs, &slug, run, async move {
         match run_extract_work(&ts, &tslug, want_html).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),

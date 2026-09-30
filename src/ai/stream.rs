@@ -9,6 +9,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde::Deserialize;
 
+use crate::ai::call::{fill_slot, meta_slot, CallMeta, CallUsage, MetaSlot};
 use crate::ai::ollama::TokenStream;
 use crate::ai::AiError;
 
@@ -16,13 +17,51 @@ use crate::ai::AiError;
 /// is a broken peer, not a token.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
-/// One NDJSON line of Ollama's streaming `/api/chat` response — only the fields we need.
+/// One NDJSON line of Ollama's streaming `/api/chat` response — only the fields we need. The
+/// terminal (`done: true`) line also carries why generation stopped and the token counts, which
+/// become the call's [`CallMeta`] (docs/adr/0037); the non-streaming tool-round body has the same
+/// top-level shape.
 #[derive(Debug, Deserialize)]
 struct ChatChunk {
     #[serde(default)]
     message: Option<ChatChunkMessage>,
     #[serde(default)]
     done: bool,
+    #[serde(default)]
+    done_reason: Option<String>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
+}
+
+impl ChatChunk {
+    /// The meta of the one request this terminal chunk closes.
+    fn meta(&self) -> CallMeta {
+        CallMeta {
+            usage: CallUsage {
+                prompt_tokens: self.prompt_eval_count,
+                output_tokens: self.eval_count,
+                api_calls: 1,
+            },
+            stop_reason: self.done_reason.clone(),
+            ..CallMeta::default()
+        }
+    }
+}
+
+/// The [`CallMeta`] of a non-streaming `/api/chat` response body (one tool round). A body that
+/// does not parse as a chunk still counts as one request.
+pub(crate) fn meta_from_final(body: &serde_json::Value) -> CallMeta {
+    serde_json::from_value::<ChatChunk>(body.clone())
+        .map(|c| c.meta())
+        .unwrap_or_else(|_| CallMeta {
+            usage: CallUsage {
+                api_calls: 1,
+                ..CallUsage::default()
+            },
+            ..CallMeta::default()
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,7 +74,8 @@ struct ChatChunkMessage {
 ///
 /// Every await on the body is bounded by `token_timeout` (D20 hard timeout); EOF before
 /// `done: true` is a protocol error so a partial reply can never be mistaken for a complete
-/// one; error items are terminal; buffered lines are capped at [`MAX_LINE_BYTES`].
+/// one; error items are terminal; buffered lines are capped at [`MAX_LINE_BYTES`]. The terminal
+/// chunk's stop reason and token counts land in the stream's meta slot.
 pub(crate) fn ndjson_to_tokens(
     body: BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>,
     token_timeout: Duration,
@@ -45,16 +85,19 @@ pub(crate) fn ndjson_to_tokens(
         buf: Vec<u8>,
         token_timeout: Duration,
         finished: bool,
+        meta: MetaSlot,
     }
 
+    let meta = meta_slot();
     let state = StreamState {
         body,
         buf: Vec::new(),
         token_timeout,
         finished: false,
+        meta: meta.clone(),
     };
 
-    futures::stream::unfold(state, |mut st| async move {
+    let tokens = futures::stream::unfold(state, |mut st| async move {
         if st.finished {
             return None;
         }
@@ -79,6 +122,7 @@ pub(crate) fn ndjson_to_tokens(
                 };
                 if chunk.done {
                     st.finished = true;
+                    fill_slot(&st.meta, chunk.meta());
                 }
                 let content = chunk.message.map(|m| m.content).unwrap_or_default();
                 if !content.is_empty() {
@@ -125,5 +169,62 @@ pub(crate) fn ndjson_to_tokens(
             }
         }
     })
-    .boxed()
+    .boxed();
+    TokenStream::new(tokens, meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::call::read_slot;
+
+    fn body(lines: &str) -> BoxStream<'static, Result<bytes::Bytes, reqwest::Error>> {
+        futures::stream::iter(vec![Ok(bytes::Bytes::from(lines.to_string()))]).boxed()
+    }
+
+    #[tokio::test]
+    async fn terminal_chunk_carries_done_reason_and_eval_counts() {
+        let lines = concat!(
+            "{\"message\":{\"content\":\"Hel\"},\"done\":false}\n",
+            "{\"message\":{\"content\":\"lo\"},\"done\":false}\n",
+            "{\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"length\",",
+            "\"prompt_eval_count\":812,\"eval_count\":64}\n",
+        );
+        let mut stream = ndjson_to_tokens(body(lines), Duration::from_secs(5));
+        let slot = stream.meta();
+        assert_eq!(read_slot(&slot), None, "empty before the terminal chunk");
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            text.push_str(&item.unwrap());
+        }
+        assert_eq!(text, "Hello");
+        let meta = read_slot(&slot).expect("filled by the done chunk");
+        assert_eq!(meta.stop_reason.as_deref(), Some("length"));
+        assert_eq!(meta.usage.prompt_tokens, Some(812));
+        assert_eq!(meta.usage.output_tokens, Some(64));
+        assert_eq!(meta.usage.api_calls, 1);
+        assert!(meta.output_truncated());
+    }
+
+    #[tokio::test]
+    async fn a_stream_cut_before_done_leaves_no_meta() {
+        let mut stream = ndjson_to_tokens(
+            body("{\"message\":{\"content\":\"x\"},\"done\":false}\n"),
+            Duration::from_secs(5),
+        );
+        while stream.next().await.is_some() {}
+        assert_eq!(read_slot(&stream.meta()), None);
+    }
+
+    #[test]
+    fn a_non_streaming_body_yields_its_meta() {
+        let v = serde_json::json!({
+            "message": {"content": "x"}, "done": true, "done_reason": "stop",
+            "prompt_eval_count": 3, "eval_count": 4
+        });
+        let meta = meta_from_final(&v);
+        assert_eq!(meta.stop_reason.as_deref(), Some("stop"));
+        assert_eq!(meta.usage.prompt_tokens, Some(3));
+        assert_eq!(meta.usage.api_calls, 1);
+    }
 }

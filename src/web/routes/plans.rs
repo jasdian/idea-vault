@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Form;
 use chrono::Utc;
 
+use crate::ai::journal::RunKind;
 use crate::concepts::build_plan::lineage;
 use crate::concepts::build_plan::workbench::{
     self, AnswerChannel, AnswerRequest, PlanView, WorkbenchError,
@@ -319,12 +320,18 @@ pub async fn replan(
     if audited {
         let book = guard_workflow(&state, &idea, READY_TO_BUILD)?;
         if jobs::try_claim(&state.jobs, &slug) {
-            spawn_workflow_job(&state, &slug, READY_TO_BUILD.to_string(), book);
+            spawn_workflow_job(
+                &state,
+                &slug,
+                READY_TO_BUILD.to_string(),
+                book,
+                RunKind::Replan,
+            );
         }
     } else {
         let skill = guard_skill(&state, &idea, QUICK_PLANNER)?;
         if jobs::try_claim(&state.jobs, &slug) {
-            spawn_skill_job(&state, &slug, skill);
+            spawn_skill_job(&state, &slug, skill, RunKind::Replan);
         }
     }
     Ok(([("HX-Redirect", format!("/idea/{slug}"))], StatusCode::OK).into_response())

@@ -140,6 +140,13 @@ const SEEDS: &[Seed] = &[
             ),
         )
     }),
+    ("runs-not-truth", |r| {
+        write(
+            r,
+            "src/index/scan.rs",
+            concat!("const R: &str = \".ru", "ns\";\n"),
+        )
+    }),
     ("no-skip-permissions", |r| {
         write(
             r,

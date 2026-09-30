@@ -11,7 +11,7 @@
 //! id, swaps the rewrites in by id, and re-audits — at most `max_rounds` times, stopping as soon
 //! as nothing is refuted or uncertain.
 
-use crate::ai::contract;
+use crate::ai::contract::{self, ContractOutcome};
 use crate::concepts::agents::{run_agent, AgentResult, AgentRole, AgentTask};
 use crate::concepts::audit::{self, AuditReport, Finding, Label};
 use crate::concepts::swarm::fan_out;
@@ -147,6 +147,7 @@ impl LoopTally {
                         role,
                         lens: Some(lens.to_string()),
                         content: bullets.join("\n"),
+                        contract: ContractOutcome::Clean,
                     })
                 })
             })
@@ -225,7 +226,6 @@ pub(crate) async fn run_loop(
             .collect();
         let round = tally.rounds + 1;
         let on_done = |done: usize, of: usize, _: &str| {
-            calls.charge(1);
             note(&format!("round {round}/{} · {done}/{of}", spec.max_rounds));
         };
         let results = fan_out(ctx.llm, ctx.sem, &ctx.book.skills, tasks, &on_done).await;
@@ -360,7 +360,6 @@ pub(crate) async fn run_refine(
     spec: &RefineStage,
     findings: &mut [Finding],
     report: &mut Option<AuditReport>,
-    calls: &CallBudget,
     note: &(dyn Fn(&str) + Sync),
 ) -> Result<StageOutcome, ConceptError> {
     let mut rounds = 0;
@@ -390,7 +389,6 @@ pub(crate) async fn run_refine(
         };
         // One call, repair only: the stage's ceiling is one rewrite and one re-audit per round.
         let answer = run_agent(ctx.llm, ctx.sem, &ctx.book.skills, task).await;
-        calls.charge(1);
         let answer = match answer {
             Ok(a) => a.content,
             Err(ConceptError::SemaphoreClosed) => return Err(ConceptError::SemaphoreClosed),
@@ -421,7 +419,6 @@ pub(crate) async fn run_refine(
             )
             .await?,
         );
-        calls.charge(1);
     }
     if rounds == 0 {
         let why = if report.as_ref().is_none_or(|r| r.failed) {
@@ -460,6 +457,7 @@ mod tests {
             role: AgentRole::Critic,
             lens: None,
             content: text.into(),
+            contract: ContractOutcome::Clean,
         })
     }
 
@@ -573,7 +571,9 @@ mod tests {
     #[tokio::test]
     async fn refine_skips_with_zero_calls_when_clean() {
         use crate::ai::{LlmBackend, OllamaClient};
-        let dead = LlmBackend::ollama_only(OllamaClient::new("http://127.0.0.1:9", "m").unwrap());
+        let calls = CallBudget::new(&[2]);
+        let dead = LlmBackend::ollama_only(OllamaClient::new("http://127.0.0.1:9", "m").unwrap())
+            .with_call_meter(calls.meter());
         let sem = tokio::sync::Semaphore::new(1);
         let book = crate::concepts::workflows::Book::builtin();
         let tmp = tempfile::tempdir().unwrap();
@@ -596,7 +596,6 @@ mod tests {
             },
             max_rounds: 2,
         };
-        let calls = CallBudget::new(&[2]);
         let mut findings = vec![finding("fine")];
         for mut audited in [
             Some(report(&[Label::Confirmed])),
@@ -606,7 +605,7 @@ mod tests {
                 ..report(&[Label::Uncertain])
             }),
         ] {
-            let out = run_refine(&ctx, &spec, &mut findings, &mut audited, &calls, &|_| {})
+            let out = run_refine(&ctx, &spec, &mut findings, &mut audited, &|_| {})
                 .await
                 .unwrap();
             assert!(

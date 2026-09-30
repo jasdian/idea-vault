@@ -25,6 +25,8 @@ use std::time::Instant;
 use futures::FutureExt as _;
 use tokio::task::AbortHandle;
 
+use crate::ai::journal::{self, JournalHandle, RunOutcome};
+
 /// One idea's job slot. `Failed` and `Notice` are read once (by the next poll) then cleared.
 pub enum JobStatus {
     Running,
@@ -43,6 +45,10 @@ pub struct Job {
     /// A live one-line progress note the orchestrators advance (see [`set_note`]); surfaced by
     /// [`peek`] and rendered in the "thinking" indicator. Empty means "no specific step yet".
     pub note: String,
+    /// The running job's run journal (docs/adr/0037, D39), set by [`spawn_job`]. The slot is
+    /// where the job's outcome is decided, so it is also where the journal's `RunFinished` is
+    /// written: done, failed, cancelled or panicked.
+    pub run: Option<JournalHandle>,
 }
 
 /// Shared registry keyed by idea slug. At most one entry per idea.
@@ -84,6 +90,7 @@ pub fn try_claim_idle(jobs: &Jobs, slug: &str) -> bool {
             started: Instant::now(),
             abort: None,
             note: String::new(),
+            run: None,
         },
     );
     true
@@ -111,6 +118,7 @@ pub fn try_claim(jobs: &Jobs, slug: &str) -> bool {
             started: Instant::now(),
             abort: None,
             note: String::new(),
+            run: None,
         },
     );
     true
@@ -140,14 +148,24 @@ pub fn is_running(jobs: &Jobs, slug: &str) -> bool {
 /// restarting the process. `catch_unwind`ing the future here converts that into an honest
 /// `mark_failed`, matching what every other failure mode in this job already does. Returns the
 /// [`AbortHandle`] the caller passes to [`set_abort`], same as calling `tokio::spawn` directly.
-pub fn spawn_job<F>(jobs: &Jobs, slug: &str, work: F) -> AbortHandle
+///
+/// `run` is the job's run journal (`journal::open_run`, docs/adr/0037), parked on the slot before
+/// the task starts so every backend view the job scopes for this idea records into it
+/// ([`run_of`]); `None` runs the job unjournaled.
+pub fn spawn_job<F>(jobs: &Jobs, slug: &str, run: Option<JournalHandle>, work: F) -> AbortHandle
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    if let Ok(mut map) = jobs.lock() {
+        if let Some(job) = map.get_mut(slug) {
+            job.run = run;
+        }
+    }
     let jobs = jobs.clone();
     let slug = slug.to_string();
     let handle = tokio::spawn(async move {
         if AssertUnwindSafe(work).catch_unwind().await.is_err() {
+            journal::finish(run_of(&jobs, &slug).as_ref(), RunOutcome::Panicked);
             mark_failed(
                 &jobs,
                 &slug,
@@ -171,6 +189,20 @@ pub fn set_abort(jobs: &Jobs, slug: &str, abort: AbortHandle) {
     }
 }
 
+/// The running job's run journal for this idea, if it has one: how `web::routes::idea_llm`
+/// scopes a job's backend view to it.
+pub fn run_of(jobs: &Jobs, slug: &str) -> Option<JournalHandle> {
+    let map = jobs.lock().ok()?;
+    match map.get(slug) {
+        Some(Job {
+            status: JobStatus::Running,
+            run,
+            ..
+        }) => run.clone(),
+        _ => None,
+    }
+}
+
 /// Advance the running job's live progress note (e.g. "swarm · converging 4 findings"). A no-op if
 /// the slot is gone, so an orchestrator reporting after cancellation/completion writes nothing.
 pub fn set_note(jobs: &Jobs, slug: &str, note: &str) {
@@ -190,9 +222,11 @@ pub fn cancel(jobs: &Jobs, slug: &str) -> bool {
     };
     match map.remove(slug) {
         Some(job) => {
+            drop(map);
             if let Some(handle) = job.abort {
                 handle.abort();
             }
+            journal::finish(job.run.as_ref(), RunOutcome::Cancelled);
             true
         }
         None => false,
@@ -201,14 +235,24 @@ pub fn cancel(jobs: &Jobs, slug: &str) -> bool {
 
 /// The job finished successfully — clear the slot (the result is already on disk).
 pub fn mark_done(jobs: &Jobs, slug: &str) {
-    if let Ok(mut map) = jobs.lock() {
-        map.remove(slug);
+    let old = jobs.lock().ok().and_then(|mut map| map.remove(slug));
+    finish_run(old, RunOutcome::Done);
+}
+
+/// Write the ending of the replaced slot's run journal, if it had one. Called with the jobs lock
+/// released: a journal write is file I/O.
+fn finish_run(old: Option<Job>, outcome: RunOutcome) {
+    if let Some(job) = old {
+        journal::finish(job.run.as_ref(), outcome);
     }
 }
 
 /// The job failed — keep the message so the next poll can show it, then it's cleared.
 pub fn mark_failed(jobs: &Jobs, slug: &str, message: String) {
-    if let Ok(mut map) = jobs.lock() {
+    let outcome = RunOutcome::Failed {
+        message: message.clone(),
+    };
+    let old = jobs.lock().ok().and_then(|mut map| {
         map.insert(
             slug.to_string(),
             Job {
@@ -216,15 +260,17 @@ pub fn mark_failed(jobs: &Jobs, slug: &str, message: String) {
                 started: Instant::now(),
                 abort: None,
                 note: String::new(),
+                run: None,
             },
-        );
-    }
+        )
+    });
+    finish_run(old, outcome);
 }
 
 /// The job finished as an honest no-op — keep a neutral message so the next poll can show it,
 /// then it's cleared (same one-shot lifecycle as [`mark_failed`]).
 pub fn mark_notice(jobs: &Jobs, slug: &str, message: String) {
-    if let Ok(mut map) = jobs.lock() {
+    let old = jobs.lock().ok().and_then(|mut map| {
         map.insert(
             slug.to_string(),
             Job {
@@ -232,9 +278,11 @@ pub fn mark_notice(jobs: &Jobs, slug: &str, message: String) {
                 started: Instant::now(),
                 abort: None,
                 note: String::new(),
+                run: None,
             },
-        );
-    }
+        )
+    });
+    finish_run(old, RunOutcome::Done);
 }
 
 /// Read (and, for a failure, consume) the current job state for an idea.
@@ -364,7 +412,7 @@ mod tests {
     async fn spawn_job_catches_a_panic_and_marks_failed_instead_of_leaving_the_slot_stuck() {
         let jobs = new_registry();
         assert!(try_claim(&jobs, "i"));
-        let abort = spawn_job(&jobs, "i", async {
+        let abort = spawn_job(&jobs, "i", None, async {
             panic!("boom");
         });
         set_abort(&jobs, "i", abort);
@@ -384,6 +432,42 @@ mod tests {
         }
         // The slot is free again — a panicked job must not wedge the idea forever.
         assert!(try_claim(&jobs, "i"));
+    }
+
+    #[tokio::test]
+    async fn a_panicked_job_ends_its_run_journal_panicked() {
+        use crate::ai::journal::{open_run, read_run, runs_dir, JournalEntry, RunKind};
+        let tmp = tempfile::tempdir().unwrap();
+        let jobs = new_registry();
+        assert!(try_claim(&jobs, "i"));
+        let run = open_run(tmp.path(), "i", RunKind::Skill);
+        assert!(run.is_some());
+        spawn_job(&jobs, "i", run, async {
+            panic!("boom");
+        });
+        for _ in 0..100 {
+            if matches!(peek(&jobs, "i"), Pending::Failed(_)) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let path = std::fs::read_dir(runs_dir(tmp.path(), "i"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let entries = read_run(&path).unwrap();
+        assert!(
+            matches!(
+                entries.last(),
+                Some(JournalEntry::RunFinished {
+                    outcome: RunOutcome::Panicked,
+                    ..
+                })
+            ),
+            "{entries:?}"
+        );
     }
 
     #[test]

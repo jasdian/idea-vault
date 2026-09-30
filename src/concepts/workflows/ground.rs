@@ -15,9 +15,9 @@ use crate::ai::contract::{backtick_spans, parse_anchor, MAX_STAGE_LINES};
 use crate::ai::sources::{AnchorCheck, PathResolution, SourceProbe};
 use crate::concepts::agents::{build_prompt, AgentRole, AgentTask};
 use crate::concepts::audit;
-use crate::concepts::skills::ask_on_contract_counted;
+use crate::concepts::skills::ask_on_contract;
 use crate::concepts::workflows::run::{
-    stage_context, CallBudget, PendingArtifact, RunCtx, StageOutcome, StageStatus,
+    stage_context, PendingArtifact, RunCtx, StageOutcome, StageStatus,
 };
 use crate::concepts::ConceptError;
 use crate::domain::evidence::normalize_for_match;
@@ -667,7 +667,6 @@ fn mined_text(ctx: &RunCtx<'_>) -> Result<String, ConceptError> {
 pub(crate) async fn run_ground(
     ctx: &RunCtx<'_>,
     spec: &GroundSpec,
-    calls: &CallBudget,
     note: &(dyn Fn(&str) + Sync),
 ) -> Result<(StageOutcome, Option<GroundMap>), ConceptError> {
     let probe = ctx.llm.source_probe();
@@ -709,7 +708,7 @@ pub(crate) async fn run_ground(
         let answers = join_all(prompts.into_iter().map(|prompt| {
             let (reader_llm, done) = (&reader_llm, &done);
             async move {
-                let answer = ask_on_contract_counted(
+                let answer = ask_on_contract(
                     reader_llm,
                     ctx.sem,
                     prompt,
@@ -718,11 +717,6 @@ pub(crate) async fn run_ground(
                     &|_: &str| {},
                 )
                 .await;
-                // The one retry is charged whether or not it helped: the ceiling counts it.
-                calls.charge(match &answer {
-                    Ok((_, n)) => *n,
-                    Err(_) => 1,
-                });
                 let k = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 note(&format!("reader {k}/{readers}"));
                 answer

@@ -36,6 +36,34 @@ pub enum ChatScript {
         name: String,
         arguments: serde_json::Value,
     },
+    /// Like `Tokens`, but the terminal `done` line (or the single non-streaming body) carries
+    /// `done_reason` and the eval counts, as a real Ollama's does (docs/adr/0037).
+    Finished {
+        tokens: Vec<String>,
+        done_reason: String,
+        prompt_eval_count: u64,
+        eval_count: u64,
+    },
+}
+
+/// The terminal fields a [`ChatScript::Finished`] adds to its `done` line.
+fn finished_fields(script: &ChatScript) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    if let ChatScript::Finished {
+        done_reason,
+        prompt_eval_count,
+        eval_count,
+        ..
+    } = script
+    {
+        m.insert("done_reason".into(), serde_json::json!(done_reason));
+        m.insert(
+            "prompt_eval_count".into(),
+            serde_json::json!(prompt_eval_count),
+        );
+        m.insert("eval_count".into(), serde_json::json!(eval_count));
+    }
+    m
 }
 
 pub struct MockOllama {
@@ -288,7 +316,9 @@ async fn handle(
                 return Ok(());
             }
             let tokens = match &script {
-                ChatScript::Tokens(tokens) => Some(tokens.clone()),
+                ChatScript::Tokens(tokens) | ChatScript::Finished { tokens, .. } => {
+                    Some(tokens.clone())
+                }
                 ChatScript::TokensAfterDelay { tokens, delay_ms } => {
                     tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
                     Some(tokens.clone())
@@ -298,11 +328,15 @@ async fn handle(
                 | ChatScript::ToolCall { .. } => None,
             };
             if let Some(tokens) = tokens {
-                let payload = serde_json::json!({
+                let mut payload = serde_json::json!({
                     "message": {"role": "assistant", "content": tokens.concat()},
                     "done": true,
-                })
-                .to_string();
+                });
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(finished_fields(&script));
+                let payload = payload.to_string();
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     payload.len(),
@@ -341,20 +375,17 @@ async fn handle(
                 .await?;
                 sock.flush().await?;
             }
-            ChatScript::Tokens(tokens) => {
-                for t in &tokens {
+            ChatScript::Tokens(ref tokens) | ChatScript::Finished { ref tokens, .. } => {
+                for t in tokens {
                     sock.write_all(token_line(t).as_bytes()).await?;
                     sock.flush().await?;
                     tokio::time::sleep(Duration::from_millis(2)).await;
                 }
-                sock.write_all(
-                    format!(
-                        "{}\n",
-                        serde_json::json!({"message": {"content": ""}, "done": true})
-                    )
-                    .as_bytes(),
-                )
-                .await?;
+                let mut done = serde_json::json!({"message": {"content": ""}, "done": true});
+                done.as_object_mut()
+                    .unwrap()
+                    .extend(finished_fields(&script));
+                sock.write_all(format!("{done}\n").as_bytes()).await?;
                 sock.flush().await?;
             }
             ChatScript::StallAfter(n) => {

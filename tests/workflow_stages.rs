@@ -757,3 +757,34 @@ async fn progress_note_sequence_for_design_panel() {
     .map(|tail| format!("workflow · design-panel · {tail}"));
     assert_eq!(notes, expected, "audit is off here, so stage 3 is silent");
 }
+
+#[tokio::test]
+async fn tool_rounds_are_charged_to_the_call_budget() {
+    // Docs/adr/0037: the budget counts billed requests, so a Ground reader that spends one tool
+    // round before answering costs two calls, not one.
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path());
+    let (_src, sources) = source_tree();
+    let mut scripts = vec![
+        ChatScript::ToolCall {
+            name: "source_read".into(),
+            arguments: serde_json::json!({"source": "app", "file": "scripts/gate.sh"}),
+        },
+        tokens(READER_ONE),
+        tokens(READER_TWO),
+    ];
+    scripts.extend(panel_scripts());
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let rig = Rig::new(&mock, 1).with_sources(sources);
+
+    rig.run(tmp.path(), "design-panel").await.unwrap();
+
+    let notes = rig.notes.lock().unwrap().clone();
+    for tail in [
+        "1/4 ground: reader 1/2 · calls 2/12",
+        "1/4 ground: reader 2/2 · calls 3/12",
+    ] {
+        let want = format!("workflow · design-panel · {tail}");
+        assert!(notes.contains(&want), "{want}\n{notes:#?}");
+    }
+}

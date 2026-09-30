@@ -364,12 +364,14 @@ pub async fn swarm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::contract::ContractOutcome;
 
     fn result(role: AgentRole, content: &str) -> Option<AgentResult> {
         Some(AgentResult {
             role,
             lens: None,
             content: content.to_string(),
+            contract: ContractOutcome::Clean,
         })
     }
 

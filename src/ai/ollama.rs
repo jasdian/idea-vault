@@ -11,6 +11,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde::Deserialize;
 
+use crate::ai::call::{read_slot, CallMeta, CallUsage, MetaSlot};
 use crate::ai::AiError;
 
 /// Overall wall-clock budget for the boot/health probe (D25: boot must not hang on Ollama).
@@ -32,9 +33,38 @@ const SHOW_TIMEOUT: Duration = Duration::from_secs(5);
 /// generation — a local thinking model needs minutes of wall clock while never being "inactive".
 const TOOL_ROUND_TIMEOUT_FACTOR: u32 = 4;
 
-/// A live token stream from `/api/chat`: each item is one content chunk, in order. The stream
-/// ends after Ollama's `done: true`; an `Err` item (timeout/protocol/transport) is terminal.
-pub type TokenStream = BoxStream<'static, Result<String, AiError>>;
+/// A live token stream from `/api/chat` or the claude CLI: each item is one content chunk, in
+/// order. The stream ends after the backend's terminal event; an `Err` item
+/// (timeout/protocol/transport) is terminal. Once it has ended cleanly, [`meta`](Self::meta)
+/// holds how the call stopped and what it cost (docs/adr/0037).
+pub struct TokenStream {
+    inner: BoxStream<'static, Result<String, AiError>>,
+    meta: MetaSlot,
+}
+
+impl TokenStream {
+    /// Wrap `inner`, whose producer fills `meta` when it decodes the terminal event.
+    pub(crate) fn new(inner: BoxStream<'static, Result<String, AiError>>, meta: MetaSlot) -> Self {
+        TokenStream { inner, meta }
+    }
+
+    /// The slot this stream's [`CallMeta`](crate::ai::call::CallMeta) lands in; empty until the
+    /// terminal event, and for good after an error.
+    pub fn meta(&self) -> MetaSlot {
+        self.meta.clone()
+    }
+}
+
+impl futures::Stream for TokenStream {
+    type Item = Result<String, AiError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.poll_next_unpin(cx)
+    }
+}
 
 /// Result of probing the local Ollama server (docs/05-ai-integration.md D20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,28 +185,40 @@ impl OllamaClient {
     /// tokens; the same hard-timeout and persist-boundary guarantees apply — any stream error
     /// aborts the whole call, a partial response is never returned as if complete.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError> {
-        self.chat_with(ChatOptions::default(), messages).await
+        self.chat_with(ChatOptions::default(), messages)
+            .await
+            .map(|(text, _)| text)
     }
 
-    /// Non-streaming completion with per-call [`ChatOptions`] (runtime settings).
+    /// Non-streaming completion with per-call [`ChatOptions`] (runtime settings), plus the call's
+    /// [`CallMeta`] from the terminal chunk (docs/adr/0037). A stream that ended cleanly without
+    /// meta still counts as one request.
     pub async fn chat_with(
         &self,
         options: ChatOptions,
         messages: Vec<ChatMessage>,
-    ) -> Result<String, AiError> {
+    ) -> Result<(String, CallMeta), AiError> {
         let mut stream = self.chat_stream_with(options, messages).await?;
         let mut out = String::new();
         while let Some(item) = stream.next().await {
             out.push_str(&item?);
         }
-        Ok(out)
+        let meta = read_slot(&stream.meta()).unwrap_or_else(|| CallMeta {
+            usage: CallUsage {
+                api_calls: 1,
+                ..CallUsage::default()
+            },
+            ..CallMeta::default()
+        });
+        Ok((out, meta))
     }
 
     /// One non-streaming tool-calling round (`POST /api/chat`, `stream: false`, ADR-0017):
     /// `messages` are raw Ollama-wire message objects (they may carry `tool_calls` /
     /// `role: "tool"` shapes [`ChatMessage`] deliberately doesn't model), `tools` is the
     /// function-definition array (or `None` on the forced final round). Returns the response
-    /// `message` object — the caller inspects `content` vs `tool_calls`.
+    /// `message` object — the caller inspects `content` vs `tool_calls` — with the round's
+    /// [`CallMeta`] (one request, docs/adr/0037).
     ///
     /// A non-2xx answer surfaces as [`AiError::Backend`] *with the body text*, because the
     /// caller's degrade path needs to recognize Ollama's "model does not support tools" 400.
@@ -190,7 +232,7 @@ impl OllamaClient {
         options: ChatOptions,
         messages: &[serde_json::Value],
         tools: Option<&serde_json::Value>,
-    ) -> Result<serde_json::Value, AiError> {
+    ) -> Result<(serde_json::Value, CallMeta), AiError> {
         let url = format!("{}/api/chat", self.base_url);
         let mut body = build_chat_body(&self.model, options, &[]);
         body["messages"] = serde_json::Value::Array(messages.to_vec());
@@ -212,7 +254,8 @@ impl OllamaClient {
         }
         let v: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| AiError::Protocol(format!("chat_tools response not JSON: {e}")))?;
-        Ok(v.get("message").cloned().unwrap_or(serde_json::Value::Null))
+        let message = v.get("message").cloned().unwrap_or(serde_json::Value::Null);
+        Ok((message, crate::ai::stream::meta_from_final(&v)))
     }
 
     /// Query the configured model's native context window in tokens (`POST /api/show`).

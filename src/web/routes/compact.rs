@@ -39,7 +39,8 @@ pub async fn compact(
 
     let ts = state.clone();
     let tslug = slug.clone();
-    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
+    let run = crate::web::routes::open_run(&state, &slug, crate::ai::journal::RunKind::Compact);
+    let abort = jobs::spawn_job(&state.jobs, &slug, run, async move {
         jobs::set_note(&ts.jobs, &tslug, "compacting older turns…");
         // force = true: ignore the toggle/threshold and fold at the forced (zero-tail) targets.
         let r = compact::run_compaction(

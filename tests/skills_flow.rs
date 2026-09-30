@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use idea_vault::ai::budget::ContextBudget;
+use idea_vault::ai::contract::ContractOutcome;
+use idea_vault::ai::journal::{self, JournalEntry, RunKind};
 use idea_vault::ai::{LlmBackend, OllamaClient};
 use idea_vault::concepts::skills::{self, ContextSlot, SkillRegistry};
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState};
@@ -394,4 +396,157 @@ async fn related_empty_provider_leaves_prompts_byte_identical() {
         template.replace("{context}", &format!("{RELATED_BLOCK}{own}"))
     );
     assert_eq!(with.replacen(RELATED_BLOCK, "", 1), without);
+}
+
+/// Run `skill` on a journaled backend (docs/adr/0037) against a mock answering `scripts` in
+/// order; returns the output, the request bodies the mock saw, and the journal's entries.
+async fn invoke_journaled(
+    skill: &str,
+    scripts: Vec<ChatScript>,
+) -> (String, Vec<String>, Vec<JournalEntry>) {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let run = journal::open_run(tmp.path(), "i", RunKind::Skill).unwrap();
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap())
+        .with_journal(run.clone());
+    let registry = SkillRegistry::builtin();
+    let output = skills::invoke(
+        &client,
+        &Semaphore::new(1),
+        tmp.path(),
+        "i",
+        registry.get(skill).unwrap(),
+        ContextSlot {
+            budget: ContextBudget::new(4096),
+            related: &|_| String::new(),
+        },
+        &|_: &str| {},
+    )
+    .await
+    .unwrap();
+    let path =
+        journal::runs_dir(tmp.path(), "i").join(format!("{}.jsonl", run.lock().unwrap().run_id()));
+    (
+        output,
+        mock.chat_bodies(),
+        journal::read_run(&path).unwrap(),
+    )
+}
+
+/// The journal's `Contract` entries as (call seq, outcome).
+fn contracts(entries: &[JournalEntry]) -> Vec<(u32, ContractOutcome)> {
+    entries
+        .iter()
+        .filter_map(|e| match e {
+            JournalEntry::Contract {
+                call_seq, outcome, ..
+            } => Some((*call_seq, outcome.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn llm_calls(entries: &[JournalEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|e| matches!(e, JournalEntry::LlmCall { .. }))
+        .count()
+}
+
+fn tokens(text: &str) -> ChatScript {
+    ChatScript::Tokens(vec![text.to_string()])
+}
+
+#[tokio::test]
+async fn garbage_then_garbage_records_off_contract_and_keeps_first() {
+    let (output, bodies, entries) =
+        invoke_journaled("premortem", vec![tokens("no list at all"), tokens("   ")]).await;
+    assert_eq!(bodies.len(), 2, "one retry");
+    assert_eq!(
+        output, "no list at all",
+        "an empty retry never replaces an answer"
+    );
+    assert_eq!(llm_calls(&entries), 2, "both calls are journaled");
+    let recorded = contracts(&entries);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let (seq, outcome) = &recorded[0];
+    assert_eq!(*seq, 1, "recorded against the call whose text was kept");
+    assert!(
+        matches!(outcome, ContractOutcome::OffContract(v) if v.contains("numbered list")),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn repaired_answer_records_repaired() {
+    let (output, bodies, entries) = invoke_journaled(
+        "premortem",
+        vec![tokens("Sure:\n1. Nobody pays.\n2. Churn.")],
+    )
+    .await;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(output, "1. Nobody pays.\n2. Churn.");
+    assert_eq!(contracts(&entries), [(1, ContractOutcome::Repaired)]);
+
+    let (_, _, entries) = invoke_journaled("premortem", vec![tokens("1. Nobody pays.")]).await;
+    assert_eq!(contracts(&entries), [(1, ContractOutcome::Clean)]);
+}
+
+#[tokio::test]
+async fn length_stop_triggers_single_reask_as_truncated() {
+    let (output, bodies, entries) = invoke_journaled(
+        "premortem",
+        vec![
+            // On contract as far as it goes, but cut off by the output limit.
+            ChatScript::Finished {
+                tokens: vec!["1. Nobody pays.\n2. Ch".into()],
+                done_reason: "length".into(),
+                prompt_eval_count: 100,
+                eval_count: 512,
+            },
+            tokens("1. Nobody pays.\n2. Churn."),
+            tokens("never asked"),
+        ],
+    )
+    .await;
+    assert_eq!(bodies.len(), 2, "exactly one re-ask");
+    assert!(
+        bodies[1].contains("cut off at the output limit"),
+        "the truncation is read back"
+    );
+    assert_eq!(output, "1. Nobody pays.\n2. Churn.");
+    assert_eq!(contracts(&entries), [(2, ContractOutcome::Retried)]);
+    let stops: Vec<Option<String>> = entries
+        .iter()
+        .filter_map(|e| match e {
+            JournalEntry::LlmCall { meta, .. } => Some(meta.stop_reason.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stops[0].as_deref(), Some("length"));
+}
+
+#[tokio::test]
+async fn input_truncation_is_recorded_without_a_reask() {
+    let (output, bodies, entries) = invoke_journaled(
+        "premortem",
+        vec![
+            // The prompt filled the whole window: the same window would drop the same head.
+            ChatScript::Finished {
+                tokens: vec!["1. Nobody pays.".into()],
+                done_reason: "stop".into(),
+                prompt_eval_count: 1_000_000,
+                eval_count: 5,
+            },
+            tokens("never asked"),
+        ],
+    )
+    .await;
+    assert_eq!(bodies.len(), 1, "no re-ask on an input truncation");
+    assert_eq!(output, "1. Nobody pays.");
+    assert_eq!(
+        contracts(&entries),
+        [(1, ContractOutcome::OffContract("input truncated".into()))]
+    );
 }

@@ -46,7 +46,8 @@ doc-range-gaps|info|D-catalog, ADR index|no unused D or ADR number below the hig
 checklist-mirror|error|ADR-0041|every [dev] phrase of the docs/14 checklist is mirrored verbatim in .claude/
 intent-archive|info|ADR-0041|docs/INTENT.md holds one intent block
 tool-fence|error|ADR-0039|every "role": "tool" message in src/ai goes through fence_untrusted
-no-skip-permissions|error|ADR-0039|no --dangerously-skip-permissions in src/'
+no-skip-permissions|error|ADR-0039|no --dangerously-skip-permissions in src/
+runs-not-truth|error|ADR-0037|no run-journal path in src/index, src/memory, src/concepts or src/ai/budget.rs'
 
 usage() {
     printf 'check-invariants.sh: %s\n' "$1" >&2
@@ -327,6 +328,13 @@ report tool-fence
 found_hits ERROR "the claude foil never skips permissions" \
     < <(rs_grep 'dangerously-skip-permissions' src)
 report no-skip-permissions
+
+# runs-not-truth (ADR-0037): the run journal is diagnostics, never truth — the index never scans
+# it and no prompt is ever assembled from it. Journal paths therefore stay out of the index, the
+# memory/context loaders, the concepts that hydrate prompts, and assemble_context's module.
+found_hits ERROR "names the run journal; .runs is diagnostics, never indexed or read into a prompt" \
+    < <(rs_grep '\.runs\b|RUNS_DIR|runs_dir|read_run\b' src/index src/memory src/concepts src/ai/budget.rs)
+report runs-not-truth
 
 printf 'summary: %d error(s), %d warning(s), %d info\n' "$errors" "$warns" "$infos"
 [ "$errors" -eq 0 ]
