@@ -80,7 +80,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D32), and ADRs 0001–0031. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D34), and ADRs 0001–0033. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -120,6 +120,14 @@ When implementing these, keep the mental model close to a real agent harness:
 - **Workflows** — deterministic staged orchestrations over an idea (fan-out / chained step /
   audit / synthesize), as opposed to free-form chat. Swarm and workflow findings are audited by
   default (CONFIRMED/UNCERTAIN/REFUTED) before they are synthesized.
+  Build plans are versioned: on the plan page the owner answers open questions and owner-held
+  tasks in their own words, and each submission appends plain `## user` turns and makes a new
+  linked plan version deterministically (no model call, no job slot; the base is never modified,
+  and an answered question is never re-asked by a later plan) — see
+  [ADR-0032](docs/adr/0032-plan-workbench-answers-and-versions.md).
+  Over MCP, `build_plan`/`get_plan`/`answer_plan` expose the same workbench, and a retry of a
+  served long-running MCP call replays its result instead of re-running
+  ([ADR-0033](docs/adr/0033-mcp-idempotent-replay-and-plan-tools.md)).
 - **Subagent swarming** — fan out N agents in parallel to attack one idea from independent angles,
   then converge/synthesize. Against local Ollama models this means bounded concurrency and careful
   context budgeting — do not naively spawn unbounded parallel calls.

@@ -249,10 +249,58 @@ Both depths persist through one `build_plan::finish`:
    build-plan turns. The gates make no model call and run no command;
 3. write `artifacts/<stamp>-build-plan.md` (`kind: build_plan`), with the mode label, model, time,
    sources, audit tally and gate tally in its header;
-4. append a pointer turn: the artifact link, the mode label, the gate tally and the open questions.
-   The plan body never enters `conversation.md`.
+4. append a pointer turn: the artifact link, the mode label, the gate tally and the open questions,
+   each linking to the plan page's workbench (`#work`, `#q-Q6`). The plan body never enters
+   `conversation.md`.
+
+Before step 2, `finish` joins the run to the idea's plan **lineage**
+([ADR-0032](../adr/0032-plan-workbench-answers-and-versions.md)): the new plan revises the current
+head (`revises`, `version`), `carry_answers` puts every owner answer on the head's chain back into
+the plan if the model dropped it, and `suppress_answered` removes an Open question that re-asks one
+(each drop is noted in the gate report). For a capstone prompt only, `hydrate_context` adds a
+`## Prior plan (ids only — not evidence)` block (the head's open ids and texts, each
+`answered Qn → words`; at most 1500 bytes) so the model keeps ids stable. The block is prompt
+context, never evidence: the gates ground only in the idea and the discussion.
 
 An answer with neither a goal nor a task is `PlanUnusable`, and nothing is persisted.
+
+### The plan workbench (D33)
+
+The plan page (R19) shows a **Work this plan** section above the plan body: one field per open
+question and per answerable owner-held task, and a lineage line (`v3 · revises <base> · answered
+Q6, Q7`). Saving answers makes a new plan version **deterministically** — no model call, no job
+slot ([ADR-0032](../adr/0032-plan-workbench-answers-and-versions.md)). The other way forward is a
+model re-plan (R48, a background job) that rewrites the whole plan around the answers.
+
+```mermaid
+flowchart TD
+    A[Owner submits answers on plan B<br/>R46, or MCP answer_plan] --> R{same answers already<br/>made a successor of B?}
+    R -- yes --> RE[return that version<br/>reused, nothing written]
+    R -- no --> J{a job running<br/>for the idea?}
+    J -- yes --> BUSY[409 busy, nothing written]
+    J -- no --> H{B is the lineage head?}
+    H -- no --> SUP[Superseded: names the head]
+    H -- yes --> V{each id an open Q or an<br/>answerable T, 3+ own words,<br/>2000 bytes max, not the question?}
+    V -- no --> ERR[422 with per-field errors,<br/>nothing written]
+    V -- yes --> T[append one owner turn per answer<br/>Re Q6 - stem: words]
+    T --> P[parse_artifact B, reset_derived,<br/>apply_answers]
+    P --> G[gates::run with audit None<br/>against fresh evidence]
+    G --> W[write new artifact<br/>revises B, version n+1, answered ids]
+    W --> PT[append pointer turn<br/>audit not re-run]
+    PT --> NEW[redirect to the new version]
+    NEW -. re-plan instead .-> RP[R48 re-plan: try_claim,<br/>finish joins the lineage]
+```
+
+- **Answerable.** A `Q#` in Open is answerable. A `T#` is answerable only when every hold is the
+  model's own `[?]` or the marker `needs you`; a Q-block, cycle, `no runnable accept`, destructive
+  command or fenced path shows its reason and a re-plan instead.
+- **What an answer does.** A `Q#` leaves Open for a Settled item holding the owner's words (fields
+  `answers`, `asked`, `in`) and is removed from every task's `depends`; a `T#` gains `unblocked`,
+  loses its `[?]`, and gets a Settled item with `unblocks`. Owner-provenance answers are exempt
+  from G2's audit and model-open collision signals, but a hedge still keeps them open (the page
+  warns inline).
+- **The base is never modified**, and only the head takes answers; an older page shows a
+  "superseded by" banner and no forms.
 
 The template (`src/concepts/skills/build-prompt.md`) asks for one field per line and a backtick on
 every path and command. It also carries a leaf rule: a task title is one commit subject with no
@@ -280,7 +328,9 @@ page derives a `PROMPT.md` run protocol and an `/attack`-style `plan.md` from th
 - **Skill book page:** `web::routes::skills`.
 - **Context hydration:** `ai::budget`.
 - **Output persistence:** `vault::store` (append to `conversation.md`); a `build_plan` skill
-  persists through `concepts::build_plan::finish` (artifact plus pointer turn).
+  persists through `concepts::build_plan::finish` (artifact plus pointer turn). Plan lineage and
+  the deterministic answer path: `concepts::build_plan::{lineage, workbench}`; the routes are
+  `web::routes::plans`.
 
 ## Related
 
@@ -293,3 +343,4 @@ page derives a `PROMPT.md` run protocol and an `/attack`-style `plan.md` from th
 - [ADR-0022](../adr/0022-skills-as-markdown-and-the-skill-book.md) — skills as markdown, owner
   overrides, the skill book and the spine.
 - [ADR-0023](../adr/0023-verification-layer.md) — output contracts and the one-retry rule.
+- [ADR-0032](../adr/0032-plan-workbench-answers-and-versions.md) — the plan workbench and lineage (D33).

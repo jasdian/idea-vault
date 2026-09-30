@@ -80,6 +80,9 @@ flowchart LR
         R43["POST /idea/:slug/sources — replace the idea's attached-source set → sources row"]
         R44["POST /idea/:slug/cancel — abort the running job, idempotent → transcript | stored view"]
         R45["POST /idea/:slug/delete — permanently delete the idea (forced reindex) → HX-Redirect /"]
+        R46["POST /idea/:slug/plan/:stem/answer — answer open Q#/T# into a new plan version (D33, sync, no model call) → HX-Redirect new version | 422 _plan_work.html"]
+        R47["GET /idea/:slug/plan/latest — 302 to the lineage head's artifact page"]
+        R48["POST /idea/:slug/plan/:stem/replan — re-plan with the model (job) → HX-Redirect /idea/:slug"]
     end
     subgraph admin["Admin"]
         R10["POST /admin/reindex — rebuild index (D15)"]
@@ -134,9 +137,15 @@ flowchart LR
     R44 --> T_TURN
     R44 -.->|"store job lands"| T_STORED
     R45 --> T_REDIRECT["HX-Redirect / (no template)"]
+    R46 -->|"validation refused"| T_PLANWORK["templates/_plan_work.html (also embedded in artifact.html by R19 for a build plan)"]
+    R19 -.->|"build plan: workbench"| T_PLANWORK
+    R46 -->|"success"| T_REDIRECT
+    R47 --> T_REDIRECT
+    R48 --> T_REDIRECT
 ```
 
-Route groups map to `web::routes` submodules: `ideas` (R1, R2, R3, R8, R9b, R12, R14, R23, R42–R45 —
+Route groups map to `web::routes` submodules: `plans` (R46–R48 — the plan workbench, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md)),
+`ideas` (R1, R2, R3, R8, R9b, R12, R14, R23, R42–R45 —
 `set_tags`/`set_sources`/`cancel_job`/`delete_idea`), `chat`
 (R9, R32 — the send path and its pending-message queue), `memory`/idea-actions (R4–R7, R15, R16, R22 — the module name predates the delete/workflow
 routes but still owns them; R22 (`run_workflow`) runs the D19 deterministic workflow DAG behind the
@@ -161,7 +170,7 @@ timeouts, not a model call that can run for minutes, so the handler awaits it in
 a handful of small files under `vault/.skills/` synchronously, no model call, and returns the
 refreshed `#skills` panel directly — the same shape as R23/R32. **R35** is a single mounted protocol
 endpoint, not a page or partial — it carries its own MCP-level `tools/call`/`tasks/*` dispatch
-(`web::mcp_server`), and its four long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`) still go through the same
+(`web::mcp_server`), and its five long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`) still go through the same
 `web::jobs` claim → spawn → poll machinery every other AI route uses, bridged onto the MCP Tasks
 primitive rather than exposed as HTML ([ADR-0024](./adr/0024-mcp-server-inbound.md), [docs/13](./13-mcp-server-inbound.md)).
 **R36–R41 (`/sources`, ADR-0021) never run docker** (the app never invokes docker at all, ADR-0020). A mutation only rewrites the generated
@@ -185,6 +194,23 @@ runs a **forced** reindex (`web::routes::reindex_logged_forced`, bypassing the e
 [ADR-0019](./adr/0019-vault-mount-verified-not-created.md) would otherwise apply) before an `HX-Redirect`
 home, since deleting the last idea legitimately empties the vault.
 
+**R46–R48 (`web::routes::plans`, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md),
+[D33](./06-concepts/skills.md#the-plan-workbench-d33)).** R46 (`answer_plan`) is a synchronous,
+deterministic write like R23 and R42: no model call, no job slot (`jobs::try_claim` is not
+called) and no semaphore permit. It refuses a Draft or Stored idea, and refuses with `409` ("the
+foil is thinking — answer when it finishes") while a job runs, checked with the non-consuming
+`jobs::is_running` so a pending `Failed`/`Notice` is still shown by the next poll. Otherwise it runs
+`workbench::answer` on the blocking pool and answers `HX-Redirect` to the new version's page
+(`/idea/:slug/artifact/<new>.md#work`). A validation refusal (too short, too long, copied
+question, unknown or unanswerable id) is `422` with `_plan_work.html` re-rendered, carrying a
+per-field error and the owner's words; a superseded base is `409` naming the head; an unknown plan
+is `404`. R47 (`latest_plan`) is a `302` to the head's page, or `404` "no build plan yet". R48
+(`replan`, form `audited=0|1`) is the AI route of the group: the same guard/claim/spawn seams as
+R6 and R22 (`guard_skill` + `spawn_skill_job` for `build-prompt`, `guard_workflow` +
+`spawn_workflow_job` for `ready-to-build`), then `HX-Redirect /idea/:slug` where the thinking poll
+takes over; a lost claim redirects the same way onto the job already running. `finish` links the
+re-plan to the lineage, so it revises the head and carries the owner's answers.
+
 ## D16 — HTTP request / middleware pipeline
 
 How a request traverses tower middleware to a handler and back, and where the two response shapes
@@ -198,7 +224,7 @@ flowchart TD
     ROUTE --> HANDLER["handler"]
     HANDLER --> BRANCH{"AI-driven route?"}
     BRANCH -- "no (page / partial)" --> RENDER["Askama render → HTML"]
-    BRANCH -- "yes (chat/skill/swarm/workflow/store/extract/compact)" --> JOBBR["try_claim + persist up front + tokio::spawn detached task (D11, ADR-0010)"]
+    BRANCH -- "yes (chat/skill/swarm/workflow/store/extract/compact/plan re-plan R48)" --> JOBBR["try_claim + persist up front + tokio::spawn detached task (D11, ADR-0010)"]
     JOBBR --> RENDER2["render transcript + thinking indicator → HTML"]
     RENDER --> ERRMAP
     RENDER2 --> ERRMAP
@@ -241,8 +267,12 @@ templates/
                          #   when the index or its lock fails (web::templates::RelatedPanel)
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
   _settings.html          # partial — the settings form (re-rendered after a save)
-  artifact.html           # extends base — one .md artifact rendered as a full page (R19); a build plan adds the "Use it" box (PROMPT.md + plan.md copy blocks)
-  _artifacts.html         # partial — the artifacts panel (re-rendered after an artifact delete)
+  artifact.html           # extends base — one .md artifact rendered as a full page (R19); a build plan adds the workbench (`_plan_work.html`) and the "Use it" box (PROMPT.md + plan.md copy blocks)
+  _plan_work.html         # partial — the plan workbench (id="work"): lineage line, one <details id="q-Qn"> per
+                          #   open question, held-task rows, Save answers / re-plan buttons; pre-rendered into
+                          #   artifact.html by R19 (web::templates::PlanWorkView) and re-rendered by R46 on a 422
+  _artifacts.html         # partial — the artifacts panel (re-rendered after an artifact delete); a plan row shows
+                          #   v{n}, and a superseded version is dimmed
   artifact_export.html    # standalone (no base) — the opt-in .html knowledge report, written to
                           #   disk by R18, not served directly by any route
   mcp.html                 # extends base — the MCP server management page (R24, ADR-0018)
@@ -347,13 +377,23 @@ base.html`.
   audit and the planner; its tooltip notes when the Settings audit toggle is off and the plan will
   be marked audit skipped). `ready-to-build` is therefore left out of the generic workflow chips.
   Both chips render disabled while any job runs for the idea and use the same thinking indicator.
-  Either run lands a `build_plan` artifact plus a pointer turn, never the plan body. A plan that
+  Either run lands a `build_plan` artifact plus a pointer turn, never the plan body. Every run
+  links to the idea's plan lineage (`revises` the head), and once a plan exists the moves block
+  shows a `Plan · v{n} · {k} open` chip linking to R47. A plan that
   cannot be used — an answer with neither a goal nor a task (`PlanUnusable`) or an empty harvest
   (`NothingHarvested`) — persists nothing. `WebError` maps both to `422 Unprocessable Entity`, but
   that applies only to a synchronous caller: the chips run background jobs, so the owner sees the
   message as the job's error on the next `/pending` poll.
+- **The artifact page's workbench:** R19 on a `build_plan` artifact calls `workbench::plan_view`
+  and renders `_plan_work.html` above the plan body (`ArtifactPage::plan_work`,
+  [D33](./06-concepts/skills.md#the-plan-workbench-d33)): a lineage line, a "superseded by" banner
+  and no forms on a non-head version, one textarea per open question (`id="q-Q6"`, hint "your own
+  words, ≥3 words") and per answerable held task, an inline hedge warning, then "Save answers →
+  new version" (R46) and the quick/audited re-plan buttons (R48). A plan the workbench cannot read
+  degrades to the plain page. The plans panel (R20) shows `v{n}` on each plan row and dims a
+  superseded one.
 - **The artifact page's "Use it" box:** R19 on a `build_plan` artifact renders a "Use it" box
-  below the plan, with two copy blocks derived from the stored plan when the page loads and never
+  below the workbench and the plan, with two copy blocks derived from the stored plan when the page loads and never
   stored: `PROMPT.md` (a run protocol for a coding agent: what ran, trust line, the fixed "How to
   run this" steps, waves, pins, bootstrap checks, one leaf brief per task, STOP lines) and
   `plan.md` (an `/attack --loop` table whose task rows carry code-derived `wave`, `score` and

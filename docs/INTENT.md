@@ -1,3 +1,23 @@
+# Intent — plan workbench (answer → version) + MCP idempotent collect
+
+The owner answered a build plan's open questions in chat, pressed "build again", and got an
+unrelated plan that asked the same questions; over MCP, a plain-call retry after the result was
+served started a second model run and wrote a second plan. The fix is a workbench on the plan page
+where answers make a new linked version deterministically, and a replay of served MCP results.
+Design: ADR-0032 (workbench), ADR-0033 (replay and the plan tools); diagrams D33 and D34.
+
+## Acceptance criteria
+
+- An answered Q# never reappears: not in the answered version, not in any later re-plan, whether
+  the model renumbers it, re-asks it or drops the owner's answer.
+- A version never mutates its base: answering writes a new `<stamp>-build-plan.md` with `revises`,
+  and the base file's bytes are unchanged.
+- An identical MCP retry creates no job, no turn and no artifact: it replays the served result.
+  The same `idempotency_key` with different arguments is `invalid_params`.
+- G10 does not fire on word fragments (`commonly if`) or on foil turns.
+- Answering makes no model call, takes no job slot and is refused while a job runs.
+- Every change is observed failing first, and `bash scripts/gate.sh` is green.
+
 # Intent — build-plan fixes from the first live run
 
 "fix bugs on `main` branch, including task dependency and anything worth adjusting, based on

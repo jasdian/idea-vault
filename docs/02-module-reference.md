@@ -78,12 +78,15 @@ flowchart TB
             C_GATES["build_plan/gates/ — mod.rs (runs G1–G14 in order), claims.rs, sources.rs, tasks.rs: deterministic gates G1–G12, no model call (docs/adr/0030)"]
             C_LEAF["build_plan/gates/leaf.rs — G13 leaf gate: markers and tally only, never a demotion (docs/adr/0030)"]
             C_TREE["build_plan/gates/tree.rs — G14 task-graph lint, premise wiring, derived score/model/wave (docs/adr/0030)"]
-            C_FINISH["build_plan/finish.rs — finish: gate, write the build-plan artifact, append the pointer turn (docs/adr/0030)"]
+            C_FINISH["build_plan/finish.rs — finish: join the plan lineage, gate, write the build-plan artifact, append the pointer turn (docs/adr/0030, 0032)"]
+            C_LINEAGE["build_plan/lineage.rs — plan lineage (revises/version/answered), head, carry_answers, suppress_answered (docs/adr/0032)"]
+            C_WORKBENCH["build_plan/workbench.rs — deterministic owner answers → new plan version, plan_view, hedge_warning; no model call, no web types (docs/adr/0032, D33)"]
         end
 
         subgraph web["web/ (HTTP surface)"]
-            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources"]
-            W_MCPSRV["mcp_server/ — auth.rs, handler.rs, tools.rs, tasks.rs, prompts.rs: the inbound MCP\nserver at POST /api/mcp (rmcp ServerHandler + Bearer AuthLayer, ADR-0024)"]
+            W_ROUTES["routes/ — ideas, chat, memory, settings, admin, artifacts, mcp, skills, compact, sources, plans"]
+            W_PLANS["routes/plans.rs — the plan workbench routes R46–R48: answer, latest, re-plan (docs/adr/0032)"]
+            W_MCPSRV["mcp_server/ — auth.rs, handler.rs, tools.rs, tasks.rs, idempotency.rs, prompts.rs: the inbound MCP\nserver at POST /api/mcp (rmcp ServerHandler + Bearer AuthLayer, ADR-0024)"]
             W_STATE["web/state.rs — AppState (shared handler state)"]
             W_JOBS["jobs.rs — background job registry + poll (ADR-0010)"]
             W_TMPL["templates.rs — Askama structs"]
@@ -105,6 +108,10 @@ only `web` and `main` import it. Two rules in `scripts/check-invariants.sh` guar
 - "D4: ai, domain, mcp and sources never import crate::config" greps `src/ai`, `src/domain`,
   `src/mcp.rs` and `src/sources.rs`;
 - "D4: nothing under src/web imports crate::app (only app → web)" greps `src/web`.
+
+The workbench follows the same direction: `concepts::build_plan::workbench` is called *from* `web`
+(R46, the MCP `answer_plan`) and imports nothing from `web`, so "is a job running?" is the
+caller's check (`web::jobs::is_running`), never the concept's.
 
 The remaining edges are held by review: a violation (e.g. `domain` importing `web`, or `vault`
 importing `index`) is a design smell caught there.
@@ -130,7 +137,7 @@ flowchart TD
     import --> domain
     web --> config
     config --> ai
-    web --> concepts
+    web -->|"incl. concepts::build_plan (lineage, workbench)"| concepts
     web --> memory
     web --> index
     web --> ai

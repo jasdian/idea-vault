@@ -6,7 +6,7 @@
 
 ## Conventions
 
-- **ID** — stable `D1`…`D32` (see Coverage below for why the range runs past D25). References
+- **ID** — stable `D1`…`D34` (see Coverage below for why the range runs past D25). References
   across docs use the ID.
 - **Tool** — all diagrams are **Mermaid** in `mermaid` fenced code blocks, rendering inline on GitHub with no
   build step (see [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md) ethos; escape hatches below).
@@ -60,6 +60,8 @@
 | **D17** | Route graph | Every route (including `/settings`, `/pending`, `/history`, `/fork`, turn/memory delete) → response shape → template | [09-web-ui](./09-web-ui.md) |
 | **D19** | DAG (activity) | The interrogate workflow (fan-out → judge → audit → synthesize) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D32** | Flowchart | Workflow stage model: FanOut / Chain (carried forward) / Audit / Synthesize, failure paths, persistence, the build-plan persist branch (ADR-0022, ADR-0023, ADR-0030) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D33** | Flowchart | Plan workbench: answer → validate → owner turns → reset/apply/re-gate → new linked version (+ superseded, busy and re-plan branches) (ADR-0032) | [06-concepts/skills](./06-concepts/skills.md) |
+| **D34** | Flowchart | MCP replay decision: in-flight reattach → explicit key / args hash + turn count → replay or fresh run; what is cached (ADR-0033) | [13-mcp-server-inbound](./13-mcp-server-inbound.md) |
 | **D20** | State machine | Ollama-unavailable degradation | [05-ai-integration](./05-ai-integration.md) |
 | **D21** | Sequence | Concurrency & context-budget model | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D22** | Activity | Slug lifecycle & collision handling | [03-data-model](./03-data-model.md) |
@@ -78,16 +80,19 @@
 
 ## Coverage
 
-- **32 IDs, D1–D32** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
+- **34 IDs, D1–D34** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
   were added for containerized deployment, D30 for knowledge extraction, D31 for reference
-  sources, and D32 for the workflow stage model, all without renumbering — the range is D1–D32 in
+  sources, D32 for the workflow stage model, and D33/D34 for the plan workbench and MCP replay, all
+  without renumbering — the range is D1–D34 in
   practice, not D1–D25), each authored exactly once.
   **D1–D15** are the mandatory core (they cover every flow named in [CLAUDE.md](../CLAUDE.md));
   **D16–D25** complete the SOTA set; **D26–D29** cover containerized deployment; **D30** covers
   knowledge extraction ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)); **D31** covers
   reference sources ([ADR-0021](./adr/0021-reference-sources.md)); **D32** covers the staged
   workflow model ([ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md),
-  [ADR-0023](./adr/0023-verification-layer.md)).
+  [ADR-0023](./adr/0023-verification-layer.md)); **D33** covers the plan workbench
+  ([ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md)); **D34** covers MCP idempotent
+  replay ([ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md)).
 - The six core flows from CLAUDE.md map to: new idea **D10**, chat (background job + poll, not SSE
   — ADR-0010) **D11**, store+memory **D12**, reopen+memory **D13**, swarm **D14**, reindex **D15**.
 

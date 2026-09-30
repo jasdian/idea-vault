@@ -5,8 +5,9 @@
 > read one, continue a discussion, run skills and swarms on it, and store it — the mirror image of
 > [ADR-0018](./adr/0018-mcp-servers.md)'s **outbound** registry (idea-vault calling *other* MCP
 > servers). Decision records: [ADR-0024](./adr/0024-mcp-server-inbound.md), amended by
-> [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md) and
-> [ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md). This doc is both the
+> [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md),
+> [ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md) and
+> [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md). This doc is both the
 > feature reference and a general-purpose **cookbook** for wiring an MCP server onto an axum app
 > that already runs long AI calls as background jobs — the pattern generalizes past idea-vault.
 
@@ -31,8 +32,9 @@ web::mcp_server
 ├── auth.rs      — single-token Bearer AuthLayer/AuthMiddleware (Tower Layer/Service pair)
 ├── handler.rs   — IdeaVaultMcpServer : the rmcp::ServerHandler impl
 ├── tools.rs     — the tool catalog + synchronous tool dispatch (list_ideas, get_idea, search,
-│                   create_idea, reopen_idea, list_skills, get_artifact)
-├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm
+│                   create_idea, reopen_idea, list_skills, get_artifact, get_plan, answer_plan)
+├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm/build_plan
+├── idempotency.rs — ReplayCache + args_hash : replay of a served result (ADR-0033, D34)
 └── prompts.rs   — a small canned prompt catalog
 ```
 
@@ -114,14 +116,14 @@ client onto the polling lifecycle, with zero branching in your own handler. `Opt
 client choose: `tools/call` with `task:{}` goes to `enqueue_task`, without it to `call_tool`.
 
 `chat`/`store_idea` were `Required` until [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md)
-and are now `Optional` (as are `run_skill`/`run_swarm`, added by ADR-0029), because a client that does not implement Tasks (Claude Code's own MCP
+and are now `Optional` (as are `run_skill`/`run_swarm`, added by ADR-0029, and `build_plan`, added by ADR-0033), because a client that does not implement Tasks (Claude Code's own MCP
 client, for one) could otherwise not call them at all. The two paths a plain call and a task call
 take are:
 
 | Call shape | Handler | Behaviour |
 |---|---|---|
 | `tools/call` + `task:{}` | `enqueue_task` → `TaskRegistry::enqueue` | Unchanged from ADR-0024: claim + spawn, return a task id, client polls `tasks/get`/`tasks/result`. |
-| plain `tools/call` | `call_tool` → `tools::call_sync` → `TaskRegistry::call_sync_bounded` | Same claim + spawn, a real task id is minted, then a **bounded wait** (`SYNC_WAIT_BUDGET`, 3 s, polled every `SYNC_POLL_INTERVAL`, 250 ms). Finished in time → the same result `tasks/result` would give. Not finished → a non-error "still running" note naming the task id; the job keeps running, and a plain retry with the **same arguments** reattaches to that task — waiting if it is still running, or serving its cached result if it finished in the meantime — with no second job and no duplicate turn. A *different* operation (another `chat` message, another skill, another angle list) while the previous one is still running is a new operation and fails "already busy", exactly like task mode. |
+| plain `tools/call` | `call_tool` → `tools::call_sync` → `TaskRegistry::call_sync_bounded` | Same claim + spawn, a real task id is minted, then a **bounded wait** (`SYNC_WAIT_BUDGET`, 3 s, polled every `SYNC_POLL_INTERVAL`, 250 ms). Finished in time → the same result `tasks/result` would give. Not finished → a non-error "still running" note naming the task id; the job keeps running, and a plain retry with the **same arguments** reattaches to that task — waiting if it is still running, or serving its rendered result if it finished in the meantime — with no second job and no duplicate turn. After the result was *served*, an identical retry **replays** it (step 5 below, D34) instead of starting a second run. A *different* operation (another `chat` message, another skill, another angle list) while the previous one is still running is a new operation and fails "already busy", exactly like task mode. |
 
 The wait is deliberately a "did it finish fast?" grace window, not a model timeout — it must stay
 far below any HTTP client's request timeout, which is why it is a module constant in `tasks.rs`
@@ -149,12 +151,16 @@ onto a different app with its own "background job, polled by the client" system:
    consumes it purely through existing public functions.
 3. **`get_task_result`** (`tasks/result`) is the interesting part: idea-vault's job system tracks
    *status* but never stores a *return value* (the web UI doesn't need one — it just re-renders
-   the transcript from disk once a job finishes). So once the job is idle, this function
-   **re-derives the tool's result by re-reading the vault** — the newest conversation turn for
+   the transcript from disk once a job finishes). So when the job first goes idle, `observe`
+   **derives the tool's result from the vault once and stores it** on the task entry
+   (`TaskEntry::rendered`, ADR-0033) — the newest conversation turn for
    `chat`/`run_skill`/`run_swarm` (each appends exactly one assistant turn), the fresh
-   frontmatter for `store_idea`. This isn't a workaround; the vault is the
-   source of truth (ADR-0002) regardless of which surface asks, so re-reading it after completion
-   is the *correct* way to answer "what happened," not a shortcut around a missing feature.
+   frontmatter for `store_idea`, the lineage head's `get_plan` JSON for `build_plan`. Deriving
+   at read time instead would hand a late `tasks/result` whatever turn is newest *then*, not this
+   task's own reply. This isn't a workaround; the vault is the source of truth (ADR-0002)
+   regardless of which surface asks. A job that ends `Idle` but landed no turn (the web `/pending`
+   poll consumed its `Failed`/`Notice` first) is rendered as an error, `finished but its result
+   was consumed elsewhere — check get_idea`, and never cached.
 4. **`cancel_task`** (`tasks/cancel`) forwards straight to the job system's own `cancel`.
 5. **`call_sync_bounded`** (the plain-call fallback, ADR-0028) is not a fifth kind of reader: it
    calls the same `claim_and_spawn` as step 1, registers a real task id (plus a `slug → task_id`
@@ -162,9 +168,49 @@ onto a different app with its own "background job, polled by the client" system:
    comma-joined swarm angles — recorded on the entry, so a retry with the same
    arguments can find its own task whether it is still running or already finished), and loops
    on the same `observe()` terminal cache steps 2–3 use, for a fixed budget. Its result is built
-   by the same helper as step 3. Once it has served a terminal outcome it drops the reverse-index
-   entry, so the next plain call for that idea claims a fresh job instead of replaying the cached
-   reply.
+   by the same helper as step 3. Once it has served a terminal outcome it records that result in
+   the `ReplayCache` and drops the reverse-index entry (`TaskRegistry::serve`, shared with
+   `tasks/result`), so the next call is judged by the replay rules instead of reattaching to a
+   finished task ([D34](#d34--mcp-replay-decision-adr-0033)).
+
+## D34 — MCP replay decision (ADR-0033)
+
+A retry after a dropped response or a lost "still running" note must not start a second model run
+(for `run_skill build-prompt` it wrote a second, unrelated plan). Rules:
+
+- A result is **rendered once**, at the first terminal observation, and stored.
+- It is cached only when it is Completed or a Notice **and** its effect landed: a turn past the
+  count at claim for Chat/Skill/Swarm/Plan, or the idea actually `Stored` for Store. Failed,
+  Cancelled and false-success results are never cached.
+- A cached entry is recorded under the args hash (sha256 over the arguments minus
+  `idempotency_key`, keys sorted) and, if the call carried one, under the explicit key. Entries
+  live 24 h, in memory only: a restart loses them and the retry re-runs.
+- Explicit key: same key and same arguments replays whenever; the same key with different
+  arguments is `invalid_params`; a key never seen is a miss (a fresh key is how a client forces a
+  new run). Hash key: replays only while the idea's turn count still equals the count when the run
+  finished, so an identical `chat` message after an intervening turn is a new question.
+- A replay is prefixed `(replayed result of task N) `; in task mode it mints an already-terminal
+  task so `tasks/get` then `tasks/result` work unchanged.
+
+```mermaid
+flowchart TD
+    C[long-running tools/call<br/>chat, store_idea, run_skill, run_swarm, build_plan] --> INF{in-flight task for<br/>this slug and operation?}
+    INF -- yes --> RE[reattach: wait or serve its rendered result<br/>ADR-0028]
+    INF -- no --> K{explicit idempotency_key?}
+    K -- yes --> KL{entry for this key?}
+    KL -- no --> RUN[claim, spawn, render once]
+    KL -- yes --> KH{same args hash?}
+    KH -- no --> IP[invalid_params:<br/>key reused with different arguments]
+    KH -- yes --> HIT[replay the stored result]
+    K -- no --> HL{entry for the args hash?}
+    HL -- no --> RUN
+    HL -- yes --> TC{turn count unchanged<br/>since the run finished?}
+    TC -- yes --> HIT
+    TC -- no --> RUN
+    RUN --> OUT{terminal outcome}
+    OUT -- Completed or Notice and effect landed --> REC[serve: record under hash and key, 24 h]
+    OUT -- Failed, Cancelled, no turn landed --> NOREC[serve, not recorded:<br/>a retry runs again]
+```
 
 If you adapt this pattern for a job system that already returns a value from its completion
 callback, `get_task_result` gets simpler — you'd store that value in the task-id map instead of
@@ -223,7 +269,9 @@ defaulting to open.
 |---|---|---|
 | `list_ideas` | sync | Every idea, newest first |
 | `get_idea` | sync | The whole idea: frontmatter, body, conversation, memory facts with bodies, compacted summary, artifact list, `.html` report names |
-| `get_artifact` | sync | One markdown artifact (finding, synthesis, quarantine) by slug |
+| `get_artifact` | sync | One markdown artifact (finding, synthesis, quarantine, build plan version) by slug |
+| `get_plan` | sync | One build-plan version as JSON: lineage, open questions with the tasks each blocks, owner-blocked tasks with reasons and `answerable`, settled items; defaults to the head |
+| `answer_plan` | sync | Answers (`{"Q6": "…"}`, the owner's own words) on the head plan → a new version, no model call; refused while a job runs; idempotent from the vault (ADR-0032) |
 | `search` | sync | FTS over titles, bodies, conversations, memory, artifacts |
 | `list_skills` | sync | The visible skill book (name, stage, role, use/avoid guidance, source) |
 | `create_idea` | sync | New Draft |
@@ -232,15 +280,17 @@ defaulting to open.
 | `run_skill` | long-running | One named move (R6's guards); its turn is returned |
 | `run_swarm` | long-running | Up to 8 angles, converged (R7's guards); the synthesis is returned |
 | `store_idea` | long-running | Consolidate + verified memory extraction; quarantine count as a notice |
+| `build_plan` | long-running | The build-prompt capstone, or with `audited:true` the ready-to-build workflow; a new plan version linked to the head; returns the `get_plan` JSON |
 
-Plus the two-prompt catalog. The four long-running tools are callable both as a task and
+Plus the two-prompt catalog. The five long-running tools (each takes an optional `idempotency_key`)
+are callable both as a task and
 plainly (bounded wait, ADR-0028). A Task-unaware client cannot use the task path. Its plain call
 runs as a real task (`tasks::TaskRegistry::call_sync_bounded`), and when the turn outlives the
 3 s `SYNC_WAIT_BUDGET`, the "still running" note returns that task's id. `tasks/cancel`
 (`tasks::TaskRegistry::cancel`) accepts an id from either path, for any client that speaks that
 method.
 
-**Deferred:** workflow/extract/compact tools, chat queueing on a busy idea (MCP refuses instead),
+**Deferred:** a general `run_workflow` tool (only `build_plan` reaches the ready-to-build workflow), extract/compact tools, chat queueing on a busy idea (MCP refuses instead),
 fork/tags/rename/sources-management/delete-* tools, MCP `resources` (idea.md/conversation.md as
 `resources/read` + `resources/subscribe` push-on-update — `rmcp` supports this; it's additive and
 independent of the current tool set), a stdio transport variant, a client-as-foil mode (a no-model

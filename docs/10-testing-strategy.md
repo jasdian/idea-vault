@@ -17,6 +17,11 @@
 | AI absence degrades, never hangs | [D20](./05-ai-integration.md) | mocked-Ollama absence/timeout test |
 | Slugs are unique + stable | [D22](./03-data-model.md) | collision + rename test |
 | `[[slug]]` backlinks resolve (incl. forward refs) | [D23](./06-concepts/memory.md) | reindex resolution test |
+| An answered plan question is never reopened, by a later re-plan or an audit finding | [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md), [D33](./06-concepts/skills.md#the-plan-workbench-d33) | `claims::tests::carry_open_findings_skips_answered`, `lineage::tests::suppress_answered_drops_reasked_q_and_rewrites_depends`, `finish::tests::capstone_run_links_to_head_and_suppresses_answered` |
+| A plan version never mutates its base | [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md) | `workbench::tests::base_file_bytes_unchanged`, `tests/plan_workbench.rs` (base bytes unchanged) |
+| Re-gating a plan is idempotent (no duplicate markers, no second G10 question) | [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md) | `plan::tests::regate_is_idempotent`, `workbench::tests::identical_resubmit_returns_existing_version` |
+| An identical MCP retry after a served result creates no job, turn or artifact | [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md), [D34](./13-mcp-server-inbound.md) | `tests/mcp_server.rs`: `plain_run_skill_build_prompt_retry_after_served_replays_without_second_plan`, `store_idea_retry_after_served_replays`, `failed_run_is_not_cached_and_retry_runs_again` |
+| An `idempotency_key` reused with different arguments is rejected | [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md) | `tests/mcp_server.rs`: `idempotency_key_with_different_args_is_invalid_params` |
 
 ## The keystone: reindex invariant (fixture test)
 
@@ -70,7 +75,8 @@ and compares its ideas, tags, memory facts, backlinks and FTS rows with `golden-
 - **Web (`web`)** — handler tests over the router: create (D10) produces a `Draft`; store (D12)
   transitions to `Stored` and writes memory; reopen (D13) loads context and sets `Reopened`; the
   chat/skill/swarm routes claim a job and the `/pending` poll reflects job state; error mapping
-  matches the taxonomy (D24).
+  matches the taxonomy (D24). The plan workbench (R46-R48, `tests/plan_workbench.rs`) is tested
+  against a tempdir vault with no model for the answer path, and a mock Ollama for re-plan.
 
 ## Test doubles & fixtures
 

@@ -13,7 +13,7 @@ applied to interrogating one idea.
 ## How to read the diagrams
 
 Every diagram is authored in a `mermaid` fenced code block and **renders inline on GitHub** — no build
-step. Each has a stable ID (**D1**–**D31**) catalogued in [08-diagrams](./08-diagrams.md). To render
+step. Each has a stable ID (**D1**–**D34**) catalogued in [08-diagrams](./08-diagrams.md). To render
 locally, use any Mermaid-aware markdown previewer.
 
 ## Reading order
@@ -29,7 +29,7 @@ New here? Read top to bottom:
 7. [05-ai-integration](./05-ai-integration.md) — Ollama + claude-code, background-job flow, degradation, errors (D3, D11, D20, D24).
 8. [06-concepts/](./06-concepts/) — the harness primitives:
    [memory](./06-concepts/memory.md) (D12, D13, D23),
-   [skills](./06-concepts/skills.md) (D18),
+   [skills](./06-concepts/skills.md) (D18, D33),
    [agents](./06-concepts/agents.md),
    [workflows](./06-concepts/workflows.md) (D19),
    [swarm](./06-concepts/swarm.md) (D14, D21, D30).
@@ -55,7 +55,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [04-state-machine](./04-state-machine.md) | Idea lifecycle | D9 |
 | [05-ai-integration](./05-ai-integration.md) | Ollama + claude-code boundary (live router), background-job flow, degradation, errors | D3, D11, D20, D24 |
 | [06-concepts/memory](./06-concepts/memory.md) | Extract on Store, load on Reopen, backlinks | D12, D13, D23 |
-| [06-concepts/skills](./06-concepts/skills.md) | Reusable ideation moves as markdown files, the skill book, the spine | D18 |
+| [06-concepts/skills](./06-concepts/skills.md) | Reusable ideation moves as markdown files, the skill book, the spine | D18, D33 |
 | [06-concepts/agents](./06-concepts/agents.md) | Subagent roles + I/O contract | — |
 | [06-concepts/workflows](./06-concepts/workflows.md) | Deterministic staged orchestration | D19, D32 |
 | [06-concepts/swarm](./06-concepts/swarm.md) | Bounded fan-out/converge, budgets, knowledge extraction | D14, D21, D30 |
@@ -63,10 +63,10 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [09-web-ui](./09-web-ui.md) | Routes, middleware, templates, HTMX (background-job polling) | D16, D17 |
 | [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers, reference sources | D26, D27, D28, D29, D31 |
 | [13-mcp-server-inbound](./13-mcp-server-inbound.md) | Inbound MCP server (`/api/mcp`), the Task↔Job bridge, and the reusable cookbook | — |
-| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D32) | (catalog) |
+| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D34) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0031 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0033 | — |
 
 ## Locked decisions (at a glance)
 
@@ -98,6 +98,8 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **MCP tasks are optional:** `chat`/`store_idea` accept either the Task lifecycle or a plain call that waits a short, fixed budget, so Task-unaware MCP clients can use them; the Task path is unchanged ([ADR-0028](./adr/0028-optional-task-support-bounded-wait.md), amends ADR-0024).
 - **MCP moves:** an MCP client can also list the skill book, run a skill or a swarm, and read the whole idea (fact bodies, artifacts) — with idea-vault's own model as the foil and the client as a relay; workflows, compact, extract, tags, fork and sources stay web-only ([ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md), amends ADR-0024).
 - **Gated build plans (proposed):** both capstone chips (`⌁ quick build prompt` → `build-prompt`, `⌁⌁ audited build plan` → `ready-to-build`) produce a build-plan artifact whose Settled claims must pass deterministic gates G1–G14 (grounded quote, no collision with open questions or the audit, anchor paired with its symbol, tokens that exist, units, fence, runnable accepts, kill wiring, leaf-shaped tasks, a linted task graph with derived waves, scores and models); a failing claim moves to Verify first, Open or Quarantined with the check that would re-promote it; the transcript gets a pointer turn; the librarian's rules are ported, not its machinery ([ADR-0030](./adr/0030-gated-build-plan.md)).
+- **Plan workbench:** the owner answers a build plan's open questions and owner-held tasks on the plan page; each submission appends plain `## user` turns and makes a new linked plan version (`revises`/`version`/`answered`) deterministically — no model call, no job slot — by re-parsing the base, folding the answers in and re-running the gates without the audit; the base is never modified, only the lineage head takes answers, and every later plan run carries the answers forward and never re-asks them (R46–R48, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md), amends ADR-0030, D33).
+- **MCP idempotent replay and plan tools:** a served long-running MCP result is rendered once and replayed to an identical retry (same `idempotency_key`, or same arguments with no turn since) instead of starting a second run; `build_plan`, `get_plan` and `answer_plan` put the plan workbench on MCP ([ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md), amends ADR-0028 and ADR-0024, D34).
 
 ## Beyond these docs
 

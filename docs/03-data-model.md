@@ -112,7 +112,7 @@ erDiagram
         markdown lines "one pointer per fact"
     }
     ARTIFACT_MD {
-        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine|build_plan), lens, created, model"
+        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine|build_plan), lens, created, model, revises, version, answered (build plans)"
         markdown body "one lens's finding, the converged synthesis, or quarantined store-time facts"
     }
     ARTIFACT_HTML {
@@ -157,6 +157,7 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Memory fact (frontmatter) | `memory/<fact>.md` | `memory_facts` |
 | Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact, `ref` = the fact's frontmatter slug — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
 | Knowledge-extraction artifact (finding or synthesis), quarantined store-time facts, or a gated build plan (`<run-stamp>-build-plan.md`, `kind: build_plan`, [ADR-0030](./adr/0030-gated-build-plan.md)) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
+| Plan lineage (`revises`/`version`/`answered`) and owner answers | the build-plan artifact's frontmatter and body, plus the answer `## user` turns in `conversation.md` | *(nothing new: no index column or table; the artifact's `search_fts` row is as for any artifact, and `reindex` rebuilds it from disk)* |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
 | `[[slug]]` links | inside the idea body and memory facts only — **not** mined from conversation or artifact bodies | `backlinks` |
 | `[[idea#fact]]` refs (plus bare `[[x]]` / `links:` candidates inside a fact) | idea body and `memory/<fact>.md` | `fact_links` (`explicit = 1` for `[[idea#fact]]`; an explicit ref to another idea also adds a `backlinks` row for `idea`) |
@@ -218,6 +219,9 @@ classDiagram
         +string? lens
         +datetime created
         +string model
+        +string? revises
+        +uint? version
+        +string[] answered
     }
     class ArtifactKind {
         <<enumeration>>
@@ -229,6 +233,31 @@ classDiagram
     IdeaFrontmatter --> IdeaState
     ArtifactFrontmatter --> ArtifactKind
 ```
+
+The three lineage fields are build-plan only and optional
+([ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md)): `revises` is the stem of the plan
+this one is the next version of, `version` is `n+1` (absent means 1), and `answered` lists the
+`Q#`/`T#` ids the owner answered to make this version. All three are skipped on write when
+empty, so an artifact without them (every other kind, and every plan from before lineage)
+serializes as it always did and reads as a version-1 root. The lineage is linear: the head is the
+newest plan no other plan `revises`.
+
+**Plan item fields the workbench adds.** In a stored plan body, a Settled item recording an owner
+answer carries `answers: Q6`, `asked: "<the question, without proposed:>"` and `in: <base stem>`,
+with `quote` holding the full answer verbatim; an unblocked task carries `unblocked: "<answer>"`
+and its Settled item `unblocks: T6`; a task whose `[?]` the model wrote carries `owner: model`.
+Untrusted model output never keeps `answers`/`asked`/`in`/`unblocks`/`unblocked`.
+
+**Answer-turn grammar.** Each answer is one ordinary owner turn whose body is
+`Re <id> (<base-stem>): <the owner's words>`:
+
+```markdown
+## user
+Re Q6 (20260929-120000-build-plan): We freeze the zone snapshot at entry for every desk.
+```
+
+It is a plain `## user` turn, so it is Owner evidence and feeds chat context and store-time
+extraction like any other; the code never writes the question text into it.
 
 **Serialized `state` mapping** (frontmatter uses lower-kebab; see
 [ADR-0007](./adr/0007-state-in-frontmatter-not-db.md)):

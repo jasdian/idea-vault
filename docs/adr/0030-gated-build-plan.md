@@ -258,6 +258,26 @@ attached source. Five defects were fixed:
 The `plan.md` header also gained the `Commands:` line: copied literally, `grep -cE "A\|B"` counts
 0 where `grep -cE "A|B"` counts 2.
 
+### Plan lineage and owner answers (2026-09-30, ADR-0032)
+
+[ADR-0032](./0032-plan-workbench-answers-and-versions.md) adds a workbench and a lineage:
+- **Lineage.** Every plan run (quick, audited, web or MCP) revises the current head. The
+  frontmatter gains `revises`, `version` and `answered`; `finish_as` carries the owner answers on
+  the head's chain into the new plan and drops an Open question that re-asks one. A plan written
+  before this reads as a version-1 root.
+- **G2/G3 owner-answer exemption.** A Settled item with an `answers` field and Owner provenance is
+  exempt from the model-open collision, the audit-open collision and the open-questions-artifact
+  listing; `carry_open_findings` skips a finding that collides with an answer, its question or an
+  Owner Settled item. This closes the "UNCERTAIN finding that restates the owner's words" miss
+  below. A hedge in the answer still re-opens it.
+- **G10 gate language.** The detector scans only Owner and Idea turns (a foil turn musing "only
+  if" is not a requirement the owner set), matches whole words (`commonly if` and `monopoly if` no
+  longer fire), builds its window from whole words (8 before, 14 after) with markdown stripped,
+  and skips a match inside the quote of an Owner Settled item. A re-gated plan keeps the question
+  it already asked.
+- **Pointer.** The open-questions line links to the workbench (`#work`, per-question `#q-Q6`
+  anchors) instead of "answer in chat, then build again".
+
 ## Known misses
 
 These are named here rather than in each plan:
@@ -268,7 +288,8 @@ These are named here rather than in each plan:
   words, not that the claim follows from them. Live, a quoted owner question carried the foil's
   answer into PINNED;
 - an UNCERTAIN harvested finding that restates the owner's own words moves them to Open, so the
-  audit's doubt can outrank the owner's statement;
+  audit's doubt can outrank the owner's statement (closed for a recorded owner answer by the
+  2026-09-30 amendment above; still open for a statement the owner made in ordinary chat);
 - whether hydration clipped the discussion: only the audited (`ready-to-build`) planner is told,
   the quick path is not, and the artifact header records it for neither, so the trust line reads
   `truncation not recorded`.
@@ -279,7 +300,10 @@ These are named here rather than in each plan:
 - **Executing check commands.** The app must never run arbitrary commands.
 - **Linting the old fenced blob after the fact.** It has no structure to gate.
 - **A Librarian role.** The role enum is closed. The job is routing, not a persona.
-- **A new `/build` route.** Both depths fit the existing routes.
+- **A new `/build` route.** Both depths fit the existing routes. *(Reversed for the workbench by
+  [ADR-0032](./0032-plan-workbench-answers-and-versions.md): R46-R48; the build chips still use R6/R22.)*
 - **Keeping the plan inline in the transcript.** That lets the plan ground itself and bloats the
   context.
-- **A frontmatter stamp.** It forces an index edit for no reader.
+- **A frontmatter stamp.** It forces an index edit for no reader. *(Reversed by
+  [ADR-0032](./0032-plan-workbench-answers-and-versions.md): `revises`/`version`/`answered` carry the
+  lineage; the index still needs no edit.)*

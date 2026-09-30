@@ -1,6 +1,6 @@
 # ADR-0028 — Optional Task support for `chat`/`store_idea`: a bounded-wait plain call
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0033](./0033-mcp-idempotent-replay-and-plan-tools.md) (a served result is replayed, not forgotten)
 - **Date:** 2026-09-28
 - **Deciders:** Owner
 - **Amends:** [ADR-0024](./0024-mcp-server-inbound.md) — `chat`/`store_idea` move from

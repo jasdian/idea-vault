@@ -88,7 +88,7 @@ flowchart TD
     NEXT -->|"done"| OUT
     OUT --> PLAN{"last stage a build_plan skill?"}
     PLAN -->|"no"| PERSIST["append output (+ audit appendix or cap line, + angles line) as '## assistant (workflow: name)'"]
-    PLAN -->|"yes"| FINISH["build_plan::finish — gates G1–G14, write the build-plan artifact, append a pointer turn"]
+    PLAN -->|"yes"| FINISH["build_plan::finish — join the plan lineage (revises the head, carry + suppress answered), gates G1–G14, write the build-plan artifact, append a pointer turn"]
 ```
 
 ## Ready-to-build
@@ -115,6 +115,13 @@ and one planner call (plus at most one reshape retry), all under the shared sema
   Settled claim that matches a REFUTED finding to Quarantined, with the auditor's reason. The plan
   lands as `artifacts/<stamp>-build-plan.md` and the transcript gets a
   `## assistant (workflow: ready-to-build)` pointer turn.
+- **Lineage and answers** ([ADR-0032](../adr/0032-plan-workbench-answers-and-versions.md),
+  [D33](./skills.md#the-plan-workbench-d33)): `finish` links the plan to the idea's head
+  (`revises`, `version`), carries every owner answer on the head's chain into it and drops an Open
+  question that re-asks one. The planner step's carried context also gets the
+  `## Prior plan (ids only — not evidence)` block (the head's open ids and answered `Qn → words`,
+  at most 1500 bytes), which keeps ids stable and is never evidence. Re-planning from the
+  workbench (R48, audited) runs this same workflow.
 
 ## Determinism & failure
 
