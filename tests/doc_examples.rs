@@ -1,6 +1,10 @@
 //! Worked examples in the docs are held to the code (CORE-5, ADR-0041): the skill-file example in
 //! docs/06-concepts/skills.md must parse to the same frontmatter as the built-in it shows, and the
 //! frontmatter field table must list exactly the values the enums accept.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 mod support;
 
 use std::collections::BTreeSet;

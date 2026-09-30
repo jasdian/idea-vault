@@ -215,7 +215,10 @@ fn queue_poller(slug: &str) -> String {
 /// job is active, then the usage meter. This is the single renderer every transcript response
 /// goes through — the idea page, the poll endpoint, and chat/skill/swarm/delete all emit it, so
 /// the view is identical whether freshly loaded or swapped in.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the single transcript renderer takes each value its callers already hold; a struct would only rename them (HTC-2)"
+)]
 pub(crate) fn transcript_inner(
     vault_dir: &std::path::Path,
     slug: &str,
@@ -825,7 +828,10 @@ fn availability_hint(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the discussion panel takes each value the idea page already holds; a struct would only rename them (HTC-2)"
+)]
 pub(crate) fn build_discussion(
     vault_dir: &std::path::Path,
     slug: &str,
@@ -884,7 +890,10 @@ pub(crate) fn build_discussion(
 /// `_discussion.html` (transcript + compose box, disabled when AI is unavailable — D20) for
 /// every discussion state. Pre-rendered so the partials stay the single source of truth for
 /// both this full page and the HTMX swaps that replace `#discussion` later.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the lower panel forwards build_discussion's inputs plus the idea; a struct would only rename them (HTC-2)"
+)]
 fn render_panel(
     vault_dir: &std::path::Path,
     idea: &Idea,

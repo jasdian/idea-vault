@@ -3,6 +3,10 @@
 //! reopened-with-merged-memory, unicode-title→ASCII-slug) is reindexed and its derived tables
 //! are snapshot-compared against a committed expectation. Also re-asserts the ADR-0002 keystone
 //! (idempotent + rebuildable) against real on-disk fixtures rather than generated ones.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 use std::path::Path;
 

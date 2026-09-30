@@ -2,6 +2,10 @@
 //! and a build plan each journal the verdict their parser reached beside the call it judged, and
 //! `regrade` over that vault finds every verdict unchanged — the journaled line and today's line
 //! come from the same summary function. Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -3,6 +3,10 @@
 //! persisted registry file (bare mode — the harness sets no sources mount, so a registered
 //! tempdir reads as "readable"), validation rejection, and the frontmatter `sources:` round trip
 //! including the newly-attached-names-must-be-registered rule and the busy-idea guard.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

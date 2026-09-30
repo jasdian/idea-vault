@@ -6,6 +6,10 @@
 //! `PARSER_CORPUS_BLESS=1 cargo test --test parser_corpus` rewrites the snapshot after an
 //! intended change; blessing is an ask-user change, so `scripts/gate.sh` refuses to run while the
 //! variable is set, and the rewritten snapshot must be declared under `## Expectation changes`.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

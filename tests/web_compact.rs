@@ -1,6 +1,10 @@
 //! Web-surface tests for auto-compact (docs/adr/0012): the honest effective-bytes meter + summary
 //! disclosure, the manual `/compact` route, and the job-isolation guarantee that a failed phase-0
 //! compaction never fails the chat reply. Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

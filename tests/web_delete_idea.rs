@@ -1,4 +1,8 @@
 //! Deleting an entire idea: removes the vault folder and drops it from the index.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

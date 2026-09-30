@@ -1,6 +1,10 @@
 //! G14, the tree lint, end to end through the public `parse` and `gates::run`: the task graph's
 //! references, cycles and `[?]` inheritance, and the code-owned `score`, `model` and `wave`
 //! fields a stored artifact carries back.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 use idea_vault::ai::sources::SourceProbe;
 use idea_vault::concepts::build_plan::gates::{run, Evidence, GateInputs, GateReport};

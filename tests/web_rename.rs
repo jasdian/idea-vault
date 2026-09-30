@@ -2,6 +2,10 @@
 //! orthogonal to D9"): retitling in place through the real router — truth on disk (title +
 //! `updated` bumped, slug/state/body untouched), the reindex that keeps list/search rows current,
 //! input validation, and that it works from every state including `Stored`.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

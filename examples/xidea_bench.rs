@@ -31,6 +31,12 @@
 //!   fails on any cache miss.
 //!
 //! Evaluation tooling only: it is not part of the app binary and never exposed to the model.
+#![allow(
+    clippy::unwrap_used,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "offline experiment harness run by hand: it reports on stdout and a panic is an acceptable abort"
+)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

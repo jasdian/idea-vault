@@ -3,6 +3,10 @@
 //! probe against an endpoint that refuses the connection (offline-safe — no live MCP server), and
 //! the edit-in-place flow (edit form never echoes the token, blank keeps it, the checkbox clears
 //! it, an invalid url on update is a 400).
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

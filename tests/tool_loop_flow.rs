@@ -2,6 +2,10 @@
 //! message that reaches the model is wrapped between the fence markers with any smuggled marker
 //! escaped, the turn's first message carries the one-sentence fence note, and none of the fencing
 //! is persisted with the reply.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

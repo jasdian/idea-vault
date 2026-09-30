@@ -1,6 +1,10 @@
 //! G13, the leaf gate: each planned task is checked against the leaf invariants (one commit
 //! subject, one root, one counted check) and the split triggers, through the public `parse` and
 //! `gates::run`. The gate only marks and tallies; it never demotes a task to `[?]`.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 use idea_vault::ai::sources::SourceProbe;
 use idea_vault::concepts::build_plan::gates::leaf::{

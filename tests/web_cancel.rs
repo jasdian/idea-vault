@@ -5,6 +5,10 @@
 //! persisted and the slot clears — a follow-up action on the same idea is accepted again. The
 //! progress note is advanced by the orchestrators (swarm reports "swarm · attacking k/N: <angle>")
 //! and rendered in the "thinking" indicator.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

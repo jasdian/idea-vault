@@ -1,5 +1,9 @@
 //! The live LLM settings page: GET renders the form with current values; POST toggles the backend
 //! and tunes params at runtime, reflected immediately by /admin/health.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

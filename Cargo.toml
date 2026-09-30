@@ -63,3 +63,22 @@ anyhow = "1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+
+# Compiler-enforced handbook rules (ADR-0041 catalog amendment). Test code is exempt from the
+# unwrap/print denials through clippy.toml; main.rs opts into printing with a local #[expect].
+[lints.rust]
+# RU-001/SE-006: unsafe only with a local #[expect(unsafe_code, reason)] and a // SAFETY: comment
+# above each block; deny rather than forbid so a justified site can opt in. Counted by the unsafe
+# ratchet in scripts/check-invariants.sh.
+unsafe_code = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+# HTC-6, CQ-005: Result over panic; expect("<reason>") stays for a proven invariant.
+unwrap_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+# HTC-8, OB-001: log through tracing, never stdout/stderr, outside main.rs.
+print_stdout = "deny"
+print_stderr = "deny"

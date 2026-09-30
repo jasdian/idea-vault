@@ -1,6 +1,10 @@
 //! D14/ADR-0006 swarm tests against the instrumented mock Ollama, including the docs/10
 //! keystone: fan out N ≫ K agents, assert max concurrent Ollama calls == K and all N complete;
 //! failed agents null out and the judge skips them; only the synthesis is persisted.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

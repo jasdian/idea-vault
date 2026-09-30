@@ -3,6 +3,10 @@
 //! first message, the `source_*` leaves are offered, and the reply still lands end-to-end; a
 //! stale attach list degrades to a plain unscoped turn instead of failing; and the per-idea
 //! meter counts the source-schema bytes the next turn will actually carry.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

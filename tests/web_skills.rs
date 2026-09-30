@@ -1,6 +1,10 @@
 //! The skill book (`GET /skills`, `POST /skills/reload`, ADR-0022) and owner-authored skills in
 //! `vault/.skills/`: listing, broken-file surfacing, live reload into a runnable move, and the
 //! swarm route's capstone guard. Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

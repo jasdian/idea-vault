@@ -1,5 +1,9 @@
 //! Boot / HTTP surface smoke test (docs/09-web-ui.md D17). Exercises the router end-to-end with a
 //! refusing Ollama URL — no network beyond a loopback connection that is refused fast.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 use std::sync::{Arc, Mutex};
 

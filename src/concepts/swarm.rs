@@ -237,7 +237,10 @@ pub(crate) fn judge(results: &[Option<AgentResult>]) -> Vec<&AgentResult> {
 ///
 /// Unknown angles fail fast before any model call. If every agent fails the swarm errors with
 /// [`ConceptError::NothingToSynthesize`] and nothing is appended.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent job input (backend, semaphore, registry, budget, related, progress); bundling them would be a one-caller struct (HTC-2)"
+)]
 pub async fn swarm(
     ollama: &LlmBackend,
     ai_semaphore: &Semaphore,

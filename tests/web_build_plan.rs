@@ -1,5 +1,9 @@
 //! The build-plan artifact page (docs/adr/0030): the "Use it" box offers `PROMPT.md` and
 //! `plan.md` copy blocks derived at view time, escaped, and only for build-plan artifacts.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

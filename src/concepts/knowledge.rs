@@ -81,7 +81,10 @@ fn lens_title(lens: &str) -> String {
 /// run errors with [`ConceptError::NothingToSynthesize`] and nothing is written. All vault
 /// writes happen in one await-free block after the last model call, so a cancelled job persists
 /// either the whole `.md` set or nothing (ADR-0010 abort safety).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent job input (backend, semaphore, registry, budget, progress); bundling them would be a one-caller struct (HTC-2)"
+)]
 pub async fn extract_knowledge(
     ollama: &LlmBackend,
     ai_semaphore: &Semaphore,

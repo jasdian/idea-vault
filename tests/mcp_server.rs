@@ -7,6 +7,10 @@
 //! `LocalSessionManager`/`TaskRegistry` state living inside its mounted `StreamableHttpService`)
 //! is built ONCE per test and reused via `Router::clone()` — a fresh `build_router` call would
 //! mint a fresh, empty session/task registry and break the handshake.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -2,6 +2,10 @@
 //! regressions: each fixture is a small synthetic discussion plus a model answer in the
 //! build-plan grammar, run through the public `parse` and `gates::run`, asserting where the
 //! offending claim landed and which marker or note it carries. No model, no real vault.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 use idea_vault::ai::sources::SourceProbe;
 use idea_vault::concepts::audit::Label;

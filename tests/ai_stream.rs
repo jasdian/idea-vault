@@ -1,6 +1,10 @@
 //! AI streaming tests against the scriptable mock Ollama (docs/10-testing-strategy.md):
 //! tokens-then-done, hard timeout on stall, protocol error on early EOF, connection refused,
 //! and probe health states. No live model, no external network — everything is loopback.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

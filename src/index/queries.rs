@@ -366,7 +366,6 @@ pub struct LexicalHit {
     pub score: f64,
 }
 
-const LEXICAL_KINDS: &str = "('title', 'tags', 'idea_body', 'memory')";
 const LEXICAL_MAX_TOKENS: usize = 20;
 const LEXICAL_MIN_TERM_CHARS: usize = 3;
 const LEXICAL_FTS_DDL: &str = "DROP TABLE IF EXISTS temp.lexical_vocab;
@@ -379,12 +378,11 @@ const LEXICAL_FTS_DDL: &str = "DROP TABLE IF EXISTS temp.lexical_vocab;
 // `search_fts` contents, same rowids, so every bm25 and vocab read that follows sees them.
 fn refresh_lexical_fts(conn: &Connection) -> Result<(), IndexError> {
     conn.execute_batch(LEXICAL_FTS_DDL)?;
+    // The eligible kinds are spelled in the literal: SQL is never built with format! (sql-literal).
     conn.execute(
-        &format!(
-            "INSERT INTO temp.lexical_fts (rowid, idea_id, kind, content, ref)
-             SELECT rowid, idea_id, kind, content, ref FROM main.search_fts
-             WHERE kind IN {LEXICAL_KINDS}"
-        ),
+        "INSERT INTO temp.lexical_fts (rowid, idea_id, kind, content, ref)
+         SELECT rowid, idea_id, kind, content, ref FROM main.search_fts
+         WHERE kind IN ('title', 'tags', 'idea_body', 'memory')",
         [],
     )?;
     Ok(())
@@ -712,30 +710,33 @@ pub fn turn_fact_hits(
         .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" OR ");
-    let mut stmt = conn.prepare(&format!(
+    let mut stmt = conn.prepare(
         "SELECT i.slug, i.title, s.ref,
                 (SELECT MIN(mf.title) FROM memory_facts mf
                  WHERE mf.idea_id = s.idea_id AND mf.slug = s.ref),
                 s.content,
-                snippet(lexical_fts, 2, '', '', '…', {TURN_SNIPPET_TOKENS}),
+                snippet(lexical_fts, 2, '', '', '…', ?3),
                 bm25(lexical_fts)
          FROM temp.lexical_fts s
          JOIN ideas i ON i.id = s.idea_id
          WHERE lexical_fts MATCH ?1
            AND s.kind = 'memory'
-           AND i.slug <> ?2"
-    ))?;
-    let rows = stmt.query_map(rusqlite::params![&match_expr, slug], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, f64>(6)?,
-        ))
-    })?;
+           AND i.slug <> ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![&match_expr, slug, TURN_SNIPPET_TOKENS],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, f64>(6)?,
+            ))
+        },
+    )?;
     let mut hits = Vec::new();
     for row in rows {
         let (idea_slug, idea_title, fact_slug, fact_title, content, snippet, bm25) = row?;

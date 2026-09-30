@@ -1,6 +1,10 @@
 //! Web handler tests for R8 search and R10 admin reindex: FTS fragment rendering (escaped
 //! snippets), hostile input, and the manual-reconcile path for edits the boot drift check
 //! cannot see (hand-edited conversations — the ADR-0002 recovery story through the browser).
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

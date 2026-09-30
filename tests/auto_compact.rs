@@ -2,6 +2,10 @@
 //! Covers the fold slice / no-double-count / empty-output-abort invariants, the delete_turn
 //! fingerprint edges (self-heal), reopen reuse, and that Store distils the FULL transcript and
 //! never touches `compacted.md`.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

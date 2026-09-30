@@ -1,6 +1,10 @@
 //! D18 skill-invocation tests against the mock Ollama: context hydration reaches the model,
 //! output lands as an assistant turn only after completion, failures append nothing, and the
 //! shared semaphore gates the call. No live model.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -2,6 +2,10 @@
 //! docs/10 keystone shape: fan out N lenses through K permits, assert max concurrent calls == K;
 //! per-lens findings persist as artifacts (unlike the swarm, which discards intermediates);
 //! failures degrade per-lens; an all-fail run writes nothing.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

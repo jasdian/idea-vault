@@ -2,6 +2,10 @@
 //! carries only verified anchors with them; Panel scorers see one proposal each, as the Auditor;
 //! a Loop stops on a dry round; stage artifacts and the run record land only with the final
 //! persist, never on a cancel or a failed final stage, and never as evidence. No live model.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

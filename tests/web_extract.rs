@@ -1,5 +1,9 @@
 //! Web handler tests for R18–R20 (docs/adr/0015): the extract-knowledge background job (with
 //! the opt-in HTML report), the artifacts panel, and per-file view/delete — mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

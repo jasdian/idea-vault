@@ -1,5 +1,9 @@
 //! Web handler tests for R2, the idea page: sanitized markdown rendering, transcript, memory
 //! panel, and the D20 degraded/available compose-box states.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -1,6 +1,10 @@
 //! Agent-role tests against the mock Ollama (docs/06-concepts/agents.md): each standard role's
 //! persona reaches the model, the skill lens hydrates, failures surface as errors for the
 //! orchestrator to null-out (D14), and nothing touches the vault. No live model.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

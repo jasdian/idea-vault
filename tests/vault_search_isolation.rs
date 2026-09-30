@@ -2,6 +2,10 @@
 //! instruments (ADR-0027, ADR-0031): context reaches the model by push, never by pull, and the
 //! query-driven retriever was killed by its pre-registered experiment. Characterization: no
 //! model-facing tool list and no module outside `index` may mention either.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

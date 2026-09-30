@@ -3,6 +3,10 @@
 //! with its tool rounds and contract outcome, and ends with `RunFinished` — cancelled when the
 //! owner cancels. The journal is diagnostics only: a journal that cannot be written never fails
 //! the turn, reindex never reads it, and fork never copies it. Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

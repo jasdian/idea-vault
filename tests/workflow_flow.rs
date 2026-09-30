@@ -1,6 +1,10 @@
 //! D19/D32 workflow tests against the mock Ollama: deterministic control flow (fixed stage
 //! order), failed step nulled + judge skips, chained output carried forward, the audit stage
 //! gated by its toggle, only the final output persisted. No live model.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

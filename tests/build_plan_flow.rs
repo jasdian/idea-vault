@@ -1,6 +1,10 @@
 //! The build-plan persist boundary (docs/adr/0030): a gated plan lands as an artifact, the
 //! transcript gets only a pointer turn, and pointer turns never ground a later plan. Both
 //! capstone paths (the quick skill and the audited workflow) reach it against the mock Ollama.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

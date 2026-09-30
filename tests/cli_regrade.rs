@@ -2,6 +2,10 @@
 //! temp vault holding one run journal. Exit 0 with a flip report by default, 1 on a flip only
 //! with `--strict`; `--export` writes a corpus fixture under the working directory and nothing
 //! into the vault.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -3171,9 +3171,9 @@ Run the cheapest disproof before any Rust exists.
     }
 
     mod regate {
-        use super::super::*;
         use crate::ai::sources::SourceProbe;
         use crate::concepts::build_plan::gates::{self, Evidence, GateInputs};
+        use crate::concepts::build_plan::plan::*;
 
         const CONVERSATION: &str = "## user\nWe run the cheapest disproof before any Rust exists. \
 Leave `vendor/lib.rs` unchanged, it is upstream code. Turns parse in the store.\n\n\

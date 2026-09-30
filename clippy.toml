@@ -1,0 +1,5 @@
+# Test code may unwrap and print (HTC-6, HTC-8 apply to shipping code only).
+allow-unwrap-in-tests = true
+allow-print-in-tests = true
+# NC-006: acronyms are words in names (HttpClient, not HTTPClient).
+upper-case-acronyms-aggressive = true

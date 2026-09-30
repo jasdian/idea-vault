@@ -1,6 +1,10 @@
 //! Web handler tests for R6 skill / R7 swarm (D18/D14): 200 `_turn.html` partials appended,
 //! guards, and the persist rules (skill output appended by invoke; swarm persists only the
 //! synthesis). Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -1,5 +1,9 @@
 //! Web handler tests for R3 create (D10): create→Draft with truth on disk before index, slug
 //! collision handling, and input validation. Runs the real router over temp dirs.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

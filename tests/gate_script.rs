@@ -3,6 +3,10 @@
 //! 7's honesty check. Each test runs the real script inside a scratch git repository with `main`
 //! and a feature branch; `cargo` is a stub on PATH that logs its arguments, so there is no test
 //! seam inside gate.sh.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 mod support;
 
 use std::fs;

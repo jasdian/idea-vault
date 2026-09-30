@@ -1,6 +1,10 @@
 //! claude-code backend tests (docs/adr/0009) against a fake `claude` CLI script that emits canned
 //! `stream-json`. No real Claude, no network. Proves the streaming/parse contract; the persist
 //! boundaries above the backend are identical to the Ollama path (same code in web::routes::chat).
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 use std::path::PathBuf;
 use std::time::Duration;

@@ -2,6 +2,10 @@
 //! model, the index, and search, but nothing ever populated them): the inline editor
 //! (`POST /idea/{slug}/tags`), the chips on rows/idea pages, and the `?tag=` list filter that
 //! finally routes `ideas_with_tag`.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -2,6 +2,10 @@
 //! questions and owner-held tasks makes a new version without a model call, never touches the
 //! base, and refuses while a model job runs; the artifact page carries the forms on the head
 //! only; re-planning is a background job whose plan joins the lineage.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

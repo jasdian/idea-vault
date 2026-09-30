@@ -1,5 +1,9 @@
 //! The "btw" history view and fork-to-new-idea: a fork carries the full context (body +
 //! conversation + memory) into a new idea, leaving the original untouched.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

@@ -1,6 +1,10 @@
 //! Web handler tests for R4 store / R5 reopen (D12/D13): the remaining state-machine
 //! transitions through the real router — store→Stored writes consolidation + memory,
 //! reopen→Reopened loads context truth-idempotently. Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

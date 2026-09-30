@@ -1,6 +1,10 @@
 //! D12/D13 memory pipeline tests against the mock Ollama: store extracts + consolidates,
 //! re-store merges + dedupes (memory only grows), AI failure leaves truth untouched, and
 //! reopen-time load assembles MEMORY.md-first context under budget. No live model.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 
