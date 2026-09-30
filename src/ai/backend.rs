@@ -31,6 +31,7 @@ use crate::ai::journal::{self, CallRecord, JournalHandle, ToolRecord};
 use crate::ai::mcp::{McpClient, McpSession, McpTool};
 use crate::ai::ollama::{ChatMessage, ChatOptions, OllamaClient, TokenStream};
 use crate::ai::untrusted::{fence_untrusted, FENCE_NOTE};
+use crate::ai::verdict::{HaystackRef, ParserKind};
 use crate::ai::{AiError, AiHealth};
 use crate::domain::OutputContract;
 use crate::mcp::{McpRegistry, McpServerConfig};
@@ -252,13 +253,62 @@ impl LlmBackend {
         let (Some(j), Some(seq)) = (&self.journal, meta.journal_seq) else {
             return;
         };
-        // The contract's frontmatter spelling (`ranked_list`, …), so the journal reads like a skill.
-        let name = serde_json::to_value(contract)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default();
         if let Ok(mut w) = j.lock() {
-            w.record_contract(seq, &name, outcome.clone());
+            w.record_contract(seq, &contract_name(contract), outcome.clone());
+        }
+    }
+
+    /// Record a parser's verdict on call `meta`'s answer in the run journal (docs/adr/0038), for
+    /// `regrade` to replay. A no-op for an unjournaled call.
+    pub fn record_verdict(
+        &self,
+        meta: &CallMeta,
+        parser: ParserKind,
+        summary: String,
+        haystack: Option<HaystackRef>,
+    ) {
+        let (Some(j), Some(seq)) = (&self.journal, meta.journal_seq) else {
+            return;
+        };
+        if let Ok(mut w) = j.lock() {
+            w.record_verdict(seq, parser, summary, haystack);
+        }
+    }
+
+    /// Record the output-contract verdict on call `meta`'s raw answer (docs/adr/0038): every
+    /// validated call gets one, the retry included, so `regrade --parser contract` sees each.
+    pub fn record_contract_verdict(&self, meta: &CallMeta, contract: OutputContract, raw: &str) {
+        if self.journal.is_none() {
+            return;
+        }
+        self.record_verdict(
+            meta,
+            ParserKind::Contract {
+                name: contract_name(contract),
+            },
+            crate::ai::contract::summarize_contract(contract, raw),
+            None,
+        );
+    }
+
+    /// [`Self::record_verdict`] on the call `contract` last settled on in this run: for a verdict
+    /// computed downstream of the call, where its meta is no longer at hand (the build-plan gates
+    /// run on the kept planner answer, and a run has one planner call). A no-op when unjournaled
+    /// or when no call settled on `contract`.
+    pub fn record_verdict_on_contract(
+        &self,
+        contract: OutputContract,
+        parser: ParserKind,
+        summary: String,
+        haystack: Option<HaystackRef>,
+    ) {
+        let Some(j) = &self.journal else {
+            return;
+        };
+        if let Ok(mut w) = j.lock() {
+            if let Some(seq) = w.last_contract_call(&contract_name(contract)) {
+                w.record_verdict(seq, parser, summary, haystack);
+            }
         }
     }
 
@@ -1200,6 +1250,14 @@ pub(crate) fn claude_mcp_config_json(servers: &[McpServerConfig]) -> Option<Stri
         map.insert(server.name.to_string(), entry);
     }
     Some(serde_json::json!({ "mcpServers": map }).to_string())
+}
+
+/// A contract's frontmatter spelling (`ranked_list`, …), so the journal reads like a skill.
+fn contract_name(contract: OutputContract) -> String {
+    serde_json::to_value(contract)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -72,6 +72,7 @@ fn kind_of(entry: &JournalEntry) -> &'static str {
         JournalEntry::RunStarted { .. } => "run_started",
         JournalEntry::LlmCall { .. } => "llm_call",
         JournalEntry::ToolCall { .. } => "tool_call",
+        JournalEntry::Verdict { .. } => "verdict",
         JournalEntry::Contract { .. } => "contract",
         JournalEntry::RunFinished { .. } => "run_finished",
     }
@@ -95,7 +96,13 @@ async fn skill_job_writes_started_llmcall_contract_finished() {
     let kinds: Vec<&str> = entries.iter().map(kind_of).collect();
     assert_eq!(
         kinds,
-        ["run_started", "llm_call", "contract", "run_finished"]
+        [
+            "run_started",
+            "llm_call",
+            "verdict",
+            "contract",
+            "run_finished"
+        ]
     );
     match &entries[0] {
         JournalEntry::RunStarted {
@@ -133,7 +140,7 @@ async fn skill_job_writes_started_llmcall_contract_finished() {
         other => panic!("{other:?}"),
     }
     assert!(matches!(
-        &entries[3],
+        &entries[4],
         JournalEntry::RunFinished {
             outcome: RunOutcome::Done,
             llm_calls: 1,

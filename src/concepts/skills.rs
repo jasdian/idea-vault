@@ -13,6 +13,7 @@ use crate::ai::budget::{
 use crate::ai::call::CallMeta;
 use crate::ai::contract::{self, ContractOutcome};
 use crate::ai::ollama::ChatMessage;
+use crate::ai::verdict::ParserKind;
 use crate::ai::LlmBackend;
 use crate::concepts::agents::AgentRole;
 use crate::concepts::build_plan;
@@ -488,6 +489,7 @@ pub(crate) async fn ask_on_contract(
         .await
         .map_err(|_| ConceptError::SemaphoreClosed)?;
     let (first, first_meta) = ask(prompt.clone()).await?;
+    llm.record_contract_verdict(&first_meta, contract, &first);
     let settle = |kept: String, meta: &CallMeta, outcome: ContractOutcome| {
         llm.record_contract(meta, contract, &outcome);
         Ok((kept, outcome))
@@ -530,6 +532,9 @@ pub(crate) async fn ask_on_contract(
     progress(&format!("{label} · reshaping the answer"));
     tracing::info!(label, %violation, "contract violated; retrying once");
     let retried = ask(format!("{prompt}{}", contract::retry_note(&violation))).await;
+    if let Ok((second, meta)) = &retried {
+        llm.record_contract_verdict(meta, contract, second);
+    }
     let first_wins = |second: &str| first_score.is_some_and(|before| before > plan_score(second));
     let off = ContractOutcome::OffContract(violation.to_string());
     if let Ok((second, meta)) = &retried {
@@ -623,7 +628,20 @@ pub(crate) async fn persist_plan(
     })
     .await;
     match joined {
-        Ok(result) => result,
+        Ok(result) => {
+            if let Ok(done) = &result {
+                // The gates judged the kept planner answer; the journal pins that verdict to the
+                // call the BuildPlan contract settled on (docs/adr/0038). A workbench version made
+                // no call, so nothing is recorded for it.
+                llm.record_verdict_on_contract(
+                    OutputContract::BuildPlan,
+                    ParserKind::PlanGates,
+                    done.verdict.clone(),
+                    Some(done.evidence.clone()),
+                );
+            }
+            result
+        }
         Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
         Err(e) => Err(ConceptError::Vault(crate::vault::VaultError::Io(
             std::io::Error::other(format!("build-plan task did not finish: {e}")),

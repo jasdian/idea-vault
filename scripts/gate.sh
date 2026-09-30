@@ -12,7 +12,8 @@
 #   5. fmt         — cargo fmt --check
 #   6. clippy      — cargo clippy --all-targets -D warnings
 #   7. honesty     — every changed fixture/snapshot, rising floor and removed or downgraded
-#                    invariant id is declared under `## Expectation changes`
+#                    invariant id is declared under `## Expectation changes`; then the parser
+#                    corpus is replayed on its own (ADR-0038), so its verdict is named in the log
 # Budget is deliberately not a step: there is no metered spend (Ollama is local, claude runs on a
 # subscription) and the runtime cap is the workflow CallBudget (ADR-0034).
 #
@@ -29,7 +30,7 @@ STEPS='1|intent|top intent block: acceptance bullets, an ADR/D token, changed si
 4|tests|cargo test (red first if PARSER_CORPUS_BLESS is set)
 5|fmt|cargo fmt --check
 6|clippy|cargo clippy --all-targets -- -D warnings
-7|honesty|changed fixtures, snapshots, rising floors and removed/downgraded rules are declared'
+7|honesty|changed fixtures, snapshots, rising floors and removed/downgraded rules are declared; parser corpus replay'
 
 usage() {
     printf 'gate.sh: %s\n' "$1" >&2
@@ -197,5 +198,9 @@ else
     fi
     echo "  ${#surface[@]} expectation change(s), all declared"
 fi
+# The corpus already ran inside step 4; replaying it here names a parser flip as a weakened
+# expectation rather than one failure among many (ADR-0038, D40). Needs no vault, unlike
+# `idea-vault regrade --strict`, which stays outside the offline gate.
+cargo test --quiet --test parser_corpus || fail "honesty (parser corpus replay: a parser verdict flipped)"
 
 printf '\n\033[32mGATE PASSED — intent + invariants + build + tests + fmt + clippy + honesty green.\033[0m\n'
