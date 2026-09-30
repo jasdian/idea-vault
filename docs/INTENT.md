@@ -1,3 +1,38 @@
+# Intent — plan owner answers: never demoted by G6, G10 settled by its answer (ADR-0030, ADR-0032)
+
+Two defects seen live on a plan lineage. An owner's workbench answer holding a figure ("2.1.285",
+"24h") was moved from Settled to Verify first by G6, whose figure and recount checks exist to catch
+model-invented numbers; the answer then fell out of `answered_in_lineage`, which read only Settled.
+And G10 re-opened its "gate language without a kill row" question with the identical text the
+moment the owner answered it, because the answer removed the only thing that suppressed it. Design:
+ADR-0030 amendment (owner-answer exemption, G6 glued units, G10 settled-by-window and quoted-mention rules) and
+ADR-0032 amendment (lineage reads every section; the workbench restores a demoted answer).
+
+## Acceptance criteria
+
+- A Settled item that is an owner answer (`answers` or `unblocks`, Owner provenance, text equal to
+  its quote or a prefix of it ending in `…`) is never moved by a claim gate: G6 skips it, and a G4
+  anchor fault or G12 freshness cue is a marker on the Settled item, which keeps its `S#` on later
+  versions. A foil-grounded item, an owner quote without an answer key, a model paraphrase and a
+  bare prefix carrying the answer keys keep every gate.
+- G6 finds a figure the discussion states with a glued unit: a claim's `24h` or `24 hours` is not
+  `figure not in the discussion` when the discussion says `24h`.
+- `answered_in_lineage` reads `answers` items from Settled, Verify first, Open and Quarantined, so
+  an answer a gate moved is still carried and never re-asked.
+- A workbench answer moves every owner answer an older version left in Verify first back to
+  Settled, unmarked, before the gates run.
+- An owner answer to a G10 question settles the window that question quoted (wherever it occurs,
+  including a later paste) and the answer turn itself; gate language in any other owner turn,
+  before or after the answer, still opens a question. The answer text also occurring in an earlier
+  turn changes nothing.
+- G10 ignores a gate phrase wrapped in a matching pair of quote marks (`"only if"`, `'only if'`,
+  curly quotes normalized); a quoted sentence containing gate language still fires.
+- Every change is observed failing first, and `bash scripts/gate.sh` is green.
+
+## Expectation changes
+
+None: no fixture, snapshot, floor or existing test expectation changes.
+
 # Intent — drt transplants: run journal, regrade corpus, provenance, foil hardening + lockdown, no-mistakes gate (ADR-0037..0041)
 
 Five practices from the DRT harness, carried into idea-vault. A model call leaves no record beyond

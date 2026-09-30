@@ -278,6 +278,35 @@ The `plan.md` header also gained the `Commands:` line: copied literally, `grep -
 - **Pointer.** The open-questions line links to the workbench (`#work`, per-question `#q-Q6`
   anchors) instead of "answer in chat, then build again".
 
+### Owner answers after the first workbench lineage (2026-09-30)
+
+- **Owner-answer exemption.** A Settled item with an `answers` or `unblocks` field, Owner
+  provenance, and text equal to its quote (or a prefix of it ending in `…`) is never moved by a
+  claim gate. G6's figure and recount checks catch model-invented numbers, and a figure the owner
+  wrote in their own answer turn is in the discussion by definition, so G6 skips it. A G4 anchor
+  fault or a G12 freshness cue becomes a marker on the Settled item instead of a move, so the
+  check stays visible and the answer keeps its `S#` across versions. G5 needs no exemption: every
+  token of the answer is in an owner turn. The answer keys are code-owned (the model parse drops
+  them) and provenance comes from G1, so a model cannot claim the exemption; a model item that
+  paraphrases an answer, or narrows it to a bare prefix, keeps every gate. Live, "24h" and
+  "2.1.285" in two owner answers had moved them to Verify first as `recount: no count command` and
+  `figure not in the discussion: 24`.
+- **G6 reads a glued unit.** A figure is looked up as a whole word in the discussion or among the
+  figures the discussion states, read the same way (`24h` states `24`), so a claim restating a
+  discussed `24h` as `24h` or `24 hours` is found.
+- **G10 is settled by its answer.** An owner answer to a G10 question (its `asked` starts with
+  `gate language without a kill row`) settles what that question quoted: the quoted window is read
+  back from `asked`, and every occurrence of it in an Owner or Idea turn (the turn it was asked
+  about, or a later turn that pastes it back) is skipped, as is the answer turn itself (the one
+  opening `Re <qid> (<stem>):`). Gate language the question never quoted, earlier or later, still
+  opens a question, one per version. Before this, answering the question removed the Open item that
+  suppressed it and the next version re-asked it with the identical text.
+- **G10 skips a quoted mention.** A gate phrase wrapped in a matching pair of quote marks
+  (`"only if"`, `'only if'`; curly quotes are normalized first) is the owner naming the phrase, not
+  setting a gate. A quoted sentence that contains gate language (`"ship only if tests pass"`) still
+  fires unless it pastes an answered question's window. Backticks cannot be told apart:
+  normalization strips them before G10 reads the text.
+
 ## Known misses
 
 These are named here rather than in each plan:
@@ -290,6 +319,7 @@ These are named here rather than in each plan:
 - an UNCERTAIN harvested finding that restates the owner's own words moves them to Open, so the
   audit's doubt can outrank the owner's statement (closed for a recorded owner answer by the
   2026-09-30 amendment above; still open for a statement the owner made in ordinary chat);
+- a gate phrase in backticks (`` `only if` ``) still reads as gate language;
 - whether hydration clipped the discussion: only the audited (`ready-to-build`) planner is told,
   the quick path is not, and the artifact header records it for neither, so the trust line reads
   `truncation not recorded`.

@@ -447,6 +447,23 @@ fn apply_answers(plan: &mut BuildPlan, answers: &[Answered]) {
     }
 }
 
+/// Put every owner answer found in Verify first back in Settled, unmarked, before the gates run:
+/// no gate moves an owner answer (ADR-0030 §G6), but `reset_derived` keeps a premise's move
+/// reason, so an answer stored in Verify first would otherwise stay a premise for good
+/// (docs/adr/0032).
+fn restore_answers(plan: &mut BuildPlan) {
+    let (answers, kept): (Vec<Item>, Vec<Item>) = std::mem::take(&mut plan.verify)
+        .into_iter()
+        .partition(|i| i.field("answers").is_some() || i.field("unblocks").is_some());
+    plan.verify = kept;
+    for mut item in answers {
+        item.id = next_free_id(&plan.settled, 'S');
+        item.markers.clear();
+        item.fields.remove("check");
+        plan.settled.push(item);
+    }
+}
+
 /// `**Build plan** → [<stem>](…) · v3 · answers on <base> · audit not re-run`, then what the
 /// answers did.
 fn answer_pointer(req: &AnswerRequest, stem: &str, version: u32, v: &Versioned) -> String {
@@ -566,6 +583,7 @@ pub fn answer(req: AnswerRequest) -> Result<Versioned, WorkbenchError> {
         .collect();
     let mut plan = parsed;
     reset_derived(&mut plan);
+    restore_answers(&mut plan);
     apply_answers(&mut plan, &this);
 
     let evidence = Evidence::new(&idea.body, &conversation);
@@ -762,6 +780,37 @@ Ship the zone snapshot tool.
             now: at(minute),
             via: AnswerChannel::Web,
         })
+    }
+
+    /// Rewrite `stem` on disk as a plan written before owner answers were exempt from G6: the
+    /// Settled item `sid` sits in Verify first as `P1`, with `marker`.
+    pub(crate) fn demote_to_verify(dir: &Path, stem: &str, sid: &str, marker: &str) {
+        let path = dir.join(SLUG).join("artifacts").join(format!("{stem}.md"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut kept = Vec::new();
+        let mut block = Vec::new();
+        let mut inside = false;
+        for line in text.lines() {
+            if line.starts_with(&format!("- {sid}: ")) {
+                inside = true;
+                let rest = line.trim_start_matches(&format!("- {sid}: "));
+                block.push(format!("- P1: {rest} ⟨{marker}⟩"));
+                continue;
+            }
+            if inside && line.starts_with("  ") {
+                block.push(line.to_string());
+                continue;
+            }
+            inside = false;
+            if line == "## Open questions" {
+                kept.push("## Verify first".to_string());
+                kept.append(&mut block);
+                kept.push(String::new());
+            }
+            kept.push(line.to_string());
+        }
+        assert!(block.is_empty(), "no Open questions section in {stem}");
+        std::fs::write(&path, kept.join("\n") + "\n").unwrap();
     }
 
     fn snapshot(dir: &Path) -> (String, Vec<store::ArtifactFile>) {
@@ -1068,5 +1117,154 @@ Ship the zone snapshot tool.
             Some("pick one")
         );
         assert_eq!(hedge_warning("Use the paper account."), None);
+    }
+
+    const FIGURE_ANSWER: &str = "Freeze at entry; measured on claude 2.1.285, a 24h TTL holds.";
+
+    #[test]
+    fn answer_with_a_figure_stays_settled() {
+        let dir = seeded();
+        let v = submit(dir.path(), BASE, &[("Q1", FIGURE_ANSWER)], 1).unwrap();
+        let s = answer_holder(&v.plan, "Q1").unwrap();
+        assert!(s.id.starts_with('S'), "{s:?} / verify {:?}", v.plan.verify);
+        assert!(s.markers.is_empty(), "{s:?}");
+    }
+
+    #[test]
+    fn answer_restores_owner_answer_moved_by_g6() {
+        let dir = seeded();
+        let v2 = submit(dir.path(), BASE, &[("Q1", FIGURE_ANSWER)], 1).unwrap();
+        let sid = answer_holder(&v2.plan, "Q1").unwrap().id.clone();
+        demote_to_verify(
+            dir.path(),
+            &v2.stem,
+            &sid,
+            "figure not in the discussion: 24",
+        );
+        let demoted = plan_view(dir.path(), SLUG, None).unwrap().plan;
+        assert_eq!(answer_holder(&demoted, "Q1").unwrap().id, "P1");
+
+        let v3 = submit(
+            dir.path(),
+            &v2.stem,
+            &[("Q2", "Binance spot, daily candles.")],
+            2,
+        )
+        .unwrap();
+        let s = answer_holder(&v3.plan, "Q1").unwrap();
+        assert!(s.id.starts_with('S'), "{s:?} / verify {:?}", v3.plan.verify);
+        assert!(s.markers.is_empty(), "{s:?}");
+        assert!(v3.plan.verify.is_empty(), "{:?}", v3.plan.verify);
+        assert_eq!(
+            v3.plan
+                .settled
+                .iter()
+                .filter(|i| i.field("answers") == Some("Q1"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn answer_with_a_freshness_cue_stays_settled_across_versions() {
+        let dir = seeded();
+        let fresh = "Freeze at entry, using the latest snapshot as of the run.";
+        let v2 = submit(dir.path(), BASE, &[("Q1", fresh)], 1).unwrap();
+        let s2 = answer_holder(&v2.plan, "Q1").unwrap().clone();
+        assert!(
+            s2.id.starts_with('S'),
+            "{s2:?} / verify {:?}",
+            v2.plan.verify
+        );
+        assert!(
+            s2.markers.iter().any(|m| m.starts_with("freshness")),
+            "{s2:?}"
+        );
+        let v3 = submit(
+            dir.path(),
+            &v2.stem,
+            &[("Q2", "Binance spot, daily candles.")],
+            2,
+        )
+        .unwrap();
+        let s3 = answer_holder(&v3.plan, "Q1").unwrap();
+        assert_eq!(s3.id, s2.id, "the answer keeps its id: {:?}", v3.plan);
+        assert!(v3.plan.verify.is_empty(), "{:?}", v3.plan.verify);
+    }
+
+    const GATED_PLAN: &str = "## Goal
+Ship the zone snapshot tool.
+
+## Settled
+- S1: Disproof comes before any code.
+  quote: \"the cheapest disproof before any Rust exists\"
+
+## Open questions
+- Q1: Freeze the zone snapshot at entry, or dwell on the live label?
+
+## Plan
+- [ ] T1: Write the spec
+  touches: `SPEC.md`
+  accept: `test -s SPEC.md` → exit 0";
+
+    #[test]
+    fn answering_g10_question_does_not_reopen_it() {
+        let dir = seeded();
+        store::append_turn(
+            dir.path(),
+            SLUG,
+            "user",
+            "Ship the freezer only if the backtest holds up on last year.",
+        )
+        .unwrap();
+        let probe = SourceProbe::default();
+        let first = finish(PlanInputs {
+            vault_dir: dir.path(),
+            idea_slug: SLUG,
+            answer: GATED_PLAN,
+            turn_role: "assistant (skill: build-prompt)",
+            lens: "build-prompt",
+            recipe: None,
+            model: "llama3.2".into(),
+            audit: None,
+            probe: &probe,
+            now: at(1),
+        })
+        .unwrap();
+        let base = plan_view(dir.path(), SLUG, None).unwrap();
+        assert_eq!(base.stem, first.artifact_slug);
+        let gate = base
+            .plan
+            .open
+            .iter()
+            .find(|q| q.text.contains("gate language without a kill row"))
+            .expect("G10 asks about the owner's gate language")
+            .id
+            .clone();
+
+        let v = submit(
+            dir.path(),
+            &base.stem,
+            &[(&gate, "No kill row: the freezer is cheap to throw away.")],
+            2,
+        )
+        .unwrap();
+        assert!(
+            v.plan
+                .open
+                .iter()
+                .all(|q| !q.text.contains("gate language without a kill row")),
+            "{:?}",
+            v.plan.open
+        );
+        let v3 = submit(dir.path(), &v.stem, &[("Q1", Q1_ANSWER)], 3).unwrap();
+        assert!(
+            v3.plan
+                .open
+                .iter()
+                .all(|q| !q.text.contains("gate language without a kill row")),
+            "the G10 answer holds on later versions: {:?}",
+            v3.plan.open
+        );
     }
 }
