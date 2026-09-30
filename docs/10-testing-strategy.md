@@ -173,6 +173,38 @@ The shipping gate ([ADR-0041](./adr/0041-no-mistakes-gate.md), [docs/14](./14-no
   named in the protocol; every `[product]` phrase of the docs/14 checklist appears verbatim in it; and
   `tests/web_build_plan.rs` checks the findings clause reaches the owner's `PROMPT.md` before `## PINNED`.
 
+## CI, automated review and hotfix
+
+Three GitHub Actions workflows run this suite off the owner's machine. The setup each needs is in
+its header comment.
+
+- **`.github/workflows/ci.yml`** (`CI`) runs on every pull request and every push to main, on stable
+  Rust: `cargo build --locked --all-targets`, `cargo test --locked`, `cargo fmt --all -- --check`
+  and `cargo clippy --locked --all-targets -- -D warnings`. That is gate steps 3 to 6. Steps 1, 2
+  and 7 (intent, invariants and honesty) run only locally, in `scripts/gate.sh`.
+- **`claude-review.yml`** runs when CI goes green on a same-repo PR by the owner or on a
+  `hotfix/ci-*` PR from the hotfix workflow. Claude posts one review comment. Fork PRs never
+  qualify.
+- **`claude-ci-hotfix.yml`** runs when CI fails on a push to main. It can also be dispatched with
+  the `run_id` of such a run. It dedupes on the failing sha, so a re-run never files a second issue
+  or PR. It then dumps the failed log and hands it to Claude as untrusted data, and Claude opens a
+  `ci-failure` issue with a diagnosis. There are two outcomes:
+  - **Main is already green** after a later commit: Claude only records the failure and closes the
+    issue.
+  - **Main still fails:** Claude branches `hotfix/ci-<run_id>` from current main, fixes the root
+    cause and re-runs CI's four commands. It then opens a `Fixes #N` PR. The owner merges it; the
+    workflow never pushes to main and never merges.
+- **Guardrails.** These are the [ADR-0041](./adr/0041-no-mistakes-gate.md) guardrails: no lint
+  suppression, no weakened check, no fixture, snapshot or floor edit unless it is declared, and at
+  most 3 fix attempts before the workflow gives a diagnosis only. After Claude finishes, a
+  deterministic step checks that main did not move and that the hotfix diff adds no
+  `#[allow]`/`#[expect]` and touches no workflow, gate or lint config.
+- **CI on the hotfix PR.** It only starts on its own when the repository secret `CI_HOTFIX_TOKEN` is
+  set. Without it the PR is opened with `GITHUB_TOKEN`, which GitHub does not chain runs from, so
+  the PR and the issue tell the owner to start CI by hand.
+- **Not gate-green.** A hotfix branch has run CI's commands, not `scripts/gate.sh`. Run the gate
+  locally before merging it if the fix touches anything steps 1, 2 or 7 check.
+
 ## What is explicitly not tested by machines
 
 - Prompt *quality* / whether the AI's critique is "good" — subjective, out of scope for automated
@@ -185,4 +217,5 @@ The shipping gate ([ADR-0041](./adr/0041-no-mistakes-gate.md), [docs/14](./14-no
 - [03-data-model](./03-data-model.md) — D15 and the truth/derived contract the keystone test guards.
 - [05-ai-integration](./05-ai-integration.md) — D20/D24 behaviors the AI tests assert.
 - [06-concepts/swarm](./06-concepts/swarm.md) — D21 limits the concurrency test enforces.
-- [14-no-mistakes-gate](./14-no-mistakes-gate.md) — the gate that runs this suite (D41).
+- [14-no-mistakes-gate](./14-no-mistakes-gate.md) — the gate that runs this suite (D41), and the
+  guardrails the CI hotfix workflow follows ([ADR-0041](./adr/0041-no-mistakes-gate.md)).
