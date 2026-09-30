@@ -117,15 +117,29 @@ fn checked_idea_dir(vault_dir: &Path, slug: &str) -> Result<PathBuf, VaultError>
 
 /// Write `contents` to `path` via a unique sibling `*.tmp-*` file + rename, so truth files are
 /// never left half-written and concurrent writers to the same target cannot consume each
-/// other's temp file. The suffix keeps temp files out of every `.md`-extension scan.
+/// other's temp file. The suffix keeps temp files out of every `.md`-extension scan. The temp
+/// file is fsynced before the rename and the directory after it, so a power loss right after a
+/// successful write leaves either the old file or the new one, never an empty one.
 fn write_atomic(path: &Path, contents: &str) -> Result<(), VaultError> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".tmp-{}-{}", std::process::id(), n));
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, contents)?;
+    write_synced(&mut fs::File::create(&tmp)?, contents.as_bytes())?;
     fs::rename(&tmp, path)?;
+    sync_parent_dir(path)
+}
+
+/// Make a rename in `path`'s directory durable. Unix only: a directory cannot be opened for
+/// fsync elsewhere, and the rename itself is still atomic there.
+fn sync_parent_dir(path: &Path) -> Result<(), VaultError> {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1164,6 +1178,19 @@ mod tests {
         };
         let err = write_synced(&mut file, b"## user\nhi\n").unwrap_err();
         assert!(matches!(err, VaultError::Io(_)), "{err:?}");
+    }
+
+    #[test]
+    fn atomic_fsync_write_lands_whole_and_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        let names: Vec<String> = fs::read_dir(tmp.path().join("i"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["idea.md".to_string()]);
+        assert_eq!(read_idea(tmp.path(), "i").unwrap(), sample_idea("i"));
     }
 
     #[test]

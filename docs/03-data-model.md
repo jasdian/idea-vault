@@ -215,7 +215,11 @@ is refused rather than rewritten down to an older format. Known limitation: such
 skipped by `reindex` and the boot drift check like any unparsable idea (a log warning, no UI note),
 so it is missing from the idea list and search until a newer build opens the vault;
 `idea-vault validate` names each one. `format_version` is read off by the codec, never
-carried on `IdeaFrontmatter`. Every other key the app does not know (an owner's own `aliases:`)
+carried on `IdeaFrontmatter`, so an owner key of that name is read as the format version (a whole
+number up to the current one is rewritten as the current one; anything else is refused).
+Truth files written whole (`idea.md`, `MEMORY.md`, `memory/*.md`, a rewritten `conversation.md`)
+go through a temp file that is fsynced before the rename, then the directory is fsynced; a turn
+appended to `conversation.md` is fsynced before the append returns. Every other key the app does not know (an owner's own `aliases:`)
 lands in the flattened `extra` map and survives a rewrite: known keys are written first in field
 order, then unknown keys sorted by name. `idea-vault validate` checks the vault against this
 schema, read-only (frontmatter, `MEMORY.md` coverage, duplicate memories).
