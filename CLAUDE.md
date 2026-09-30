@@ -80,7 +80,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D34), and ADRs 0001–0033. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D38), and ADRs 0001–0036. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -117,9 +117,19 @@ When implementing these, keep the mental model close to a real agent harness:
   ([ADR-0022](docs/adr/0022-skills-as-markdown-and-the-skill-book.md)).
 - **Agents** — specialized subagent roles (critic, researcher, advocate, harvester, synthesizer,
   auditor) with scoped prompts.
-- **Workflows** — deterministic staged orchestrations over an idea (fan-out / chained step /
-  audit / synthesize), as opposed to free-form chat. Swarm and workflow findings are audited by
-  default (CONFIRMED/UNCERTAIN/REFUTED) before they are synthesized.
+- **Workflows** — deterministic staged orchestrations over an idea, as opposed to free-form chat.
+  A workflow is a markdown file (built-ins in `src/concepts/workflows/*.md`, owner additions and
+  overrides in `vault/.workflows/`, listed with their worst-case call ceiling on the skill book and
+  R49; only `ready-to-build` may be the build-plan capstone —
+  [ADR-0035](docs/adr/0035-workflows-as-markdown-and-the-workflow-book.md)) of stages: fan-out,
+  chained step, audit, synthesize, and the code-decided **Ground** (verify the attached sources'
+  anchors in code, skipped free with no sources), **Panel** (proposals scored alone against a
+  weighted rubric, winner and grafts chosen in code), **Loop** (rounds until dry or capped) and
+  **Refine** (rewrite REFUTED/UNCERTAIN findings by id, re-audit). Every workflow has an exact call
+  ceiling of at most 32, shown before a run, and its Ground/Panel/Loop stages keep artifacts plus a
+  run record, written only after the final stage succeeds and never as turns or evidence
+  ([ADR-0034](docs/adr/0034-grounded-ranked-and-bounded-workflow-stages.md)). Swarm and workflow
+  findings are audited by default (CONFIRMED/UNCERTAIN/REFUTED) before they are synthesized.
   Build plans are versioned: on the plan page the owner answers open questions and owner-held
   tasks in their own words, and each submission appends plain `## user` turns and makes a new
   linked plan version deterministically (no model call, no job slot; the base is never modified,
@@ -127,7 +137,9 @@ When implementing these, keep the mental model close to a real agent harness:
   [ADR-0032](docs/adr/0032-plan-workbench-answers-and-versions.md).
   Over MCP, `build_plan`/`get_plan`/`answer_plan` expose the same workbench, and a retry of a
   served long-running MCP call replays its result instead of re-running
-  ([ADR-0033](docs/adr/0033-mcp-idempotent-replay-and-plan-tools.md)).
+  ([ADR-0033](docs/adr/0033-mcp-idempotent-replay-and-plan-tools.md)). `list_workflows` and
+  `run_workflow` put the workflow book on MCP; a capstone points to `build_plan`
+  ([ADR-0036](docs/adr/0036-mcp-list-workflows-and-run-workflow.md)).
 - **Subagent swarming** — fan out N agents in parallel to attack one idea from independent angles,
   then converge/synthesize. Against local Ollama models this means bounded concurrency and careful
   context budgeting — do not naively spawn unbounded parallel calls.
@@ -174,7 +186,9 @@ ADR-0006), `IDEA_VAULT_OLLAMA_TIMEOUT_SECS` (default `120`, the hard inactivity 
 (default `high`; injected as a system-prompt hint, since the claude CLI has no per-call effort
 flag), and the dynamic-context-budget overrides `IDEA_VAULT_OLLAMA_CTX_TOKENS` /
 `IDEA_VAULT_CLAUDE_CTX_TOKENS` (default `0` = auto-derive from the model, else clamped
-`1024..=2_000_000` tokens; [ADR-0014](docs/adr/0014-dynamic-context-budget.md)). All of the above
+`1024..=2_000_000` tokens; [ADR-0014](docs/adr/0014-dynamic-context-budget.md)), and
+`IDEA_VAULT_WORKFLOWS_DIR` (default `<vault>/.workflows`, owner workflow files, app config not vault
+truth; [ADR-0035](docs/adr/0035-workflows-as-markdown-and-the-workflow-book.md)). All of the above
 are only the **initial** values — the live Settings page (`GET`/`POST /settings`,
 [ADR-0011](docs/adr/0011-live-switchable-llm-backend.md)) can retune
 backend/temperature/model/effort/context-window at runtime with no restart.

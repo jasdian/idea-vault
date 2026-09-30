@@ -6,7 +6,7 @@
 
 ## Conventions
 
-- **ID** — stable `D1`…`D34` (see Coverage below for why the range runs past D25). References
+- **ID** — stable `D1`…`D38` (see Coverage below for why the range runs past D25). References
   across docs use the ID.
 - **Tool** — all diagrams are **Mermaid** in `mermaid` fenced code blocks, rendering inline on GitHub with no
   build step (see [ADR-0001](./adr/0001-server-rendered-htmx-over-spa.md) ethos; escape hatches below).
@@ -59,9 +59,13 @@
 |----|------|---------|------|
 | **D17** | Route graph | Every route (including `/settings`, `/pending`, `/history`, `/fork`, turn/memory delete) → response shape → template | [09-web-ui](./09-web-ui.md) |
 | **D19** | DAG (activity) | The interrogate workflow (fan-out → judge → audit → synthesize) | [06-concepts/workflows](./06-concepts/workflows.md) |
-| **D32** | Flowchart | Workflow stage model: FanOut / Chain (carried forward) / Audit / Synthesize, failure paths, persistence, the build-plan persist branch (ADR-0022, ADR-0023, ADR-0030) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D32** | Flowchart | Workflow stage model: the eight stage kinds (FanOut / Chain / Audit / Synthesize, plus Ground / Panel / Loop / Refine expanded in D35–D37), the call budget, failure paths, the all-or-nothing persist tail with stage artifacts, the build-plan persist branch (ADR-0022, ADR-0023, ADR-0030, ADR-0034) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D33** | Flowchart | Plan workbench: answer → validate → owner turns → reset/apply/re-gate → new linked version (+ superseded, busy and re-plan branches) (ADR-0032) | [06-concepts/skills](./06-concepts/skills.md) |
 | **D34** | Flowchart | MCP replay decision: in-flight reattach → explicit key / args hash + turn count + idea stamp → replay or fresh run; what is cached (ADR-0033) | [13-mcp-server-inbound](./13-mcp-server-inbound.md) |
+| **D35** | Flowchart | Ground stage: skip with no sources → code map → readers → parse/dedupe → verify each anchor in code → carry only verified anchors, stage a `ground_map` (ADR-0034) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D36** | Flowchart | Panel stage: proposals → no contest or cold one-proposal scoring by the Auditor role → pure aggregate (totals, tie-break, grafts) → findings + scorecard → graft-mode synthesis (ADR-0034) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D37** | State machine | Loop and Refine: per-round precheck, absorb in step order, stop reasons Dry/Cap/Failed, then audit-gated Refine rounds by id (ADR-0034) | [06-concepts/workflows](./06-concepts/workflows.md) |
+| **D38** | Flowchart | Workflow registry: built-ins + `vault/.workflows/` → parse by hand-dispatched `kind:` → validate against the skill registry → issue or register → one `Book` pair, swapped whole on reload (ADR-0035) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D20** | State machine | Ollama-unavailable degradation | [05-ai-integration](./05-ai-integration.md) |
 | **D21** | Sequence | Concurrency & context-budget model | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D22** | Activity | Slug lifecycle & collision handling | [03-data-model](./03-data-model.md) |
@@ -80,10 +84,11 @@
 
 ## Coverage
 
-- **34 IDs, D1–D34** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
+- **38 IDs, D1–D38** (D17 is used but note that D1–D25 was the originally-stated range; D26–D29
   were added for containerized deployment, D30 for knowledge extraction, D31 for reference
-  sources, D32 for the workflow stage model, and D33/D34 for the plan workbench and MCP replay, all
-  without renumbering — the range is D1–D34 in
+  sources, D32 for the workflow stage model, D33/D34 for the plan workbench and MCP replay, and
+  D35–D38 for the grounded, ranked and bounded workflow stages and the workflow registry, all
+  without renumbering — the range is D1–D38 in
   practice, not D1–D25), each authored exactly once.
   **D1–D15** are the mandatory core (they cover every flow named in [CLAUDE.md](../CLAUDE.md));
   **D16–D25** complete the SOTA set; **D26–D29** cover containerized deployment; **D30** covers
@@ -92,7 +97,9 @@
   workflow model ([ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md),
   [ADR-0023](./adr/0023-verification-layer.md)); **D33** covers the plan workbench
   ([ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md)); **D34** covers MCP idempotent
-  replay ([ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md)).
+  replay ([ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md)); **D35–D37** cover the
+  Ground, Panel, and Loop/Refine stages ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md)),
+  **D38** the workflow registry ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md)).
 - The six core flows from CLAUDE.md map to: new idea **D10**, chat (background job + poll, not SSE
   — ADR-0010) **D11**, store+memory **D12**, reopen+memory **D13**, swarm **D14**, reindex **D15**.
 

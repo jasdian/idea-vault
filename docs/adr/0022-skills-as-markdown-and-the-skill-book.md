@@ -1,6 +1,6 @@
 # ADR-0022 — Skills as markdown files, owner overrides, and the skill book
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0035](./0035-workflows-as-markdown-and-the-workflow-book.md) (workflows are markdown files in the same book; reload re-reads both)
 - **Date:** 2026-09-28
 - **Deciders:** owner
 

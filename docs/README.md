@@ -13,7 +13,7 @@ applied to interrogating one idea.
 ## How to read the diagrams
 
 Every diagram is authored in a `mermaid` fenced code block and **renders inline on GitHub** — no build
-step. Each has a stable ID (**D1**–**D34**) catalogued in [08-diagrams](./08-diagrams.md). To render
+step. Each has a stable ID (**D1**–**D38**) catalogued in [08-diagrams](./08-diagrams.md). To render
 locally, use any Mermaid-aware markdown previewer.
 
 ## Reading order
@@ -31,7 +31,7 @@ New here? Read top to bottom:
    [memory](./06-concepts/memory.md) (D12, D13, D23),
    [skills](./06-concepts/skills.md) (D18, D33),
    [agents](./06-concepts/agents.md),
-   [workflows](./06-concepts/workflows.md) (D19),
+   [workflows](./06-concepts/workflows.md) (D19, D32, D35–D38),
    [swarm](./06-concepts/swarm.md) (D14, D21, D30).
 9. [07-flows](./07-flows.md) — index of runtime flows (authors D10).
 10. [09-web-ui](./09-web-ui.md) — routes, middleware, templates (D16, D17).
@@ -57,16 +57,16 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [06-concepts/memory](./06-concepts/memory.md) | Extract on Store, load on Reopen, backlinks | D12, D13, D23 |
 | [06-concepts/skills](./06-concepts/skills.md) | Reusable ideation moves as markdown files, the skill book, the spine | D18, D33 |
 | [06-concepts/agents](./06-concepts/agents.md) | Subagent roles + I/O contract | — |
-| [06-concepts/workflows](./06-concepts/workflows.md) | Deterministic staged orchestration | D19, D32 |
+| [06-concepts/workflows](./06-concepts/workflows.md) | Deterministic staged orchestration: markdown workflows, Ground / Panel / Loop / Refine, the workflow registry | D19, D32, D35, D36, D37, D38 |
 | [06-concepts/swarm](./06-concepts/swarm.md) | Bounded fan-out/converge, budgets, knowledge extraction | D14, D21, D30 |
 | [07-flows](./07-flows.md) | Runtime flow index | D10 |
 | [09-web-ui](./09-web-ui.md) | Routes, middleware, templates, HTMX (background-job polling) | D16, D17 |
 | [12-deployment](./12-deployment.md) | Containerized local hosting, GPU/no-GPU, claude-code in containers, reference sources | D26, D27, D28, D29, D31 |
 | [13-mcp-server-inbound](./13-mcp-server-inbound.md) | Inbound MCP server (`/api/mcp`), the Task↔Job bridge, and the reusable cookbook | — |
-| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D34) | (catalog) |
+| [08-diagrams](./08-diagrams.md) | Diagram registry (D1–D38) | (catalog) |
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach | — |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0033 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0036 | — |
 
 ## Locked decisions (at a glance)
 
@@ -96,10 +96,13 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Cross-idea retrieval:** `[[idea#fact]]` resolves into `fact_links`, and reindex derives one `edges` graph (link 1.0, IDF-weighted exact tags, top-2 lexical word overlap ≤ 0.19) walked two hops by `index::queries::related_ideas`; a separately budgeted, leftover-only "Related ideas" block is pushed into chat, skill, swarm-angle and workflow-stage prompts (never audit, synthesis or extraction) and shown as a panel on the idea page; tag drift is surfaced, never merged; no vector/graph DB and no model call at reindex. Phase 2 (embeddings) was KILLED by its pre-registered criterion (margin 1 TP, needed 2) until ~30–50 ideas or a named real-use miss ([ADR-0027](./adr/0027-cross-idea-retrieval-and-the-phase-2-verdict.md)).
 - **Query-driven fact retrieval (killed):** a Google-style per-turn retriever (the latest turn as the bm25 query over other ideas' facts, with snippets) was pre-registered as an addition to the graph block and KILLED: precision 0.308 vs the graph's 0.400 on 33 owner turns, and no related idea the graph missed. `index::queries::turn_fact_hits` stays an offline instrument ([ADR-0031](./adr/0031-query-driven-fact-retrieval-killed.md)).
 - **MCP tasks are optional:** `chat`/`store_idea` accept either the Task lifecycle or a plain call that waits a short, fixed budget, so Task-unaware MCP clients can use them; the Task path is unchanged ([ADR-0028](./adr/0028-optional-task-support-bounded-wait.md), amends ADR-0024).
-- **MCP moves:** an MCP client can also list the skill book, run a skill or a swarm, and read the whole idea (fact bodies, artifacts) — with idea-vault's own model as the foil and the client as a relay; workflows, compact, extract, tags, fork and sources stay web-only ([ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md), amends ADR-0024).
+- **MCP moves:** an MCP client can also list the skill book, run a skill or a swarm, and read the whole idea (fact bodies, artifacts) — with idea-vault's own model as the foil and the client as a relay; compact, extract, tags, fork and sources stay web-only (workflows joined MCP in ADR-0036; [ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md), amends ADR-0024).
 - **Gated build plans (proposed):** both capstone chips (`⌁ quick build prompt` → `build-prompt`, `⌁⌁ audited build plan` → `ready-to-build`) produce a build-plan artifact whose Settled claims must pass deterministic gates G1–G14 (grounded quote, no collision with open questions or the audit, anchor paired with its symbol, tokens that exist, units, fence, runnable accepts, kill wiring, leaf-shaped tasks, a linted task graph with derived waves, scores and models); a failing claim moves to Verify first, Open or Quarantined with the check that would re-promote it; the transcript gets a pointer turn; the librarian's rules are ported, not its machinery ([ADR-0030](./adr/0030-gated-build-plan.md)).
 - **Plan workbench:** the owner answers a build plan's open questions and owner-held tasks on the plan page; each submission appends plain `## user` turns and makes a new linked plan version (`revises`/`version`/`answered`) deterministically — no model call, no job slot — by re-parsing the base, folding the answers in and re-running the gates without the audit; the base is never modified, only the lineage head takes answers, and every later plan run carries the answers forward and never re-asks them (R46–R48, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md), amends ADR-0030, D33).
 - **MCP idempotent replay and plan tools:** a served long-running MCP result is rendered once and replayed to an identical retry (same `idempotency_key`, or same arguments with no turn since) instead of starting a second run; `build_plan`, `get_plan` and `answer_plan` put the plan workbench on MCP ([ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md), amends ADR-0028 and ADR-0024, D34).
+- **Grounded, ranked and bounded workflow stages:** a workflow gains four stage kinds decided in code — **Ground** (map the attached sources and verify every reader-cited anchor in code, carry only verified anchors, skipped free with no sources), **Panel** (proposals scored alone, cold, by the Auditor role against a weighted rubric; code picks the winner and grafts), **Loop** (rounds until dry or capped) and **Refine** (rewrite the audit's REFUTED/UNCERTAIN findings by id, re-audit) — under an exact call ceiling of at most 32 shown before every run; Ground, Panel and Loop keep one artifact each plus a `workflow_run` record, written all-or-nothing after the final stage and never as turns or evidence, a scoped exception to the discard-intermediates rule ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md), amends ADR-0006, ADR-0021, ADR-0023, D14; D35–D37).
+- **Workflows as markdown + the workflow book:** every workflow is a markdown file (built-ins compiled in from `src/concepts/workflows/*.md`, owner files in `vault/.workflows/` via `IDEA_VAULT_WORKFLOWS_DIR`), parsed by a hand-dispatched `kind:` and validated against the skill registry, an invalid file a book issue with the built-in kept; skills and workflows are held as one `Book` pair reloaded together; the workflow book lists each with its call ceiling and R49 (`GET /skills/workflow/{name}`) shows one in full; only `ready-to-build` may be a capstone ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md), amends ADR-0022, D38).
+- **MCP workflows:** `list_workflows` and `run_workflow` put the workflow book on the inbound MCP server; a capstone is refused with a pointer to `build_plan`, and a run returns its turn plus the stage-artifact slugs ([ADR-0036](./adr/0036-mcp-list-workflows-and-run-workflow.md), amends ADR-0024 and ADR-0029).
 
 ## Beyond these docs
 

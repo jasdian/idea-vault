@@ -214,6 +214,7 @@ Link rules, as `index::reindex` applies them (parsing is `domain::links`):
 | Rolling summary of the head (D13, ADR-0012) | `memory::compact` + `vault::store::read_compacted` |
 | Backlink parse/resolve (D23) | `memory::backlinks` + `index::reindex` (pure parsing in `domain::links`) |
 | Related-ideas block (chat, skills, swarm, workflows) | `memory::related` |
+| *(not memory)* Workflow stage artifacts (`ground_map`, `scorecard`, `workflow_run`, a Loop's finding) | never evidence: they live in `artifacts/`, outside the `conversation.md` and pre-store body the evidence gate reads ([ADR-0034](../adr/0034-grounded-ranked-and-bounded-workflow-stages.md)) |
 | Fact type | `domain::memory::MemoryFact` |
 | On-disk shape | [03-data-model](../03-data-model.md) D7/D8 |
 

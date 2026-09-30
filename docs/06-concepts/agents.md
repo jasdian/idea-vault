@@ -85,7 +85,11 @@ role well*.
   same idea, different roles/skills → diverse lenses), an Auditor judges the findings, then a
   Synthesizer agent converges them.
 - A **[workflow](./workflows.md)** ([D19](./workflows.md), [D32](./workflows.md)) stages agents
-  deterministically (e.g. Advocate → Critics ∥ → Auditor → Synthesizer).
+  deterministically (e.g. Advocate → Critics ∥ → Auditor → Synthesizer). Its Panel stage
+  ([D36](./workflows.md)) scores each proposal with the **Auditor** role running a hidden skill, so no
+  seventh role exists and the name "judge" stays with `swarm::judge`'s deterministic dedupe; its
+  Ground readers are **Researchers** on a 2 × 2 tool budget ([D35](./workflows.md),
+  [ADR-0034](../adr/0034-grounded-ranked-and-bounded-workflow-stages.md)).
 - Agents apply **[skills](./skills.md)** as their lens.
 
 ## Mapping to code

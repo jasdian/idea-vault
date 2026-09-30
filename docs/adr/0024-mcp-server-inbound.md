@@ -1,8 +1,9 @@
 # ADR-0024 — Inbound MCP server: exposing idea-vault to LLM clients
 
 - **Status:** Accepted — scope amended by [ADR-0028](./0028-optional-task-support-bounded-wait.md),
-  [ADR-0029](./0029-mcp-moves-and-full-idea-read.md) and
-  [ADR-0033](./0033-mcp-idempotent-replay-and-plan-tools.md)
+  [ADR-0029](./0029-mcp-moves-and-full-idea-read.md),
+  [ADR-0033](./0033-mcp-idempotent-replay-and-plan-tools.md) and
+  [ADR-0036](./0036-mcp-list-workflows-and-run-workflow.md)
 - **Date:** 2026-09-28
 - **Deciders:** Owner
 

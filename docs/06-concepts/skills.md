@@ -36,7 +36,7 @@ post-mortem. …
 | `description` | yes | free text |
 | `stage` | yes | `steelman` · `attack` · `consequence` · `converge` · `capstone` · `extract` |
 | `role` | no, default `critic` | `critic` · `researcher` · `advocate` · `harvester` · `synthesizer` |
-| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` · `build_plan` (ADR-0030) |
+| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` · `build_plan` (ADR-0030) · `ground_claims` · `proposal` · `scorecard` (the last three are the workflow engine's, ADR-0034) |
 | `use_when` | no | free text |
 | `avoid_when` | no | free text |
 | `hidden` | no, default `false` | `true` keeps the skill registered but off the move chips |
@@ -212,6 +212,18 @@ so each of these either demands dissent the model actually holds or forces a con
 swarm angles: listed, unchecked, in the swarm picker. `devils-advocate` keeps its name for
 transcript and route stability.
 
+### Engine-only skills (`ground-read`, `panel-score`)
+
+Two more built-ins are read by the workflow engine's own stages, not by the owner
+([ADR-0034](../adr/0034-grounded-ranked-and-bounded-workflow-stages.md)): `ground-read` (stage
+`consequence`, role `researcher`, contract `ground_claims`) is the Ground stage's reader, and
+`panel-score` (stage `converge`, role `critic`, contract `scorecard`) is the Panel stage's scorer. Both
+are `hidden` and flagged `internal` (`concepts::skills::INTERNAL_SKILLS`): a skill file can only be
+`critic`, not `auditor` (`SkillRole` has five roles, no Auditor), so the Panel stage overrides the
+scorer's call role to `AgentRole::Auditor` in code. An internal skill is never a chip, never a swarm
+angle (a `400`), never an interactive skill run (`404`), and a workflow file that names one as a
+step is rejected ([ADR-0035](../adr/0035-workflows-as-markdown-and-the-workflow-book.md)).
+
 ### Orchestrator-only lenses (`extract-*`)
 
 Five more built-ins carry the reserved `extract-` prefix. They have stage `extract`, role
@@ -315,7 +327,7 @@ page derives a `PROMPT.md` run protocol and an `/attack`-style `plan.md` from th
 |---------|-----------|--------------------|
 | **Skill** | one reusable prompt move | the atomic unit |
 | **[Agent](./agents.md)** | a scoped role (critic/researcher/advocate/…) | an agent *applies* skills within its role |
-| **[Workflow](./workflows.md)** | deterministic staged pipeline | a sequence of fan-out / chained skill stages |
+| **[Workflow](./workflows.md)** | deterministic staged pipeline, itself a markdown file | a sequence of fan-out / chained skill stages, plus Ground, Panel, Loop and Refine |
 | **[Swarm](./swarm.md)** | parallel fan-out + audit + converge | assigns different skills to parallel agents |
 
 ## Mapping to code

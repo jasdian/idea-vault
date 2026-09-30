@@ -33,6 +33,9 @@ vault/
       <run-stamp>-report.html     # optional derived export of a run (opt-in, unindexed; ADR-0015)
       <run-stamp>-quarantined-facts.md  # store-time facts the evidence gate kept out of memory
                                         #   (kind: quarantine; ADR-0023)
+      <run-stamp>-<workflow>-<n>-<stage>.md  # a workflow stage's artifact: ground_map, scorecard, or a
+                                        #   Loop's finding (ADR-0034)
+      <run-stamp>-<workflow>-run.md     # a workflow's run record (kind: workflow_run; ADR-0034)
 index.db             # derived index (may be deleted + rebuilt)
 .idea-vault-root     # vault-root marker — its presence says "this is the real vault" (ADR-0019)
 .mcp-servers.json    # owner-global MCP server registry — APP CONFIG, not vault truth (ADR-0018)
@@ -40,6 +43,7 @@ index.db             # derived index (may be deleted + rebuilt)
 .docker-compose.sources.yml  # GENERATED compose override: ro binds per source (ADR-0021)
 .gitignore           # created/appended by the source registry to cover the two sources dotfiles
 .skills/             # owner-authored skill files <name>.md — APP CONFIG, not vault truth (ADR-0022)
+.workflows/          # owner-authored workflow files <name>.md — APP CONFIG, not vault truth (ADR-0035)
 ```
 
 > **`.idea-vault-root` is the vault's identity, not content.** `vault::store::ensure_vault_dir`
@@ -63,6 +67,12 @@ index.db             # derived index (may be deleted + rebuilt)
 > template ([skills](./06-concepts/skills.md)) — that adds to or overrides a built-in. Like the
 > registries below, it is invisible to reindex (no `idea.md`, so `vault::walk` never enters it) and
 > never indexed; deleting it restores the built-ins. Path: `IDEA_VAULT_SKILLS_DIR`.
+
+> **`.workflows/` is app configuration too.** Each file is one named, staged run
+> ([workflows](./06-concepts/workflows.md)) — frontmatter (name, description, stages) plus an
+> owner-facing explanation — that adds to or overrides a built-in. Like `.skills/` it is invisible to
+> reindex and never indexed; deleting it restores the built-ins. Path: `IDEA_VAULT_WORKFLOWS_DIR`
+> ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md)).
 
 > **`.mcp-servers.json` is not part of the vault contract above.** It lives beside `index.db` at the
 > vault root only because the vault directory is the one host-persistent path in a containerized run
@@ -112,7 +122,7 @@ erDiagram
         markdown lines "one pointer per fact"
     }
     ARTIFACT_MD {
-        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine|build_plan), lens, created, model, revises, version, answered (build plans)"
+        yaml frontmatter "slug, title, kind (finding|synthesis|quarantine|build_plan|ground_map|scorecard|workflow_run), lens, created, model, revises, version, answered (build plans)"
         markdown body "one lens's finding, the converged synthesis, or quarantined store-time facts"
     }
     ARTIFACT_HTML {
@@ -156,7 +166,7 @@ Every indexed field traces to a vault source. This table is the contract the rei
 | Compacted rolling summary | `compacted.md` | *(none — derived sidecar, never indexed; ADR-0012)* |
 | Memory fact (frontmatter) | `memory/<fact>.md` | `memory_facts` |
 | Memory fact text (title + body) | `memory/<fact>.md` | `search_fts` (`kind = 'memory'`, one row per fact, `ref` = the fact's frontmatter slug — `memory_facts` itself has no body column, so this is the only searchable copy of a fact's body) |
-| Knowledge-extraction artifact (finding or synthesis), quarantined store-time facts, or a gated build plan (`<run-stamp>-build-plan.md`, `kind: build_plan`, [ADR-0030](./adr/0030-gated-build-plan.md)) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
+| Knowledge-extraction artifact (finding or synthesis), a workflow stage artifact or run record ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md)), quarantined store-time facts, or a gated build plan (`<run-stamp>-build-plan.md`, `kind: build_plan`, [ADR-0030](./adr/0030-gated-build-plan.md)) | `artifacts/<run-stamp>-*.md` | `search_fts` (`kind = 'artifact'`, `ref` = the artifact slug) |
 | Plan lineage (`revises`/`version`/`answered`) and owner answers | the build-plan artifact's frontmatter and body, plus the answer `## user` turns in `conversation.md` | *(nothing new: no index column or table; the artifact's `search_fts` row is as for any artifact, and `reindex` rebuilds it from disk)* |
 | Derived HTML report export | `artifacts/<run-stamp>-report.html` | *(none — never indexed, like `compacted.md`)* |
 | `[[slug]]` links | inside the idea body and memory facts only — **not** mined from conversation or artifact bodies | `backlinks` |
@@ -229,6 +239,9 @@ classDiagram
         Synthesis
         Quarantine
         BuildPlan
+        GroundMap
+        Scorecard
+        WorkflowRun
     }
     IdeaFrontmatter --> IdeaState
     ArtifactFrontmatter --> ArtifactKind
@@ -462,6 +475,14 @@ still disambiguate instead of colliding ([ADR-0015](./adr/0015-knowledge-extract
   `POST /idea/:slug/extract` job can only persist the whole set or none of it
   ([ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)). The opt-in `.html` report is written
   afterward and is not covered by that guarantee — losing it costs only the derived export.
+- **Workflow stage artifacts are all-or-nothing per run, and never turns or evidence:** a run of a
+  workflow with a Ground, Panel or Loop stage stages one artifact per such stage plus one
+  `workflow_run` record, and writes them only after the final stage has succeeded, in the same
+  await-free tail as the turn (or, for the capstone, after the gated plan). A cancel or a failed
+  final stage persists none of it. A conversation turn names them on a trailing `Stage artifacts:
+  [[slug]] · …` line; the capstone's pointer turn is left exactly as the gates wrote it, so its
+  run record names the plan instead. They are indexed by the generic artifact walk (`kind =
+  'artifact'`) and are never memory evidence ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md)).
 
 ## Related
 

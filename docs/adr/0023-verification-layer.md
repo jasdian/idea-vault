@@ -1,6 +1,6 @@
 # ADR-0023 — A verification layer: output contracts, factored audit, grounded memory
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0034](./0034-grounded-ranked-and-bounded-workflow-stages.md) (Panel scorers are cold Auditor calls, Refine re-audits, Panel proposals and Loop items are audited as findings)
 - **Date:** 2026-09-28
 - **Deciders:** owner
 

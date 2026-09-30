@@ -25,6 +25,7 @@ flowchart TB
             D_FM["frontmatter.rs — parse/emit YAML (incl. parse_skill)"]
             D_SLUG["slug.rs — slug + collisions (D22)"]
             D_SKILL["skill.rs — SkillStage/SkillRole/OutputContract vocabulary (docs/adr/0022)"]
+            D_WFDEF["workflow.rs — StageKind, per-stage spec structs, WorkflowFrontmatter, parse_stage: the workflow-file data contract (docs/adr/0035)"]
             D_LINKS["links.rs — extract_links / extract_fact_refs: pure [[slug]] and [[idea#fact]] extraction (D23)"]
             D_TAG["tag.rs — near_duplicate: the tag near-duplicate (drift) predicate (ADR-0027)"]
             D_COMP["compacted.rs — Compacted: the compacted.md sidecar type (docs/adr/0012)"]
@@ -69,7 +70,7 @@ flowchart TB
         subgraph concepts["concepts/ (harness primitives)"]
             C_SKILL["skills.rs — LiveSkills registry + invoke (D18); built-ins compiled in from\nskills/*.md via include_str! (ADR-0022), owner overrides from vault/.skills/"]
             C_AGENT["agents.rs — role prompts + I/O"]
-            C_WF["workflows.rs — deterministic staged pipelines (D19, D32)"]
+            C_WF["workflows/ — mod.rs (Stage, Workflow, call ceiling, WORKFLOW_MAX_CALLS), registry.rs (WorkflowRegistry load/validate, Book, LiveWorkflows; D38),\nengine: run.rs (run_workflow, RunCtx, CallBudget, StageLog, persist tail; D19, D32), ground.rs (D35), panel.rs (D36), rounds.rs (Loop + Refine, D37);\nbuilt-ins are workflows/*.md via include_str!, owner files in vault/.workflows/ (ADR-0034, ADR-0035)"]
             C_SWARM["swarm.rs — bounded fan-out/converge (D14, D21)"]
             C_KNOW["knowledge.rs — extraction: fan-out lenses + persist artifacts (D30, ADR-0015)"]
             C_AUDIT["audit.rs — factored audit: findings, Auditor call, parse, appendix (ADR-0023)"]
@@ -239,7 +240,10 @@ flowchart TD
 - **`memory`** — the memory feature: extract facts at Store ([D12](./06-concepts/memory.md)), load
   them at Reopen ([D13](./06-concepts/memory.md)), resolve backlinks ([D23](./06-concepts/memory.md)).
 - **`concepts`** — skills (registry over built-in + owner `vault/.skills/` markdown files,
-  [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)), agents, workflows, the swarm
+  [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)), agents, workflows (a
+  `workflows/` directory: markdown definitions, registry and engine with the Ground, Panel, Loop and
+  Refine stages — [ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md),
+  [ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md)), the swarm
   orchestrator, knowledge extraction (`knowledge.rs`, [D30](./06-concepts/swarm.md)), the factored
   audit (`audit.rs`, [ADR-0023](./adr/0023-verification-layer.md)), and spine coverage (`coverage.rs`)
   ([06-concepts](./06-concepts/)).
@@ -247,7 +251,7 @@ flowchart TD
   [ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)) that every AI-driven route (including
   `routes::artifacts`, [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)) spawns into and
   polls. `web::state` holds `AppState` (config, db, llm, ai_semaphore, skills, jobs, queues, mcp,
-  sources), so handlers never reach up into `app`. The top of the library graph.
+  sources, workflows), so handlers never reach up into `app`. The top of the library graph.
 - **`app`** — bin-level: builds the axum router and tower middleware from `web::routes`, and
   re-exports `web::state::AppState` so `main.rs` and the tests keep `app::AppState`. Imports `web` only.
 - **`config`** — bin-level leaf: `IDEA_VAULT_*` env → `Config`; re-exports `ai::LlmBackendKind`

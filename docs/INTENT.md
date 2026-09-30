@@ -1,3 +1,41 @@
+# Intent — grounded, ranked and bounded workflow stages; workflows as markdown; MCP workflows
+
+A workflow could argue about code it had never looked at, merge competing designs without ranking
+them, stop after one pass, and move on from findings the audit rejected. Owners could add a skill but
+not a workflow, and an MCP client could not run one. The fix is four code-decided stages (Ground,
+Panel, Loop, Refine) under an exact call ceiling shown before a run, workflows as markdown files in a
+workflow book with a detail page, and `list_workflows` / `run_workflow` over MCP.
+Design: ADR-0034 (stages, ceiling, stage artifacts), ADR-0035 (markdown, book, R49), ADR-0036 (MCP);
+diagrams D35 to D38. The owner accepted the decisions on 2026-09-30: the scoped exception to D14 (stage
+artifacts and a run record, all-or-nothing, never turns or evidence), only `ready-to-build` may be a
+capstone, and the cost defaults (`design-panel` at most 12 calls, `exhaust` within 16, at most 32 per
+workflow, the ceiling shown before running).
+
+## Acceptance criteria
+
+- Ground verifies anchors in code: a moved anchor is re-anchored, a missing file or symbol is
+  disproved, a capped or unreadable probe is unverified and never disproved; only verified anchors are
+  carried, and with no source attached Ground makes no model call and carries nothing.
+- A Panel scores each proposal alone and cold, as the Auditor role, with no other proposal and no
+  related block in the prompt; the winner, tie-break and grafts are the same for shuffled score lines; a
+  graft naming a missing proposal or the winner is stripped; fewer than two proposals is no contest.
+- A Loop stops on a dry round, a cap or a failed first round, never runs a round its call budget cannot
+  fund, and a fully failed round does not extend the dry streak; Refine replaces findings by id and is
+  skipped with no call when the audit is off or clean.
+- Every workflow's call ceiling is exact and at most 32; one over the limit is rejected at load; the
+  ceiling and waves show on the chips and the book before a run.
+- Stage artifacts and the run record are written only after the final stage succeeds: a cancel or a
+  failed final stage persists nothing, they are never memory evidence, and reindex stays idempotent
+  with the new kinds.
+- `ready-to-build` without sources builds the same prompts and makes the same calls as before Ground.
+- A workflow file is validated against the skill registry it is paired with; an invalid owner file is
+  a book issue and the built-in of that name stays active; a reload revalidates workflows against the
+  fresh skills and a job never sees a mismatched pair; only `ready-to-build` may be a capstone.
+- Over MCP, `list_workflows` shows each workflow's ceiling, `run_workflow` returns the turn and the
+  stage-artifact slugs, an unknown or invalid name claims no job, a capstone points to `build_plan`,
+  and an identical retry replays.
+- Every change is observed failing first, and `bash scripts/gate.sh` is green.
+
 # Intent — plan workbench (answer → version) + MCP idempotent collect
 
 The owner answered a build plan's open questions in chat, pressed "build again", and got an

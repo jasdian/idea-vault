@@ -101,7 +101,9 @@ sequenceDiagram
 
 - Each angle runs under its skill's `role` (a `constraints` lens researches, a `premortem` attacks).
 - A capstone skill (`build-prompt`) is rejected as an angle (400).
-- One swarm names at most `web::routes::memory::MAX_ANGLES` (8) angles; more is a synchronous `400`
+- One swarm names at most `concepts::swarm::MAX_ANGLES` (8) angles (the constant moved out of the
+  web layer so a workflow's `fan_out` is validated against the same cap at load,
+  [ADR-0035](../adr/0035-workflows-as-markdown-and-the-workflow-book.md)); more is a synchronous `400`
   from `memory::run_swarm`, checked before the job slot is claimed. The semaphore bounds how many
   agents run at once (K); this bounds a request's total work (N), so one swarm can't monopolize the
   shared AI budget. The idea page's picker enforces the same cap in the browser
@@ -131,6 +133,13 @@ leaving them registered and resolvable, so they are usable as ordinary swarm ang
 
 Extraction is not audited: its findings are harvests kept per lens, and the synthesis digests up to
 60 of them. See [ADR-0015](../adr/0015-knowledge-extraction-artifacts.md).
+
+A second scoped departure from the same D14 rule comes from workflows
+([ADR-0034](../adr/0034-grounded-ranked-and-bounded-workflow-stages.md)): a workflow's Ground, Panel
+and Loop stages each keep one artifact (the verified code map, the scorecard, the loop's distinct
+findings) and a run record beside the one final turn. Unlike extraction's, these are written only after
+the final stage succeeds, and a swarm run itself is unchanged: it still persists only its converged
+synthesis.
 
 ### D30 — Knowledge extraction: fan-out → converge → persist artifacts
 
@@ -262,7 +271,11 @@ cap; the owner then owns the VRAM tradeoff).
 
 ## Related
 
-- [workflows](./workflows.md) — D19 uses this fan-out as its parallel stage.
+- [workflows](./workflows.md) — D19 uses this fan-out as its parallel stage; the Ground readers, the
+  Panel's proposals and a Loop's rounds ([D35–D37](./workflows.md)) use it too, each call taking one
+  permit of the shared bound K ([ADR-0034](../adr/0034-grounded-ranked-and-bounded-workflow-stages.md)).
+  A workflow's total calls are capped by its ceiling (at most 32), the per-request analogue of the
+  swarm's 8-angle cap.
 - [05-ai-integration](../05-ai-integration.md) — D3 component view, D11 background-job flow.
 - [ADR-0006](../adr/0006-bounded-concurrency-swarm.md) — the bounding decision.
 - [ADR-0010](../adr/0010-ai-turns-as-background-jobs.md) — swarm runs as a background job, polled.

@@ -16,7 +16,7 @@
 | 5 | Reopen → load memory | D13 | [06-concepts/memory](./06-concepts/memory.md) |
 | 6 | Subagent swarm (fan-out → converge) | D14 | [06-concepts/swarm](./06-concepts/swarm.md) |
 | 7 | Skill invocation | D18 | [06-concepts/skills](./06-concepts/skills.md) |
-| 8 | Workflow orchestration | D19 | [06-concepts/workflows](./06-concepts/workflows.md) |
+| 8 | Workflow orchestration (the stage model, Ground, Panel, Loop/Refine, and the workflow registry) | D19, D32, D35, D36, D37, D38 | [06-concepts/workflows](./06-concepts/workflows.md) |
 | 9 | Reindex (rebuild from markdown) | D15 | [03-data-model](./03-data-model.md) |
 | 10 | HTTP request / middleware lifecycle | D16 | [09-web-ui](./09-web-ui.md) |
 | 11 | Fork an idea (carries body + conversation + memory into a new `InDiscussion` idea) | *(no dedicated diagram — see the D9 transitions table)* | [04-state-machine](./04-state-machine.md) |

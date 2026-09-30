@@ -7,7 +7,8 @@
 > servers). Decision records: [ADR-0024](./adr/0024-mcp-server-inbound.md), amended by
 > [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md),
 > [ADR-0029](./adr/0029-mcp-moves-and-full-idea-read.md) and
-> [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md). This doc is both the
+> [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md) and
+> [ADR-0036](./adr/0036-mcp-list-workflows-and-run-workflow.md). This doc is both the
 > feature reference and a general-purpose **cookbook** for wiring an MCP server onto an axum app
 > that already runs long AI calls as background jobs — the pattern generalizes past idea-vault.
 
@@ -32,8 +33,9 @@ web::mcp_server
 ├── auth.rs      — single-token Bearer AuthLayer/AuthMiddleware (Tower Layer/Service pair)
 ├── handler.rs   — IdeaVaultMcpServer : the rmcp::ServerHandler impl
 ├── tools.rs     — the tool catalog + synchronous tool dispatch (list_ideas, get_idea, search,
-│                   create_idea, reopen_idea, list_skills, get_artifact, get_plan, answer_plan)
-├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm/build_plan
+│                   create_idea, reopen_idea, list_skills, list_workflows, get_artifact, get_plan,
+│                   answer_plan)
+├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm/build_plan/run_workflow
 ├── idempotency.rs — ReplayCache + args_hash : replay of a served result (ADR-0033, D34)
 └── prompts.rs   — a small canned prompt catalog
 ```
@@ -116,7 +118,7 @@ client onto the polling lifecycle, with zero branching in your own handler. `Opt
 client choose: `tools/call` with `task:{}` goes to `enqueue_task`, without it to `call_tool`.
 
 `chat`/`store_idea` were `Required` until [ADR-0028](./adr/0028-optional-task-support-bounded-wait.md)
-and are now `Optional` (as are `run_skill`/`run_swarm`, added by ADR-0029, and `build_plan`, added by ADR-0033), because a client that does not implement Tasks (Claude Code's own MCP
+and are now `Optional` (as are `run_skill`/`run_swarm`, added by ADR-0029, `build_plan`, added by ADR-0033, and `run_workflow`, added by ADR-0036), because a client that does not implement Tasks (Claude Code's own MCP
 client, for one) could otherwise not call them at all. The two paths a plain call and a task call
 take are:
 
@@ -276,6 +278,7 @@ defaulting to open.
 | `answer_plan` | sync | Answers (`{"Q6": "…"}`, the owner's own words) on the head plan → a new version, no model call; refused while a job runs; idempotent from the vault (ADR-0032) |
 | `search` | sync | FTS over titles, bodies, conversations, memory, artifacts |
 | `list_skills` | sync | The visible skill book (name, stage, role, use/avoid guidance, source) |
+| `list_workflows` | sync | The visible workflow book, in chip order: name, description, use/avoid guidance, stage kinds, `call_ceiling` (worst-case model calls, ADR-0034), `needs_sources`, `capstone`, source (ADR-0036) |
 | `create_idea` | sync | New Draft |
 | `reopen_idea` | sync | Stored → Reopened |
 | `chat` | long-running | One owner turn; the foil's reply is returned |
@@ -283,8 +286,9 @@ defaulting to open.
 | `run_swarm` | long-running | Up to 8 angles, converged (R7's guards); the synthesis is returned |
 | `store_idea` | long-running | Consolidate + verified memory extraction; quarantine count as a notice |
 | `build_plan` | long-running | The build-prompt capstone, or with `audited:true` the ready-to-build workflow; a new plan version linked to the head; returns the `get_plan` JSON |
+| `run_workflow` | long-running | One named non-capstone workflow (R22's guards, via `guard_workflow`/`spawn_workflow_job`); returns its one turn plus a second content item `{"artifacts": [slug…], "hint": …}` naming the stage artifacts and run record, read with `get_artifact` (ADR-0036) |
 
-Plus the two-prompt catalog. The five long-running tools (each takes an optional `idempotency_key`)
+Plus the two-prompt catalog. The six long-running tools (each takes an optional `idempotency_key`)
 are callable both as a task and
 plainly (bounded wait, ADR-0028). A Task-unaware client cannot use the task path. Its plain call
 runs as a real task (`tasks::TaskRegistry::call_sync_bounded`), and when the turn outlives the
@@ -292,7 +296,18 @@ runs as a real task (`tasks::TaskRegistry::call_sync_bounded`), and when the tur
 (`tasks::TaskRegistry::cancel`) accepts an id from either path, for any client that speaks that
 method.
 
-**Deferred:** a general `run_workflow` tool (only `build_plan` reaches the ready-to-build workflow), extract/compact tools, chat queueing on a busy idea (MCP refuses instead),
+**`run_workflow` details** ([ADR-0036](./adr/0036-mcp-list-workflows-and-run-workflow.md)): a name the
+book does not hold, including one present only as an invalid owner file, is `invalid_params` before
+any job slot is claimed. The capstone (`ready-to-build`, and any workflow that chains a build-plan
+skill) is refused with a pointer to `build_plan` with `audited:true`, which versions the plan and
+carries the owner's answers. The artifact slugs are read back from the turn's trailing
+`Stage artifacts:` line (only its last line, so a model-written look-alike earlier in the turn is
+never taken for it). Replay follows [ADR-0033](./adr/0033-mcp-idempotent-replay-and-plan-tools.md)
+unchanged (tool name `run_workflow` plus the arguments hash), so an identical retry after a served
+result replays it and starts no second run; a run can cost up to the workflow's ceiling, which is
+what `list_workflows` reports before the client calls.
+
+**Deferred:** extract/compact tools, chat queueing on a busy idea (MCP refuses instead),
 fork/tags/rename/sources-management/delete-* tools, MCP `resources` (idea.md/conversation.md as
 `resources/read` + `resources/subscribe` push-on-update — `rmcp` supports this; it's additive and
 independent of the current tool set), a stdio transport variant, a client-as-foil mode (a no-model

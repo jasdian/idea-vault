@@ -41,7 +41,8 @@ flowchart LR
         R13["GET /settings — live LLM backend + params form (incl. web_access checkbox, ADR-0017; audit checkbox, ADR-0023; role-tuning table, ADR-0026)"]
         R19["GET /idea/:slug/artifact/:name — view one artifact (.md full page | .html served raw)"]
         R24["GET /mcp — MCP server management page (ADR-0018)"]
-        R33["GET /skills — the skill book: every move by spine stage (ADR-0022)"]
+        R33["GET /skills — the skill book: every move by spine stage, then the workflow book (ADR-0022, ADR-0035)"]
+        R49["GET /skills/workflow/:name — one workflow in full: stages, worst-case call ceiling, panel rubric, definition file (ADR-0035) | 404 unknown"]
         R36["GET /sources — named reference sources page (ADR-0021)"]
     end
     subgraph partials["HTMX partials"]
@@ -61,7 +62,7 @@ flowchart LR
         R18["POST /idea/:slug/extract — run knowledge extraction (D30, job) → transcript + indicator"]
         R20["POST /idea/:slug/artifact/:name/delete — remove one artifact file → artifacts panel"]
         R21["POST /idea/:slug/compact — fold now (ADR-0012/0016, job) → transcript + indicator | notice"]
-        R22["POST /idea/:slug/workflow/:name — run workflow (D19, job) → transcript + indicator"]
+        R22["POST /idea/:slug/workflow/:name — run workflow (D19, D32, job) → transcript + indicator"]
         R23["POST /idea/:slug/rename — retitle in place (slug unchanged, every state) → title block"]
         R25["POST /mcp/add — add an MCP server (ADR-0018) → #mcp panel"]
         R26["GET /mcp/:name/edit — swap one row into its edit form → row"]
@@ -70,7 +71,7 @@ flowchart LR
         R29["POST /mcp/:name/toggle — flip enabled → #mcp panel"]
         R30["POST /mcp/:name/delete — remove a server → #mcp panel"]
         R31["POST /mcp/:name/probe — connect + tools/list, inline (not a job) → status slot"]
-        R34["POST /skills/reload — re-read vault/.skills/, inline (not a job) → #skills panel (ADR-0022)"]
+        R34["POST /skills/reload — re-read vault/.skills/, then vault/.workflows/ against those skills, inline (not a job) → #skills panel (ADR-0022, ADR-0035)"]
         R37["POST /sources/add — register a source (ADR-0021) → #sources panel"]
         R38["GET /sources/:name/edit — swap one row into its edit form → row"]
         R39["GET /sources/:name/view — swap the edit form back to a view row → row"]
@@ -126,6 +127,7 @@ flowchart LR
     R32 --> T_QUEUE["templates/_queue.html"]
     R33 --> T_SKILLS["templates/skills.html"]
     R34 --> T_SKILLSLIST["templates/_skills_list.html"]
+    R49 --> T_WFDETAIL["templates/workflow_detail.html"]
     R36 --> T_SOURCES["templates/sources.html"]
     R37 --> T_SRCLIST["templates/_sources_list.html"]
     R38 --> T_SRCEDIT["templates/_source_edit_row.html"]
@@ -154,7 +156,7 @@ same claim → spawn → poll job shape as R6/R7), `settings` (R13, R13b), `admi
 [ADR-0015](./adr/0015-knowledge-extraction-artifacts.md)), `compact` (R21 — the manual "compact
 now" fold, [ADR-0012](./adr/0012-auto-compact.md)/[ADR-0016](./adr/0016-forced-compact-folds-fully.md)),
 `mcp` (R24–R31 — the MCP server management page, [ADR-0018](./adr/0018-mcp-servers.md)), `skills`
-(R33, R34 — the skill book and its live reload, [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md)),
+(R33, R34, R49 — the skill book, the workflow book with its per-workflow detail page, and their live reload, [ADR-0022](./adr/0022-skills-as-markdown-and-the-skill-book.md), [ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md)),
 `mcp_server` (R35 — the **inbound** MCP protocol endpoint, [ADR-0024](./adr/0024-mcp-server-inbound.md);
 the mirror image of `mcp`'s outbound registry), `sources` (R36–R41 — the owner's named read-only
 reference-source registry, mirroring `mcp`'s shape, [ADR-0021](./adr/0021-reference-sources.md)).
@@ -167,8 +169,10 @@ returns the refreshed `#queue` panel directly. R31 (`probe_server`) is likewise 
 network: an MCP probe is one bounded HTTP round trip already capped by `ai::mcp`'s own connect/request
 timeouts, not a model call that can run for minutes, so the handler awaits it inline
 ([ADR-0018](./adr/0018-mcp-servers.md)). R34 (`reload_skills`) is not a job route either: it re-reads
-a handful of small files under `vault/.skills/` synchronously, no model call, and returns the
-refreshed `#skills` panel directly — the same shape as R23/R32. **R35** is a single mounted protocol
+a handful of small files under `vault/.skills/`, then `vault/.workflows/` against that fresh skill
+snapshot ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md)), synchronously, no
+model call, and returns the refreshed `#skills` panel directly — the same shape as R23/R32. R49
+(`workflow_page`) is a plain read of the live workflow snapshot. **R35** is a single mounted protocol
 endpoint, not a page or partial — it carries its own MCP-level `tools/call`/`tasks/*` dispatch
 (`web::mcp_server`), and its five long-running tools (`chat`, `store_idea`, `run_skill`, `run_swarm`, `build_plan`) still go through the same
 `web::jobs` claim → spawn → poll machinery every other AI route uses, bridged onto the MCP Tasks
@@ -283,7 +287,11 @@ templates/
   skills.html               # extends base — the skill book page shell (R33, ADR-0022)
   _skills_list.html         # partial — the #skills panel: every move grouped by spine stage,
                             #   with use_when/avoid_when/source/role/contract, plus load issues;
-                            #   re-rendered by reload (R34)
+                            #   then the #workflows book (each workflow's stages, worst-case call
+                            #   ceiling and waves, source, issues banner); re-rendered by reload (R34)
+  workflow_detail.html      # extends base — one workflow in full (R49, ADR-0035): stages with their share
+                            #   of the call ceiling, a panel's rubric table, the owner-facing explanation
+                            #   and the definition file as loaded (the thing to copy to fork it)
   _idea_tags.html           # partial — the idea page's #idea-tags-row: tag chips + inline editor;
                             #   pre-rendered into idea.html (tags_html) and swapped whole by R42
   _idea_sources.html        # partial — the #idea-sources-row: attached-source chips + checkbox
@@ -317,7 +325,9 @@ base.html`.
   a task detached from any one request ([ADR-0010](./adr/0010-ai-turns-as-background-jobs.md)). The
   workflow route (R22, D19) only persists its converged synthesis as one
   `## assistant (workflow: {name})` turn — intermediate fan-out/judge steps are not written to
-  `conversation.md`, mirroring the swarm's discard-intermediates rule — and the finished turn's
+  `conversation.md`, mirroring the swarm's discard-intermediates rule; the Ground, Panel and Loop
+  stages' artifacts and a run record are written beside it, all-or-nothing, and named on the turn's
+  trailing `Stage artifacts:` line ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md)) — and the finished turn's
   label keeps the workflow kind (`foil · workflow {name}`, distinguishing it from a same-named
   skill turn's `foil · {name}`). A running workflow's indicator note reports live per-stage
   progress rather than one fixed string. The swarm route (R7) writes its converged turn as
@@ -373,8 +383,9 @@ base.html`.
 - **The capstone row — paired build chips:** beside `compact now` and `extract knowledge`, the
   capstone row pairs the two build-plan depths ([ADR-0030](./adr/0030-gated-build-plan.md)):
   `⌁ quick build prompt` posts R6 for `build-prompt` (one model call, plus at most one reshape
-  retry, unaudited) and `⌁⌁ audited build plan` posts R22 for `ready-to-build` (about seven calls: five harvesters, the
-  audit and the planner; its tooltip notes when the Settings audit toggle is off and the plan will
+  retry, unaudited) and `⌁⌁ audited build plan` posts R22 for `ready-to-build` (about seven calls without sources: five harvesters, the
+  audit and the planner, plus up to four for its Ground stage when sources are attached; its tooltip adds the worst-case
+  ceiling and waves, and notes when the Settings audit toggle is off and the plan will
   be marked audit skipped). `ready-to-build` is therefore left out of the generic workflow chips.
   Both chips render disabled while any job runs for the idea and use the same thinking indicator.
   Either run lands a `build_plan` artifact plus a pointer turn, never the plan body. Every run
@@ -468,6 +479,18 @@ base.html`.
   override` / `vault`), plus any owner file under `vault/.skills/` that failed to load. `POST
   /skills/reload` (R34) re-reads that folder live and swaps in the refreshed `#skills` panel — no
   restart needed to pick up an edited or new owner skill.
+- **The workflow book (`/skills#workflows`, R49, ADR-0035):** below the moves, the same page lists
+  every registered workflow as a card — name (linking to `GET /skills/workflow/{name}`), source
+  (`built-in` / `vault override` / `vault`), description, `use_when`/`avoid_when`, each stage with its
+  own worst-case call count, and a cost line `up to N model calls · widest stage W → ⌈W/K⌉ waves at
+  K=<AI concurrency>` ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md), ADR-0006). Reload re-reads
+  `vault/.workflows/` after the skills; a file that failed validation is listed in an issues banner
+  and the built-in of the same name stays active. The R49 page adds a panel's rubric table, the
+  file's markdown body, a note when the workflow opens with a Ground stage, and the definition file
+  as loaded, with the path to copy it to. An unknown name, including one present only as an
+  invalid owner file, is `404`. The idea page's workflow chips come from the same book: every
+  visible non-capstone workflow, its tooltip carrying the ceiling and, on an idea with no attached
+  source, a hint that its ground stage will be skipped, plus one caption naming those workflows.
 
 ## Mapping to code
 

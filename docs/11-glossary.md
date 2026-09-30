@@ -95,7 +95,8 @@
   override` / `vault`), plus any owner file that failed to load; `POST /skills/reload` refreshes it
   live. See [09-web-ui](./09-web-ui.md).
 - **Output contract** — the shape a skill's output must take (`domain::skill::OutputContract`:
-  `Free`, `BulletsOrEmpty`, `RankedList`, `FencedMarkdown`, `BuildPlan`), validated and, for a single
+  `Free`, `BulletsOrEmpty`, `RankedList`, `FencedMarkdown`, `BuildPlan`, and the workflow engine's
+  `GroundClaims`, `Proposal`, `Scorecard`), validated and, for a single
   interactive call, repaired by `ai::contract`. See
   [ADR-0023](./adr/0023-verification-layer.md).
 - **Factored audit** — the verification pass a swarm's or workflow's converge step runs over every
@@ -114,11 +115,41 @@
   and I/O contract. `domain::skill::SkillRole` — `Critic`, `Researcher`, **Advocate**,
   **Harvester**, `Synthesizer` — maps 1:1 onto `concepts::agents::AgentRole` for skills fanned out
   by an orchestrator (swarm, workflow, extraction); a direct interactive skill run ignores it.
-  `AgentRole` adds the **Auditor**, which only the factored audit uses. Doc:
+  `AgentRole` adds the **Auditor**, which only the factored audit and the Panel stage's scorers use. Doc:
   [06-concepts/agents](./06-concepts/agents.md).
-- **Workflow** — a deterministic, staged orchestration over an idea (fan-out / chained step /
-  audit / synthesize; a chained step's output is carried forward). Contrast with free-form chat.
-  Doc: [06-concepts/workflows](./06-concepts/workflows.md).
+- **Workflow** — a deterministic, staged orchestration over an idea, defined as a markdown file
+  (fan-out / chained step / audit / synthesize, plus Ground / Panel / Loop / Refine; a chained
+  step's output is carried forward). Contrast with free-form chat. Doc:
+  [06-concepts/workflows](./06-concepts/workflows.md).
+- **Workflow book** — the workflow half of the `GET /skills` page (each workflow's stages, worst-case
+  call ceiling and source, plus any owner file that failed validation) and its per-workflow detail
+  page `GET /skills/workflow/{name}` (R49). Built-ins are compiled in from
+  `src/concepts/workflows/*.md`; owner files live in `vault/.workflows/`
+  (`IDEA_VAULT_WORKFLOWS_DIR`), app config, not vault truth. The registry and the skill registry are
+  held as one `Book` pair so a job never sees them disagree
+  ([ADR-0035](./adr/0035-workflows-as-markdown-and-the-workflow-book.md), D38).
+- **Workflow stage** (not a spine stage) — one step of a workflow; one of eight kinds (`domain::workflow::StageKind`): `fan_out`,
+  `chain`, `audit`, `synthesize`, **Ground**, **Panel**, **Loop**, **Refine**.
+- **Ground** — the stage that maps an idea's attached reference sources and verifies every anchor
+  its readers cite in code (verified / moved / disproved / unverified), carrying only verified
+  anchors; skipped with no model call when no source is attached. Verifies existence, not meaning.
+  Emits a `ground_map` artifact ([ADR-0034](./adr/0034-grounded-ranked-and-bounded-workflow-stages.md), D35).
+- **Panel** — the stage where 2–4 proposers compete: each proposal is scored alone, cold, by the
+  Auditor role running the hidden `panel-score` skill against a weighted rubric; code picks the winner
+  and the grafts. Distinct from `swarm::judge`, the deterministic dedupe. Emits a `scorecard`
+  artifact (D36).
+- **Loop / Refine** — bounded repetition stages: a Loop reruns its steps until a round finds nothing
+  new (**dry**) or a cap is hit; a Refine rewrites the audit's REFUTED and UNCERTAIN findings by id and
+  re-audits (D37).
+- **Call ceiling** — a workflow's exact worst-case number of model calls, repair retries included
+  (`Workflow::call_ceiling`), at most `WORKFLOW_MAX_CALLS` (32) and shown before a run; a **wave** is
+  `⌈widest stage / K⌉` batches at the shared concurrency bound K.
+- **Capstone** — a workflow that chains a build-plan skill; derived, and allowed only under the name
+  `ready-to-build` (owners fork it by overriding that name).
+- **Stage artifact / run record** — an `artifacts/*.md` file a Ground, Panel or Loop stage writes
+  (`ground_map`, `scorecard`, a `finding` with lens `loop`) and the `workflow_run` record listing every
+  stage's status and calls; written all-or-nothing after the final stage succeeds, never turns and
+  never memory evidence.
 - **Swarm / swarming** — running many agents concurrently against one idea, under **bounded
   concurrency**, then converging their outputs. Doc: [06-concepts/swarm](./06-concepts/swarm.md).
 - **Bounded concurrency** — the hard cap (a semaphore) on how many AI calls (to whichever backend is

@@ -1,6 +1,6 @@
 # ADR-0021 — Reference sources: registry, generated compose override, deterministic tool leaves
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0034](./0034-grounded-ranked-and-bounded-workflow-stages.md) (the workflow Ground stage also reads attached sources, on a 2 × 2 tool budget)
 - **Date:** 2026-07-16
 - **Deciders:** owner
 

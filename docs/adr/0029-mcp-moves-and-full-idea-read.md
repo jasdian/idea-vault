@@ -1,6 +1,6 @@
 # ADR-0029 — MCP moves and a full-idea read: driving ideation from an MCP client
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0036](./0036-mcp-list-workflows-and-run-workflow.md) (workflows are no longer web-only: `list_workflows` and `run_workflow`)
 - **Date:** 2026-09-29
 - **Deciders:** Owner
 - **Amends:** [ADR-0024](./0024-mcp-server-inbound.md). The inbound tool catalog grows from 7 to

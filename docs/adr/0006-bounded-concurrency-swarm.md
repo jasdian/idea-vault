@@ -1,6 +1,6 @@
 # ADR-0006 — Bounded concurrency and context budgeting for swarms
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [ADR-0034](./0034-grounded-ranked-and-bounded-workflow-stages.md) (a workflow's total model calls are capped by an exact ceiling of at most 32, and the waves at K are shown before a run)
 - **Date:** 2026-07-07
 - **Deciders:** owner
 
