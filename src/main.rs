@@ -4,7 +4,8 @@
 //! spawn a non-blocking LLM-backend probe (absence is valid, D20) → build state + router → bind and
 //! serve. Boot must never block on the model and must not crash on a reindex error. A `import
 //! <dir>` subcommand runs the Obsidian importer instead of the server (docs/adr/0009), and a
-//! `regrade` subcommand replays the parsers over the run journals (docs/adr/0038).
+//! `regrade` subcommand replays the parsers over the run journals (docs/adr/0038). A `validate`
+//! subcommand checks the vault's frontmatter, MEMORY.md coverage and duplicate memories.
 
 use std::future::IntoFuture;
 use std::path::PathBuf;
@@ -67,6 +68,12 @@ async fn main() -> anyhow::Result<()> {
     // without starting the server (docs/adr/0038). Read-only on the vault.
     if args.get(1).map(String::as_str) == Some("regrade") {
         return regrade_command(&config.vault_dir, &args[2..]);
+    }
+
+    // Subcommand: `idea-vault validate` checks the vault's frontmatter, MEMORY.md coverage and
+    // duplicate memories, prints one line per finding and exits 1 on any. Read-only.
+    if args.get(1).map(String::as_str) == Some("validate") {
+        return validate_command(&config.vault_dir, &args[2..]);
     }
 
     // 2. Vault dir (source of truth). Boot does not fail on a suspect vault: under compose's
@@ -314,6 +321,20 @@ fn claude_system_prompt(add_dirs: &[PathBuf]) -> Option<String> {
          the idea, Grep/Read those directories for relevant prior thinking and cite what you find. \
          Do not modify the owner's files unless they explicitly ask."
     ))
+}
+
+/// `idea-vault validate`: the report on stdout, exit 0 when clean and 1 on any finding.
+fn validate_command(vault: &std::path::Path, args: &[String]) -> anyhow::Result<()> {
+    if !args.is_empty() {
+        anyhow::bail!("usage: idea-vault validate  (the vault is IDEA_VAULT_VAULT_DIR)");
+    }
+    let report = vault::validate::validate_vault(vault)
+        .with_context(|| format!("validating vault {}", vault.display()))?;
+    vault::validate::write_report(&report, &mut std::io::stdout().lock())?;
+    if !report.findings.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 const REGRADE_USAGE: &str = "usage: idea-vault regrade [--idea <slug>] \
