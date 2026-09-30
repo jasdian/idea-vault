@@ -88,6 +88,13 @@
       <button type="submit" class="chip chip--build chip--build-audited"{% if busy %} disabled{% endif %}
               title="About 7 model calls: 5 harvesters + audit + planner; only owner-quoted decisions become Settled, refuted items are fenced. Slower on small models.{% if !build_cost.is_empty() %} Worst case: {{ build_cost }}.{% endif %}{% if !audit_on %} (audit is off: the plan will be marked audit skipped){% endif %}">⌁⌁ audited build plan</button>
     </form>
+    {# Make skill (docs/adr/0042): a background job like every model-calling button; the draft
+       lands under Artifacts and nothing reaches the skill book until the owner saves it. #}
+    <form class="capstones__pair" hx-post="/idea/{{ slug }}/make-skill" hx-target="#transcript" hx-swap="innerHTML"
+          hx-disabled-elt="find button">
+      <button type="submit" class="chip chip--make-skill"{% if busy %} disabled{% endif %}
+              title="1–2 model calls: distils the move that worked here into a draft skill for you to review; nothing is saved until you press Save">✎ make skill</button>
+    </form>
     {# The way back to the plan's workbench (docs/adr/0032): the latest version, and how many of
        its questions still wait on the owner. #}
     {% if let Some(p) = plan %}

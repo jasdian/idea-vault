@@ -101,7 +101,8 @@ impl IntoResponse for WebError {
                 .into_response(),
             WebError::Concept(
                 e @ (crate::concepts::ConceptError::PlanUnusable
-                | crate::concepts::ConceptError::NothingHarvested),
+                | crate::concepts::ConceptError::NothingHarvested
+                | crate::concepts::ConceptError::DraftUnusable(_)),
             ) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response()
             }
