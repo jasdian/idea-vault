@@ -206,7 +206,25 @@ pub fn append_conversation(
         .create(true)
         .append(true)
         .open(dir.join("conversation.md"))?;
-    file.write_all(turn_markdown.as_bytes())?;
+    write_synced(&mut file, turn_markdown.as_bytes())
+}
+
+/// The durability seam of an append: a `File` fsyncs, a test double records the call.
+trait SyncAll {
+    fn sync_all(&self) -> std::io::Result<()>;
+}
+
+impl SyncAll for fs::File {
+    fn sync_all(&self) -> std::io::Result<()> {
+        fs::File::sync_all(self)
+    }
+}
+
+/// Write `bytes` and fsync before returning, so an appended turn survives a crash or power loss
+/// right after the request that wrote it reports success. A failed fsync is the write's error.
+fn write_synced<F: Write + SyncAll>(file: &mut F, bytes: &[u8]) -> Result<(), VaultError> {
+    file.write_all(bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -1091,6 +1109,64 @@ mod tests {
         assert!(convo.contains("\\## assistant"), "forged heading escaped");
         // The whole submission stays ONE turn — the forged boundary does not split it.
         assert_eq!(split_turns(&convo).len(), 1);
+    }
+
+    /// Records the order of writes and syncs; `fail_sync` makes the fsync fail.
+    #[derive(Default)]
+    struct SyncRecorder {
+        events: std::cell::RefCell<Vec<&'static str>>,
+        written: Vec<u8>,
+        fail_sync: bool,
+    }
+
+    impl Write for SyncRecorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.events.borrow_mut().push("write");
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SyncAll for SyncRecorder {
+        fn sync_all(&self) -> std::io::Result<()> {
+            self.events.borrow_mut().push("sync_all");
+            if self.fail_sync {
+                return Err(std::io::Error::other("disk gone"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn chat_fsync_append_writes_then_calls_sync_all() {
+        let mut file = SyncRecorder::default();
+        write_synced(&mut file, b"## user\nhi\n").unwrap();
+        assert_eq!(file.written, b"## user\nhi\n");
+        assert_eq!(file.events.into_inner().last(), Some(&"sync_all"));
+    }
+
+    #[test]
+    fn chat_fsync_failure_is_the_writes_error() {
+        let mut file = SyncRecorder {
+            fail_sync: true,
+            ..SyncRecorder::default()
+        };
+        let err = write_synced(&mut file, b"## user\nhi\n").unwrap_err();
+        assert!(matches!(err, VaultError::Io(_)), "{err:?}");
+    }
+
+    #[test]
+    fn chat_fsync_append_turn_still_lands_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        append_turn(tmp.path(), "i", "user", "durable").unwrap();
+        assert_eq!(
+            read_conversation(tmp.path(), "i").unwrap(),
+            "## user\ndurable\n"
+        );
     }
 
     #[test]
