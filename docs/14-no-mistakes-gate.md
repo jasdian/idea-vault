@@ -70,6 +70,41 @@ when a rule ships without one. `checklist-mirror` is INFO for a `.claude/` mirro
 absent (a fresh clone, or a worktree whose `.claude/` holds only a campaign workspace) and an error
 for one that exists and drifted.
 
+The catalog, in `--list` order:
+
+| Id | Severity | Holds |
+|---|---|---|
+| `ollama-url`, `bind-addr` | error | no hardcoded Ollama URL or bind outside `src/config.rs` |
+| `restart-no`, `vault-bind-long` | error | compose `restart: "no"`, long-syntax vault bind (ADR-0019, ADR-0020) |
+| `no-docker-exec` | error | the app never runs docker (ADR-0020) |
+| `doc-links` | error | ADR paths in CLAUDE.md and links in docs/08 resolve |
+| `ratchet` | error | clippy lint attributes (`allow` or `expect`) and unsafe blocks at or under their floors |
+| `d4-config`, `d4-web-app` | error | the D4 module edges into `config` and `app` |
+| `ratchet-slack` | warn | no count below its floor |
+| `ignore-ratchet` | error | `#[ignore]` at or under `IGNORE_FLOOR` (TST-6) |
+| `doc-ranges` | error | CLAUDE.md's D and ADR ranges name the highest ones |
+| `doc-range-gaps` | info | unused D or ADR numbers below the highest |
+| `checklist-mirror` | error | the `[dev]` checklist mirrors in `.claude/` |
+| `intent-archive` | info | `docs/INTENT.md` holds one intent block |
+| `tool-fence`, `no-skip-permissions` | error | foil lockdown (ADR-0039) |
+| `runs-not-truth` | error | no run-journal path where truth or prompts are read (ADR-0037) |
+| `discard-truth-write` | error | no `let _ =` on a vault store, index or memory write in `src/` (ARCH-4, BE-007) |
+| `graceful-shutdown` | error | `src/main.rs` serves with `with_graceful_shutdown` (BE-012) |
+| `sql-literal` | error | no `format!`-built `SELECT`/`INSERT`/`UPDATE`/`DELETE` in `src/index` or `src/memory` (DA-001) |
+| `anyhow-edge` | error | `anyhow` only in `src/main.rs` and `src/import.rs` (PFC-2, BE-010) |
+| `no-deep-super` | error | no `#[path]` and no `super::super` in `src/` |
+| `busy-timeout` | error | `src/index/schema.rs` sets the SQLite `busy_timeout` (DA-003, BE-011) |
+| `allow-reason` | error | every clippy lint attribute in `src/` is `#[expect(clippy::…, reason = "…")]` |
+
+What the compiler can hold is not a grep: `Cargo.toml` `[lints]` denies `unsafe_code`,
+`clippy::unwrap_used`, `todo`, `unimplemented`, `print_stdout`, `print_stderr`,
+`undocumented_unsafe_blocks` and `missing_safety_doc`, and step 6 enforces them. Unsafe code is
+allowed only with a local `#[expect(unsafe_code, reason = "…")]` and a `// SAFETY:` comment above
+each block (a `# Safety` doc section on an `unsafe fn`), and it is counted by the unsafe ratchet.
+`clippy.toml` exempts test code from the unwrap and print denials; an integration-test crate, whose
+helpers sit outside `#[test]` functions, carries a crate-level allow for `unwrap_used`, and
+`src/main.rs` prints CLI output under a local `#[expect(clippy::print_stdout, reason = "…")]`.
+
 Step 1's freshness check is skipped on `main`; step 7's honesty check is not: on `main` it diffs
 the working tree and index against `HEAD`, so a commit made straight to `main` still declares its
 expectation changes.

@@ -29,13 +29,21 @@ pub fn write(root: &Path, rel: &str, text: &str) {
     fs::write(path, text).unwrap();
 }
 
-/// `n` clippy allow attributes, spelled in pieces so this file never counts toward the ratchet.
+/// `n` reasoned clippy lint attributes, which the ratchet counts and allow-reason accepts.
 pub fn allows_rs(n: usize) -> String {
-    let attr = concat!("#[allow(", "clippy::too_many_arguments)]");
+    let attr = concat!(
+        "#[expect(",
+        "clippy::too_many_arguments, reason = \"seed\")]"
+    );
     (0..n)
         .map(|i| format!("{attr}\nfn f{i}() {{}}\n"))
         .collect()
 }
+
+pub const MAIN_RS: &str =
+    "fn main() { axum::serve(l, app).with_graceful_shutdown(shutdown_signal()); }\n";
+
+pub const SCHEMA_RS: &str = "fn open() { conn.busy_timeout(BUSY_TIMEOUT)?; }\n";
 
 pub const INTENT: &str =
     "# Intent — seed tree (ADR-0001)\n\n## Acceptance criteria\n\n- every rule holds\n";
@@ -54,6 +62,8 @@ pub fn clean_tree(root: &Path) {
         "pub const OLLAMA: &str = \"http://localhost:11434\";\npub const BIND: &str = \"127.0.0.1:3000\";\n",
     );
     write(root, "src/ai/mod.rs", "pub fn ai() {}\n");
+    write(root, "src/main.rs", MAIN_RS);
+    write(root, "src/index/schema.rs", SCHEMA_RS);
     write(root, "src/web/mod.rs", "pub fn web() {}\n");
     write(
         root,

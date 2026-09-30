@@ -1,42 +1,52 @@
-# Intent — Claude CI hotfix: a failed CI run on main becomes an issue and a hotfix PR (ADR-0041)
+# Intent — Rust handbook Tier 1: compiler-enforced lints, truth-write fix, graceful shutdown, SQLite busy_timeout, new invariants (ADR-0041)
 
-A red CI run on main, such as a new stable clippy lint (run 36718191131), stays red until the owner
-notices it. The new workflow `.github/workflows/claude-ci-hotfix.yml` runs on a failed `CI` run from
-a push to main, or on a dispatch with a run id. The workflow files a `ci-failure` issue. Claude,
-holding no write access, diagnoses the failure and, if main still fails, fixes the root cause. A
-deterministic job then guards the diff and opens a `Fixes #N` PR on `hotfix/ci-<run_id>`. It works
-under the no-mistakes guardrails (ADR-0041, docs/14-no-mistakes-gate.md). `claude-review.yml` also
-reviews those hotfix PRs. The owner approved this design, and it is documented in
-docs/10-testing-strategy.md.
+The owner's Engineering Standards Handbook, mapped to idea-vault, found rules the gate held only by
+review: a bare `unwrap()` or a `println!` in shipping code, unsafe code without a stated reason, a
+lint exception without a reason, SQL built with `format!`, `anyhow` leaking into library modules.
+It also found one truth write whose `Result` was discarded (the chat route's Draft→InDiscussion
+frontmatter write, against ARCH-4 and ADR-0007), a server that drops every job when it is stopped,
+and an index opened without an explicit busy timeout. Owner decision of 2026-09-30 ("Tier 1"), with
+the owner's correction that unsafe is denied, not forbidden: a justified site opts in locally.
+Amends the ADR-0041 catalog; no new ADR.
 
 ## Acceptance criteria
 
-- The workflow starts only for a failed `CI` run whose event is `push` on `main` in this repository.
-  A dispatch is held to the same check. A pull-request CI run never starts it, so a failing hotfix
-  PR cannot loop.
-- There is one issue per failing sha, found by a marker the workflow writes, in a serialised triage
-  job; one hotfix is in flight at a time; at most 3 hotfix issues are filed per 24 hours; and a
-  skipped run names the reason in its summary.
-- When main's CI is already green at a later commit, the run records the failure in an issue,
-  closes it, and pushes no branch.
-- Claude runs with a read-only token, no git or gh tools, unpersisted checkout credentials and a
-  restore-only cache, on current main with CI's toolchain and four commands. It gives a diagnosis
-  only after 3 failed attempts. A deterministic publish job, which has the write token, refuses
-  output that contains a secret and runs the guard before pushing. The guard withholds lint
-  suppressions, `#[ignore]`, removed tests, `Cargo.toml` lint changes, symlinks and edits to
-  `.github/`, `scripts/`, `CLAUDE.md` or build config. It opens a fix that touches fixtures,
-  snapshots, floors or Cargo files as a draft. Only `hotfix/ci-<run_id>` is ever pushed, never
-  forced, and nothing merges.
-- With `CI_HOTFIX_TOKEN` set, the PR starts CI. Without it, the PR and the issue say CI must be
-  started by hand, and a PR that GitHub refuses is reported on the issue with the setting to
-  enable.
-- `claude-review.yml` reviews `hotfix/ci-*` PRs authored by the one hotfix bot (`CI_HOTFIX_BOT`
-  or github-actions), with advisory framing and `allowed_bots` set only for them, as well as the
-  owner's PRs; fork PRs stay excluded. Every action in both Claude workflows is pinned to a
-  commit SHA.
-- `actionlint` (with shellcheck) passes on `.github/workflows/`, and `bash scripts/gate.sh` is
-  green.
+- `Cargo.toml` `[lints]` denies `unsafe_code`, `clippy::unwrap_used`, `todo`, `unimplemented`,
+  `print_stdout`, `print_stderr`, `undocumented_unsafe_blocks` and `missing_safety_doc`;
+  `clippy.toml` exempts test code from unwrap and print and sets `upper-case-acronyms-aggressive`;
+  `src/main.rs` prints CLI output only under a reasoned `#[expect(clippy::print_stdout)]`.
+- A failed Draft→InDiscussion frontmatter write fails the chat send (503 for a read-only idea dir),
+  releases the job slot and starts no model call; no truth write's `Result` is discarded in `src/`.
+- SIGINT or SIGTERM stops accepting connections, drains in-flight requests and aborts running jobs
+  (each run journal ends `Cancelled`), bounded by `SHUTDOWN_GRACE`.
+- The index connection sets `busy_timeout` to the named `BUSY_TIMEOUT` (5s).
+- `scripts/check-invariants.sh` gains `discard-truth-write`, `graceful-shutdown`, `sql-literal`,
+  `anyhow-edge`, `no-deep-super`, `busy-timeout` and `allow-reason`, each with a seeded violation
+  per detection arm in `tests/gate_invariants.rs`; every clippy lint attribute in `src/` is a
+  reasoned `#[expect]`.
+- docs/14, docs/10 and an ADR-0041 amendment name the new rules.
+- Every behaviour change is observed failing first, and `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
-None: this change touches no fixture, snapshot, floor or invariant rule.
+- CLIPPY_ALLOW_FLOOR: 5 → 7. The ratchet now counts every clippy lint attribute (`allow` or
+  `expect`); the five `too_many_arguments` allows became reasoned `#[expect]`s and `src/main.rs`
+  adds two reasoned `#[expect(clippy::print_stdout)]` for the `import` and `regrade --export` CLI
+  output, which HTC-8 allows in main.rs only.
+- ratchet: the zero-state text reads "clippy lint attributes (allow or expect)"; the rule is neither
+  removed nor downgraded.
+- check-invariants catalog: seven new error rules, `discard-truth-write`, `graceful-shutdown`,
+  `sql-literal`, `anyhow-edge`, `no-deep-super`, `busy-timeout` and `allow-reason`; nothing removed
+  or downgraded.
+- tests/gate_invariants.rs: `SEEDS` gains thirteen rows, one per detection arm of the new rules
+  (store write; serve without it, main.rs missing; literal on the format! line, on the next line;
+  library module; super::super, #[path]; no busy_timeout call, schema.rs missing; allow instead of
+  expect, multi-line allow, expect without reason).
+- tests/support/gate.rs: the clean tree gains `src/main.rs` (with `with_graceful_shutdown`) and
+  `src/index/schema.rs` (with `busy_timeout`), and `allows_rs` writes reasoned `#[expect]`s instead
+  of bare `#[allow]`s so the clean tree passes `allow-reason`.
+- tests/*.rs and examples/*.rs: each crate root gains a reasoned crate-level
+  `#![allow(clippy::unwrap_used)]` (examples also print) because clippy's test exemption does not
+  reach helpers outside `#[test]` functions; no assertion changes.
+- index::queries: `turn_fact_hits` binds the snippet token count as `?3` and `refresh_lexical_fts`
+  spells the eligible kinds in its literal, so no SQL is built with `format!`; results unchanged.

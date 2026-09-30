@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Ratchet floors: clippy -D warnings counts none of these, so a grep holds the line. A rise needs
 # a same-line justification, a floor bump here and a `## Expectation changes` entry (gate step 7);
 # a fall lowers the floor in the same commit (ratchet-slack, red under --strict).
-CLIPPY_ALLOW_FLOOR=5
+CLIPPY_ALLOW_FLOOR=7
 UNSAFE_FLOOR=0
 IGNORE_FLOOR=0
 
@@ -36,7 +36,7 @@ restart-no|error|ADR-0020|every compose restart: directive is exactly restart: "
 vault-bind-long|error|ADR-0019|no short-form ./vault: bind in compose files
 no-docker-exec|error|ADR-0020|no Command::new("docker…") in src/
 doc-links|error|CLAUDE.md, D-catalog|every ADR path in CLAUDE.md and every relative .md link in docs/08-diagrams.md resolves
-ratchet|error|HTC-9|clippy allows and unsafe blocks at or under their floors
+ratchet|error|HTC-9|clippy lint attributes (allow or expect) and unsafe blocks at or under their floors
 d4-config|error|D4|ai, domain, mcp and sources never import crate::config
 d4-web-app|error|D4|nothing under src/web imports crate::app
 ratchet-slack|warn|HTC-9|no count below its floor (a fall lowers the floor in the same commit)
@@ -47,7 +47,14 @@ checklist-mirror|error|ADR-0041|every [dev] phrase of the docs/14 checklist is m
 intent-archive|info|ADR-0041|docs/INTENT.md holds one intent block
 tool-fence|error|ADR-0039|every "role": "tool" message in src/ai goes through fence_untrusted
 no-skip-permissions|error|ADR-0039|no --dangerously-skip-permissions in src/
-runs-not-truth|error|ADR-0037|no run-journal path in src/index, src/memory, src/concepts or src/ai/budget.rs'
+runs-not-truth|error|ADR-0037|no run-journal path in src/index, src/memory, src/concepts or src/ai/budget.rs
+discard-truth-write|error|ARCH-4, BE-007|no let _ = on a vault store, index or memory write in src/
+graceful-shutdown|error|BE-012|src/main.rs serves with with_graceful_shutdown
+sql-literal|error|DA-001|no format!-built SELECT, INSERT, UPDATE or DELETE in src/index or src/memory
+anyhow-edge|error|PFC-2, BE-010|anyhow appears only in src/main.rs and src/import.rs
+no-deep-super|error|D4|no #[path] attribute and no super::super in src/
+busy-timeout|error|DA-003, BE-011|src/index/schema.rs sets the SQLite busy_timeout
+allow-reason|error|HTC-9|every clippy lint attribute in src/ is #[expect(clippy::…, reason = "…")]'
 
 usage() {
     printf 'check-invariants.sh: %s\n' "$1" >&2
@@ -196,15 +203,38 @@ if [ -f docs/08-diagrams.md ]; then
 fi
 report doc-links
 
+# clippy_attrs — one "file:line:kind:reasoned" per #[allow(…)] or #[expect(…)] naming a clippy
+# lint in src/, a multi-line attribute joined up to its closing )]. Shared by the ratchet count
+# and allow-reason.
+clippy_attrs() {
+    [ -d src ] || return 0
+    find src -name '*.rs' -print0 | sort -z | xargs -0 -r awk '
+        FNR == 1 { open = 0 }
+        /^[[:space:]]*\/\// { next }
+        !open && /#!?\[(allow|expect)\(/ { open = 1; start = FNR; text = "" }
+        open {
+            text = text $0 " "
+            if ($0 ~ /\)\]/) {
+                open = 0
+                if (text ~ /clippy::/) {
+                    kind = (text ~ /#!?\[allow\(/) ? "allow" : "expect"
+                    why = (text ~ /reason[[:space:]]*=/) ? "reason" : "bare"
+                    print FILENAME ":" start ":" kind ":" why
+                }
+            }
+        }'
+}
+clippy_hits=$(clippy_attrs)
+
 # The three ratchet counts, shared by ratchet, ratchet-slack and ignore-ratchet.
-allows=$(rs_grep '#\[allow\(clippy::' src | wc -l)
+allows=$(printf '%s' "$clippy_hits" | grep -c . || true)
 unsafes=$(rs_grep '\bunsafe[[:space:]]*(\{|fn\b|impl\b)' src | wc -l)
 ignore_hits=$(rs_grep '#\[ignore(\]|[[:space:]]*=)' src tests)
 ignores=$(printf '%s' "$ignore_hits" | grep -c . || true)
 
 # ratchet (HTC-9): a count above its floor.
 [ "$allows" -le "$CLIPPY_ALLOW_FLOOR" ] ||
-    found ERROR src/ "clippy allows: $allows > CLIPPY_ALLOW_FLOOR $CLIPPY_ALLOW_FLOOR"
+    found ERROR src/ "clippy lint attributes: $allows > CLIPPY_ALLOW_FLOOR $CLIPPY_ALLOW_FLOOR"
 [ "$unsafes" -le "$UNSAFE_FLOOR" ] ||
     found ERROR src/ "unsafe blocks: $unsafes > UNSAFE_FLOOR $UNSAFE_FLOOR"
 report ratchet
@@ -221,7 +251,7 @@ report d4-web-app
 
 # ratchet-slack: a count below its floor means the floor was not lowered with the fix.
 [ "$allows" -ge "$CLIPPY_ALLOW_FLOOR" ] || found WARN scripts/check-invariants.sh \
-    "clippy allows: $allows < CLIPPY_ALLOW_FLOOR $CLIPPY_ALLOW_FLOOR; lower the floor in this commit"
+    "clippy lint attributes: $allows < CLIPPY_ALLOW_FLOOR $CLIPPY_ALLOW_FLOOR; lower the floor in this commit"
 [ "$unsafes" -ge "$UNSAFE_FLOOR" ] || found WARN scripts/check-invariants.sh \
     "unsafe blocks: $unsafes < UNSAFE_FLOOR $UNSAFE_FLOOR; lower the floor in this commit"
 [ "$ignores" -ge "$IGNORE_FLOOR" ] || found WARN scripts/check-invariants.sh \
@@ -339,6 +369,77 @@ report no-skip-permissions
 found_hits ERROR "names the run journal; .runs is diagnostics, never indexed or read into a prompt" \
     < <(rs_grep '\.runs\b|RUNS_DIR|runs_dir|read_run\b' src/index src/memory src/concepts src/ai/budget.rs)
 report runs-not-truth
+
+# discard-truth-write (ARCH-4, BE-007): markdown is truth, so a write whose Result is dropped is a
+# silent divergence between what the owner sees and what is on disk. Best-effort cleanups of
+# temp files and probes use std::fs, which this does not match.
+found_hits ERROR "discards the Result of a truth write; propagate it or log it with tracing::warn!" \
+    < <(rs_grep 'let[[:space:]]+_[[:space:]]*=.*\b(store|index|queries|reindex|memory)::[a-z_]*(write|append|delete|create|insert|rebuild|reindex)' src)
+report discard-truth-write
+
+# graceful-shutdown (BE-012): SIGINT/SIGTERM drain requests and abort jobs within a grace period
+# instead of dropping every in-flight task with the runtime.
+if [ ! -f src/main.rs ]; then
+    found ERROR src/main.rs "missing, so graceful shutdown cannot be checked"
+elif [ -z "$(rs_grep 'with_graceful_shutdown' src/main.rs)" ]; then
+    found ERROR src/main.rs "axum::serve without with_graceful_shutdown"
+fi
+report graceful-shutdown
+
+# sql-literal (DA-001): SQL text is a literal and every value is a bound parameter; a
+# format!-built statement is one refactor away from interpolating owner text. Matches the literal
+# on the format!( line or on the line after a bare format!(.
+sql_hits() {
+    local paths
+    mapfile -t paths < <(existing "$@")
+    [ ${#paths[@]} -gt 0 ] || return 0
+    find "${paths[@]}" -name '*.rs' -print0 | sort -z | xargs -0 -r awk '
+        FNR == 1 { prev = 0 }
+        /^[[:space:]]*\/\// { prev = 0; next }
+        {
+            kw = "(SELECT|INSERT|UPDATE|DELETE)([^A-Za-z_]|$)"
+            if ($0 ~ ("format!\\([[:space:]]*r?#*\"[[:space:]]*" kw) ||
+                (prev && $0 ~ ("^[[:space:]]*r?#*\"[[:space:]]*" kw)))
+                print FILENAME ":" FNR ":" $0
+            prev = ($0 ~ /format!\([[:space:]]*$/)
+        }'
+}
+found_hits ERROR "SQL built with format!; write a literal and bind values as parameters" \
+    < <(sql_hits src/index src/memory)
+report sql-literal
+
+# anyhow-edge (PFC-2, BE-010): library modules return typed errors (thiserror); anyhow is for the
+# binary edge, main.rs and the importer only main calls.
+found_hits ERROR "anyhow outside the binary edge; return a typed error" \
+    < <(rs_grep '\banyhow\b' src | grep -vE '^src/(main|import)\.rs:')
+report anyhow-edge
+
+# no-deep-super (D4): a module names its non-parent dependencies by crate:: path, so the module
+# edges stay greppable; #[path] hides where a module lives.
+found_hits ERROR "#[path] or super::super; name the module by its crate:: path" \
+    < <(rs_grep '#\[path|super::super' src)
+report no-deep-super
+
+# busy-timeout (DA-003, BE-011): a statement meeting another connection's lock waits a bounded
+# time instead of failing at once with SQLITE_BUSY.
+if [ ! -f src/index/schema.rs ]; then
+    found ERROR src/index/schema.rs "missing, so the busy_timeout cannot be checked"
+elif [ -z "$(rs_grep 'busy_timeout\(' src/index/schema.rs)" ]; then
+    found ERROR src/index/schema.rs "the index is opened without a busy_timeout"
+fi
+report busy-timeout
+
+# allow-reason (HTC-9): a lint exception says why, and #[expect] goes red once the code it
+# excused is gone, so an exception cannot outlive its cause.
+while IFS=: read -r file line kind why; do
+    [ -n "$file" ] || continue
+    if [ "$kind" = allow ]; then
+        found ERROR "$file:$line" "#[allow(clippy::…)]; use #[expect(clippy::…, reason = \"…\")]"
+    elif [ "$why" = bare ]; then
+        found ERROR "$file:$line" "#[expect(clippy::…)] without reason = \"…\""
+    fi
+done <<<"$clippy_hits"
+report allow-reason
 
 printf 'summary: %d error(s), %d warning(s), %d info\n' "$errors" "$warns" "$infos"
 [ "$errors" -eq 0 ]

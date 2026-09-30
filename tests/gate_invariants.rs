@@ -2,6 +2,10 @@
 //! arm of every catalog rule has a seeded violation that flags exactly its own id, the catalog and
 //! the seed table's ids are the same set (so a rule cannot ship without a seed), and the versioned
 //! tree is clean whatever the unversioned `.claude/` holds.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 mod support;
 
 use std::collections::BTreeSet;
@@ -203,6 +207,80 @@ const SEEDS: &[Seed] = &[
             "docs/14-no-mistakes-gate.md",
             "# 14\n\n## Checklist\n\n1. **alpha rule holds** [dev]\n2. beta rule holds\n",
         )
+    }),
+    ("discard-truth-write", "store write", |r| {
+        write(
+            r,
+            "src/web/turn.rs",
+            concat!("fn f() { let _ = store::wri", "te_idea(&v, &i); }\n"),
+        )
+    }),
+    ("graceful-shutdown", "serve without it", |r| {
+        write(r, "src/main.rs", "fn main() { axum::serve(l, app); }\n")
+    }),
+    ("graceful-shutdown", "main.rs missing", |r| {
+        fs::remove_file(r.join("src/main.rs")).unwrap()
+    }),
+    ("sql-literal", "literal on the format! line", |r| {
+        write(
+            r,
+            "src/index/q.rs",
+            concat!(
+                "fn f() { conn.execute(&for",
+                "mat!(\"DELETE FROM ideas WHERE slug = '{s}'\"), []); }\n"
+            ),
+        )
+    }),
+    ("sql-literal", "literal on the next line", |r| {
+        write(
+            r,
+            "src/memory/q.rs",
+            concat!(
+                "fn f() {\n    let q = for",
+                "mat!(\n        \"SELECT * FROM t WHERE x = {x}\"\n    );\n}\n"
+            ),
+        )
+    }),
+    ("anyhow-edge", "library module", |r| {
+        write(
+            r,
+            "src/vault/x.rs",
+            concat!("fn f() -> any", "how::Result<()> { Ok(()) }\n"),
+        )
+    }),
+    ("no-deep-super", "super::super", |r| {
+        write(r, "src/web/deep.rs", concat!("use super::su", "per::x;\n"))
+    }),
+    ("no-deep-super", "#[path]", |r| {
+        write(
+            r,
+            "src/web/pathed.rs",
+            concat!("#[pa", "th = \"elsewhere.rs\"]\nmod m;\n"),
+        )
+    }),
+    ("busy-timeout", "no busy_timeout call", |r| {
+        write(r, "src/index/schema.rs", "fn open() {}\n")
+    }),
+    ("busy-timeout", "schema.rs missing", |r| {
+        fs::remove_file(r.join("src/index/schema.rs")).unwrap()
+    }),
+    ("allow-reason", "allow instead of expect", |r| {
+        let rs = allows_rs(floor("CLIPPY_ALLOW_FLOOR") - 1);
+        let bad = concat!("#[all", "ow(clippy::too_many_arguments)]\nfn g() {}\n");
+        write(r, "src/allows.rs", &format!("{rs}{bad}"))
+    }),
+    ("allow-reason", "multi-line allow", |r| {
+        let rs = allows_rs(floor("CLIPPY_ALLOW_FLOOR") - 1);
+        let bad = concat!(
+            "#[all",
+            "ow(\n    clippy::too_many_arguments\n)]\nfn g() {}\n"
+        );
+        write(r, "src/allows.rs", &format!("{rs}{bad}"))
+    }),
+    ("allow-reason", "expect without reason", |r| {
+        let rs = allows_rs(floor("CLIPPY_ALLOW_FLOOR") - 1);
+        let bad = concat!("#[exp", "ect(clippy::too_many_arguments)]\nfn g() {}\n");
+        write(r, "src/allows.rs", &format!("{rs}{bad}"))
     }),
 ];
 

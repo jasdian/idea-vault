@@ -129,6 +129,16 @@ canonical text is [docs/14-no-mistakes-gate.md](../14-no-mistakes-gate.md); the 
 - **Classify `depends` as auto-fix or `reads` as ask-user.** Rejected by the owner: `depends` changes
   the task graph (ask-user); `reads` is an advisory "open first" hint (no-op).
 
+## Amendment — Rust handbook Tier 1 (2026-09-30)
+
+The catalog grew by seven error rules, each with seeded violations in `tests/gate_invariants.rs`:
+`discard-truth-write`, `graceful-shutdown`, `sql-literal`, `anyhow-edge`, `no-deep-super`,
+`busy-timeout` and `allow-reason`. The `ratchet` now counts every clippy lint attribute, `allow` or
+`expect`, and `allow-reason` requires each to be `#[expect(clippy::…, reason = "…")]`. Rules the
+compiler can hold moved to `Cargo.toml` `[lints]` instead of the catalog (`unsafe_code`, `unwrap_used`,
+`print_stdout`/`print_stderr`, `todo`, `unimplemented`, undocumented unsafe), enforced by step 6. The
+pipeline, its steps and the findings protocol are unchanged. The canonical list is docs/14.
+
 ---
 
 > ADRs are immutable once **Accepted**. To change a decision, write a new ADR that supersedes this
