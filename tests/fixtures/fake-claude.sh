@@ -76,3 +76,5 @@ case "$mode" in
     ;;
 esac
 exit 0
+
+# ci-gate-check: an undeclared fixture change
