@@ -6,8 +6,10 @@
 //! <dir>` subcommand runs the Obsidian importer instead of the server (docs/adr/0009), and a
 //! `regrade` subcommand replays the parsers over the run journals (docs/adr/0038).
 
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context;
 use idea_vault::ai::claude_code::ClaudeCodeConfig;
@@ -18,6 +20,15 @@ use idea_vault::{import, index, sources, vault};
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
 
+/// How long shutdown waits for in-flight requests to drain and for aborted jobs to stop before the
+/// process exits anyway (BE-012): long enough for a poll or a vault write to finish, short enough
+/// that `docker compose down` (10s default stop timeout) never escalates to SIGKILL.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
+
+#[expect(
+    clippy::print_stdout,
+    reason = "the import subcommand's summary is CLI output for the owner, not a log line (HTC-8)"
+)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -161,15 +172,69 @@ async fn main() -> anyhow::Result<()> {
         sources,
     };
 
-    // 7. Router + serve.
+    // 7. Router + serve until SIGINT/SIGTERM, then drain (BE-012).
+    let jobs = state.jobs.clone();
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
     tracing::info!(address = %listener.local_addr()?, "idea-vault serving");
-    axum::serve(listener, app).await.context("axum serve")?;
-
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown({
+            let stop = stop.clone();
+            async move { stop.notified().await }
+        })
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        served = &mut server => return served.context("axum serve"),
+        () = shutdown_signal() => {}
+    }
+    tracing::info!("shutdown signal received; draining requests and aborting jobs");
+    // notify_one keeps a permit if the server future has not polled `notified` yet.
+    stop.notify_one();
+    let (served, left) = tokio::join!(
+        tokio::time::timeout(SHUTDOWN_GRACE, &mut server),
+        idea_vault::web::jobs::abort_all(&jobs, SHUTDOWN_GRACE),
+    );
+    if left > 0 {
+        tracing::warn!(jobs = left, "jobs still running at the shutdown deadline");
+    }
+    match served {
+        Ok(served) => served.context("axum serve")?,
+        Err(_) => tracing::warn!("connections still open at the shutdown deadline"),
+    }
     Ok(())
+}
+
+/// Resolves on SIGINT (Ctrl-C) or, on unix, SIGTERM (`docker stop`), whichever comes first. A
+/// handler that cannot be installed is logged and never resolves, so the other one still works.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %e, "cannot listen for ctrl-c");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
 }
 
 /// A short label for the active backend, for the boot log.
@@ -258,6 +323,10 @@ idea-vault regrade --export <slug>/<run_id>#<seq> <case-name>";
 /// `idea-vault regrade`: print the flip report and exit 0, or 1 on a flip under `--strict`.
 /// `--export` copies one journaled answer into the repo's parser corpus, relative to the working
 /// directory (docs/adr/0038; only ever by hand, owner decision 2026-09-30).
+#[expect(
+    clippy::print_stdout,
+    reason = "the export confirmation is CLI output for the owner, not a log line (HTC-8)"
+)]
 fn regrade_command(vault: &std::path::Path, args: &[String]) -> anyhow::Result<()> {
     use idea_vault::regrade;
     if args.first().map(String::as_str) == Some("--export") {

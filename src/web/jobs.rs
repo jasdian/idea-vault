@@ -20,7 +20,7 @@ use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
 use tokio::task::AbortHandle;
@@ -233,6 +233,45 @@ pub fn cancel(jobs: &Jobs, slug: &str) -> bool {
     }
 }
 
+/// Abort every running job, as [`cancel`] does one, then wait up to `grace` for their tasks to
+/// stop. Graceful shutdown (BE-012) calls this so each run journal ends `Cancelled` and no task is
+/// dropped mid-flight with the runtime; an abort lands only at an await point, so a synchronous
+/// vault write is never cut in half. Returns how many tasks were still running at the deadline.
+pub async fn abort_all(jobs: &Jobs, grace: Duration) -> usize {
+    let running: Vec<Job> = match jobs.lock() {
+        Ok(mut map) => {
+            let slugs: Vec<String> = map
+                .iter()
+                .filter(|(_, job)| matches!(job.status, JobStatus::Running))
+                .map(|(slug, _)| slug.clone())
+                .collect();
+            slugs.iter().filter_map(|slug| map.remove(slug)).collect()
+        }
+        Err(_) => return 0,
+    };
+    let handles: Vec<AbortHandle> = running
+        .into_iter()
+        .filter_map(|job| {
+            if let Some(handle) = &job.abort {
+                handle.abort();
+            }
+            journal::finish(job.run.as_ref(), RunOutcome::Cancelled);
+            job.abort
+        })
+        .collect();
+    let deadline = Instant::now() + grace;
+    loop {
+        let left = handles.iter().filter(|h| !h.is_finished()).count();
+        if left == 0 || Instant::now() >= deadline {
+            return left;
+        }
+        tokio::time::sleep(ABORT_POLL).await;
+    }
+}
+
+/// How often [`abort_all`] re-checks the aborted tasks while it waits out its grace period.
+const ABORT_POLL: Duration = Duration::from_millis(10);
+
 /// The job finished successfully — clear the slot (the result is already on disk).
 pub fn mark_done(jobs: &Jobs, slug: &str) {
     let old = jobs.lock().ok().and_then(|mut map| map.remove(slug));
@@ -432,6 +471,23 @@ mod tests {
         }
         // The slot is free again — a panicked job must not wedge the idea forever.
         assert!(try_claim(&jobs, "i"));
+    }
+
+    #[tokio::test]
+    async fn abort_all_stops_running_jobs_and_leaves_outcomes_alone() {
+        let jobs = new_registry();
+        assert!(try_claim(&jobs, "busy"));
+        let abort = spawn_job(&jobs, "busy", None, std::future::pending());
+        set_abort(&jobs, "busy", abort.clone());
+        mark_failed(&jobs, "shown-later", "boom".to_string());
+
+        let left = abort_all(&jobs, Duration::from_secs(5)).await;
+
+        assert_eq!(left, 0, "the aborted task stopped within the grace period");
+        assert!(abort.is_finished());
+        assert!(!is_running(&jobs, "busy"));
+        // An unshown outcome is not a running job: it stays for the poll that shows it.
+        assert!(matches!(peek(&jobs, "shown-later"), Pending::Failed(_)));
     }
 
     #[tokio::test]
