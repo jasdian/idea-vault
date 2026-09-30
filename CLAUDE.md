@@ -183,7 +183,7 @@ cargo build --release     # single-binary release build
 cargo test                # run tests
 cargo test <name>         # run a single test by name substring
 cargo fmt && cargo clippy # format + lint before finishing a change
-bash scripts/gate.sh      # the fixed 7-step shipping gate, no skip: intent (+freshness) → strict invariants → build → tests → fmt → clippy -D warnings → honesty (ADR-0041)
+bash scripts/gate.sh      # the fixed 7-step shipping gate, no skip: intent (+freshness) → strict invariants → build → tests → fmt → clippy -D warnings → honesty (ADR-0041); CI (.github/workflows/ci.yml) runs exactly this on every PR and push to main, after `cargo fetch --locked`
 bash scripts/gate.sh --list           # print the step table
 bash scripts/gate.sh --install-hook   # install the pre-push hook (runs check-invariants.sh --strict); use alone
 bash scripts/check-invariants.sh --list   # the invariant catalog: id|severity|ADR/D|zero-state

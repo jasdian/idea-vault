@@ -180,9 +180,17 @@ Three GitHub Actions workflows run this suite off the owner's machine. The setup
 its header comment.
 
 - **`.github/workflows/ci.yml`** (`CI`) runs on every pull request and every push to main, on stable
-  Rust: `cargo build --locked --all-targets`, `cargo test --locked`, `cargo fmt --all -- --check`
-  and `cargo clippy --locked --all-targets -- -D warnings`. That is gate steps 3 to 6. Steps 1, 2
-  and 7 (intent, invariants and honesty) run only locally, in `scripts/gate.sh`.
+  Rust, as one job: `cargo fetch --locked` (a stale `Cargo.lock` is red) and then
+  `bash scripts/gate.sh`, the whole no-mistakes gate, unchanged, steps 1 to 7. A green check means
+  the gate is green: intent and its freshness, the strict invariant catalog, build, tests plus
+  `validate` on a golden-vault copy, fmt, clippy and honesty. On a pull request the checkout is
+  the PR merge commit with a local `main` ref created from `origin/main`, so step 1 and step 7 diff
+  the PR's changes against `merge-base(HEAD, main)` exactly as on a local branch; on a push to main
+  the checkout is branch `main` and the gate takes its on-main path (freshness skipped, honesty
+  against `HEAD`). Every action is pinned to a commit, and the cargo cache is saved under the
+  explicit `shared-key` `gate`, which the hotfix `diagnose` job restores. The push-to-main run
+  is kept: it is the hotfix trigger, and it catches a semantic conflict when main moved under a
+  PR.
 - **`claude-review.yml`** runs when CI goes green on a same-repo PR by the owner or on a
   `hotfix/ci-*` PR from the hotfix workflow's bot (the `CI_HOTFIX_BOT` app if set, else
   github-actions). Claude posts one review comment, which is advisory for a bot-authored PR. Fork
@@ -196,9 +204,9 @@ its header comment.
     skipped run says why in its summary.
   - **`diagnose`** runs Claude on current main with a read-only token, no git or gh tools, and no
     persisted credentials. The cargo cache is restored, never saved. Claude reads the failed log
-    as fenced, untrusted data. If main is already green, or passes CI's four commands, it only
-    diagnoses. Otherwise it fixes the root cause in the working tree, re-runs the four commands,
-    and gives up after 3 attempts. It writes its diagnosis, PR body and commit subject to files.
+    as fenced, untrusted data. If main is already green, or passes the CI commands its prompt
+    lists, it only diagnoses. Otherwise it fixes the root cause in the working tree, re-runs
+    those commands, and gives up after 3 attempts. It writes its diagnosis, PR body and commit subject to files.
   - **`publish`** (no model) posts the diagnosis on the issue. It refuses anything that contains
     a secret-like string. It runs the guard **before** anything is pushed, and then either closes
     the issue (already fixed), leaves it open (no fix, or a withheld fix), or pushes
@@ -222,8 +230,10 @@ its header comment.
   job's environment, which includes `CLAUDE_CODE_OAUTH_TOKEN`. The job holds no write token, and
   `publish` refuses any output that contains a token. If a leak is suspected, rotate the OAuth
   token.
-- **Not gate-green.** A hotfix branch has run CI's commands, not `scripts/gate.sh`. Run the gate
-  locally before merging it.
+- **Gate-green in CI, intent by hand.** CI on a hotfix PR runs `scripts/gate.sh` like any PR, so
+  a green check is gate-green. Gate step 1 needs the branch's own top block in `docs/INTENT.md`,
+  which the hotfix does not write: if step 1 is red on the PR, write the block (moving the previous
+  one to `docs/intent-archive.md`) and push before merging.
 
 ## What is explicitly not tested by machines
 
