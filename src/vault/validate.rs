@@ -142,6 +142,16 @@ fn validate_idea(vault_dir: &Path, slug: &str, dir: &Path) -> Result<Vec<Finding
         detail,
     };
 
+    // The app never opens a folder whose name is not a D22 slug (every store path join refuses
+    // it), so name it once and skip the rest: its other checks would only restate this.
+    if !crate::domain::slug::is_valid(slug) {
+        return Ok(vec![finding(
+            FindingKind::Frontmatter,
+            "idea.md",
+            "folder name is not a valid slug, so idea-vault cannot open this idea".to_string(),
+        )]);
+    }
+
     let idea_findings = match read_file(&dir.join("idea.md"))
         .and_then(|raw| frontmatter::parse_idea(&raw).map_err(|e| e.to_string()))
     {
@@ -226,7 +236,9 @@ fn read_file(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("unreadable: {e}"))
 }
 
-/// Both directions of the `MEMORY.md` ↔ `memory/` pointer contract. A fact whose frontmatter
+/// Both directions of the `MEMORY.md` ↔ `memory/` pointer contract. Only well-formed
+/// `- [title](memory/<slug>.md) — summary` lines count as listed (the same parse the app loads
+/// on reopen); a malformed line is not reported itself, its fact shows up as not listed. A fact whose frontmatter
 /// failed to parse is absent from `stems`, so it is reported once (as frontmatter) and a
 /// `MEMORY.md` line pointing at it is reported here as dangling.
 fn memory_coverage(stems: &BTreeSet<&str>, index: &MemoryIndex) -> Vec<String> {
@@ -455,6 +467,34 @@ created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\nBody.\n";
         );
         assert!(
             report.findings[1].detail.contains("unreadable"),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn validate_names_a_folder_with_an_invalid_slug_and_keeps_going() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("My Idea")).unwrap();
+        fs::write(
+            tmp.path().join("My Idea/idea.md"),
+            IDEA.replace("{slug}", "my-idea"),
+        )
+        .unwrap();
+        idea(tmp.path(), "b");
+        fact(tmp.path(), "b", "orphan", "Orphan", "Unlisted.");
+
+        let report = validate_vault(tmp.path()).unwrap();
+        assert_eq!(
+            kinds(&report),
+            vec![
+                (FindingKind::Frontmatter, "idea.md"),
+                (FindingKind::MemoryIndex, "MEMORY.md"),
+            ]
+        );
+        assert_eq!(report.findings[0].slug, "My Idea");
+        assert!(
+            report.findings[0].detail.contains("not a valid slug"),
             "{:?}",
             report.findings
         );
