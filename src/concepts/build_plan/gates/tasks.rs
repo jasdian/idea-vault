@@ -2,8 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use super::{GateInputs, GateReport};
-use crate::concepts::build_plan::plan::{refs_of, render, BuildPlan, Item};
+use super::claims::whole_word_at;
+use super::{EvidenceTurn, GateInputs, GateReport};
+use crate::concepts::build_plan::plan::{refs_of, render, BuildPlan, Item, Provenance};
+use crate::domain::evidence::{locate, normalize_for_match};
 
 const MAX_TASKS: usize = 15;
 const MAX_SETTLED: usize = 12;
@@ -45,13 +47,20 @@ const OWNER_WORK: &[&str] = &[
     "you fill",
 ];
 
+// Matched as whole words (ADR-0032), so each inflection a stem used to cover is listed in full.
 const GATE_LANGUAGE: &[&str] = &[
     "must not be built",
     "only if",
     "precondition",
-    "kill criteri",
+    "preconditions",
+    "kill criterion",
+    "kill criteria",
     "before any",
 ];
+
+/// Words of context either side of a G10 match in the question it opens.
+const WINDOW_BEFORE: usize = 8;
+const WINDOW_AFTER: usize = 14;
 
 const CONTINUE_ANYWAY: &[&str] = &["continue anyway", "proceed anyway", "keep going"];
 
@@ -683,24 +692,24 @@ fn kill_wiring(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateRepor
     if !plan.kills.is_empty() || already_asked {
         return;
     }
-    for turn in inputs.evidence.turns() {
-        let lower = turn.raw.to_ascii_lowercase();
-        let Some((at, phrase)) = GATE_LANGUAGE
+    // Only what the owner said (or wrote in the idea) is a gate the owner set; a foil turn
+    // musing "only if" is not a requirement the plan owes a kill row (ADR-0030, ADR-0032).
+    let owner_turns = inputs
+        .evidence
+        .turns()
+        .iter()
+        .filter(|t| matches!(t.speaker, Provenance::Owner | Provenance::Idea));
+    for turn in owner_turns {
+        let text = turn_body(turn);
+        let answered = answered_spans(plan, text);
+        let Some(at) = GATE_LANGUAGE
             .iter()
-            .filter_map(|p| lower.find(p).map(|at| (at, *p)))
-            .min_by_key(|(at, _)| *at)
+            .filter_map(|p| gate_phrase_at(text, p, &answered))
+            .min()
         else {
             continue;
         };
-        let before: Vec<char> = turn.raw[..at].chars().rev().take(30).collect();
-        let window = before
-            .into_iter()
-            .rev()
-            .chain(turn.raw[at..].chars().take(phrase.len() + 60))
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let window = word_window(text, at);
         plan.open_from(
             Item::new(
                 "",
@@ -710,6 +719,60 @@ fn kill_wiring(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateRepor
         );
         break;
     }
+}
+
+/// A turn's normalized text without its `## user` heading, so the quoted window is only what the
+/// owner wrote. The idea statement has no heading and is returned whole.
+fn turn_body(turn: &EvidenceTurn) -> &str {
+    let text = turn.normalized.as_str();
+    match turn.speaker {
+        Provenance::Owner => turn
+            .raw
+            .lines()
+            .next()
+            .map(normalize_for_match)
+            .and_then(|heading| text.strip_prefix(heading.as_str()))
+            .map_or(text, str::trim_start),
+        Provenance::Idea | Provenance::Foil => text,
+    }
+}
+
+/// Byte ranges of `text` (a normalized turn body) that an Owner-provenance Settled item quotes. Gate
+/// language there is already the owner's settled answer, so asking about it again would re-open
+/// what the owner closed (ADR-0032).
+fn answered_spans(plan: &BuildPlan, text: &str) -> Vec<(usize, usize)> {
+    plan.settled
+        .iter()
+        .filter(|s| s.provenance == Some(Provenance::Owner))
+        .filter_map(|s| {
+            let quote = s.field("quote").unwrap_or(s.text.as_str());
+            let start = locate(quote, text)?;
+            Some((start, start + normalize_for_match(quote).len()))
+        })
+        .collect()
+}
+
+/// The first whole-word occurrence of `phrase` in `text` outside every `answered` span. Whole
+/// words, so "commonly if" and "monopoly if" never read as "only if".
+fn gate_phrase_at(text: &str, phrase: &str, answered: &[(usize, usize)]) -> Option<usize> {
+    text.match_indices(phrase)
+        .map(|(at, _)| at)
+        .filter(|&at| whole_word_at(text, at, phrase.len()))
+        .find(|&at| !answered.iter().any(|&(s, e)| at >= s && at < e))
+}
+
+/// The words around the match at `at`: up to [`WINDOW_BEFORE`] whole words before the word the
+/// match starts in and [`WINDOW_AFTER`] from it, so the quoted window never cuts a word in half.
+fn word_window(text: &str, at: usize) -> String {
+    let word_start = text[..at].rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let before: Vec<&str> = text[..word_start].split_whitespace().collect();
+    let before = &before[before.len().saturating_sub(WINDOW_BEFORE)..];
+    before
+        .iter()
+        .copied()
+        .chain(text[word_start..].split_whitespace().take(WINDOW_AFTER))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shape_and_caps(plan: &BuildPlan, report: &mut GateReport) {
@@ -1100,6 +1163,103 @@ mod tests {
         let mut wired = kill_plan();
         run_with(&mut wired, "## user\nThe indexer must not be built yet.\n");
         assert!(wired.open.is_empty());
+    }
+
+    fn task_plan() -> BuildPlan {
+        let mut plan = BuildPlan::default();
+        plan.tasks
+            .push(item("T1", "Build", &[("accept", RUNNABLE)]));
+        plan
+    }
+
+    #[test]
+    fn gate_language_ignores_word_fragments() {
+        let mut plan = task_plan();
+        run_with(
+            &mut plan,
+            "## user\nThat happens commonly if the cache is cold, and it is a monopoly if we win.\n",
+        );
+        assert!(plan.open.is_empty(), "{:?}", plan.open);
+    }
+
+    #[test]
+    fn gate_language_ignores_foil_turns() {
+        let mut plan = task_plan();
+        run_with(
+            &mut plan,
+            "## user\nShip the parser.\n\n## assistant\nThe indexer must not be built until the probe is measured.\n",
+        );
+        assert!(plan.open.is_empty(), "{:?}", plan.open);
+    }
+
+    #[test]
+    fn gate_language_window_is_whole_words_no_markdown() {
+        let mut plan = task_plan();
+        run_with(
+            &mut plan,
+            "## user\nHonestly, after a long week of thinking it over we ship the indexer **only** if the parser passes every golden fixture we already keep in the repository today, no exceptions at all.\n",
+        );
+        assert_eq!(plan.open.len(), 1);
+        let text = &plan.open[0].text;
+        assert!(!text.contains('*'), "{text}");
+        let window = text.split('"').nth(1).unwrap();
+        assert_eq!(
+            window,
+            "of thinking it over we ship the indexer only if the parser passes every golden \
+             fixture we already keep in the repository"
+        );
+        assert_eq!(window.split(' ').count(), WINDOW_BEFORE + WINDOW_AFTER);
+    }
+
+    // `reset_derived` (ADR-0032) keeps GATE_MARKER on Open questions, so a re-gated plan carries
+    // the marker back in through `parse_artifact`; this pins the half G10 owns — the marker
+    // survives a render/parse round trip and suppresses a second question.
+    #[test]
+    fn gate_language_not_refired_after_reset() {
+        let conversation = "## user\nThe indexer must not be built until the probe is measured.\n";
+        let mut plan = task_plan();
+        run_with(&mut plan, conversation);
+        assert_eq!(plan.open.len(), 1);
+
+        let mut again = crate::concepts::build_plan::plan::parse_artifact(&render(&plan)).unwrap();
+        run_with(&mut again, conversation);
+        let asked = again
+            .open
+            .iter()
+            .filter(|q| has_marker(q, GATE_MARKER))
+            .count();
+        assert_eq!(asked, 1, "{:?}", again.open);
+    }
+
+    #[test]
+    fn gate_language_skips_answered_quote() {
+        let conversation =
+            "## user\nRe Q1 (plan-1): ship the indexer only if the parser passes the golden tests.\n";
+        let answered = |owner: bool| {
+            let mut plan = task_plan();
+            let mut settled = item(
+                "S1",
+                "The indexer ships once the parser passes",
+                &[
+                    ("quote", "ship the indexer only if the parser passes"),
+                    ("answers", "Q1"),
+                ],
+            );
+            settled.provenance = Some(if owner {
+                Provenance::Owner
+            } else {
+                Provenance::Foil
+            });
+            plan.settled.push(settled);
+            run_with(&mut plan, conversation);
+            plan
+        };
+        assert!(answered(true).open.is_empty());
+        assert_eq!(
+            answered(false).open.len(),
+            1,
+            "only an owner answer exempts"
+        );
     }
 
     #[test]

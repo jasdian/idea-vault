@@ -170,13 +170,13 @@ fn audit_verdicts(
     kept
 }
 
-fn whole_word_at(text: &str, at: usize, len: usize) -> bool {
+pub(super) fn whole_word_at(text: &str, at: usize, len: usize) -> bool {
     let before = text[..at].chars().next_back();
     let after = text[at + len..].chars().next();
     !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
 }
 
-fn find_phrase(text: &str, phrase: &str) -> Option<usize> {
+pub(super) fn find_phrase(text: &str, phrase: &str) -> Option<usize> {
     text.match_indices(phrase)
         .map(|(at, _)| at)
         .find(|&at| whole_word_at(text, at, phrase.len()))
