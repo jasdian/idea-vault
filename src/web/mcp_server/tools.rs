@@ -35,6 +35,16 @@ fn schema_empty() -> Value {
     json!({ "type": "object", "properties": {}, "additionalProperties": false })
 }
 
+/// The optional `idempotency_key` every long-running tool accepts (docs/adr/0033): a retry with
+/// the same key and arguments replays the served result instead of starting a second run.
+fn idempotency_key_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "optional: reuse the same key to safely retry — the first run's result is \
+                        replayed (for 24 h) instead of running again; a new key forces a fresh run",
+    })
+}
+
 /// Pull a required, non-blank string argument out of the call's JSON args.
 pub(super) fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, McpError> {
     args.get(key)
@@ -113,6 +123,7 @@ pub(super) fn catalog() -> Vec<Tool> {
                 "properties": {
                     "slug": { "type": "string" },
                     "message": { "type": "string" },
+                    "idempotency_key": idempotency_key_schema(),
                 },
                 "required": ["slug", "message"],
                 "additionalProperties": false,
@@ -130,7 +141,10 @@ pub(super) fn catalog() -> Vec<Tool> {
              it returns a 'still running' note — call again with the same slug to collect it.",
             to_schema(json!({
                 "type": "object",
-                "properties": { "slug": { "type": "string" } },
+                "properties": {
+                    "slug": { "type": "string" },
+                    "idempotency_key": idempotency_key_schema(),
+                },
                 "required": ["slug"],
                 "additionalProperties": false,
             })),
@@ -155,6 +169,7 @@ pub(super) fn catalog() -> Vec<Tool> {
                 "properties": {
                     "slug": { "type": "string" },
                     "name": { "type": "string", "description": "skill name from list_skills" },
+                    "idempotency_key": idempotency_key_schema(),
                 },
                 "required": ["slug", "name"],
                 "additionalProperties": false,
@@ -177,6 +192,7 @@ pub(super) fn catalog() -> Vec<Tool> {
                         "items": { "type": "string" },
                         "description": "skill names to use as angles; omit for the default set",
                     },
+                    "idempotency_key": idempotency_key_schema(),
                 },
                 "required": ["slug"],
                 "additionalProperties": false,
@@ -444,6 +460,13 @@ mod tests {
                 t.task_support(),
                 TaskSupport::Optional,
                 "{name} must be callable both as a task and plainly"
+            );
+            // `additionalProperties: false` would reject the replay key (docs/adr/0033) otherwise.
+            assert!(
+                t.input_schema["properties"]
+                    .get("idempotency_key")
+                    .is_some(),
+                "{name} must accept an idempotency_key"
             );
         }
         for name in [
