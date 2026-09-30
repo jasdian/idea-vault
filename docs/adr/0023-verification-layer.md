@@ -1,6 +1,6 @@
 # ADR-0023 — A verification layer: output contracts, factored audit, grounded memory
 
-- **Status:** Accepted — amended by [ADR-0037](./0037-run-journal-diagnostics-only-call-record.md) (a contract outcome is recorded, and truncation is a violation) and [ADR-0040](./0040-recipe-provenance-and-audit-re-ask.md) (the Auditor gets at most one targeted re-ask); amended by [ADR-0034](./0034-grounded-ranked-and-bounded-workflow-stages.md) (Panel scorers are cold Auditor calls, Refine re-audits, Panel proposals and Loop items are audited as findings)
+- **Status:** Accepted — amended by [ADR-0037](./0037-run-journal-diagnostics-only-call-record.md) (a contract outcome is recorded, and truncation is a violation) and [ADR-0040](./0040-recipe-provenance-and-audit-re-ask.md) (the Auditor gets at most one targeted re-ask); amended by [ADR-0034](./0034-grounded-ranked-and-bounded-workflow-stages.md) (Panel scorers are cold Auditor calls, Refine re-audits, Panel proposals and Loop items are audited as findings); amended by [ADR-0042](./0042-make-skill-distil-owner-skills.md) (a ninth contract, `skill_draft`, with the violations `NotASkillFile` and `NoEvidence`)
 - **Date:** 2026-09-28
 - **Deciders:** owner
 

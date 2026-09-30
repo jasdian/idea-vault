@@ -35,7 +35,7 @@ web::mcp_server
 ├── tools.rs     — the tool catalog + synchronous tool dispatch (list_ideas, get_idea, search,
 │                   create_idea, reopen_idea, list_skills, list_workflows, get_artifact, get_plan,
 │                   answer_plan)
-├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm/build_plan/run_workflow
+├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm/build_plan/run_workflow/make_skill
 ├── idempotency.rs — ReplayCache + args_hash : replay of a served result (ADR-0033, D34)
 └── prompts.rs   — a small canned prompt catalog
 ```
@@ -296,8 +296,9 @@ defaulting to open.
 | `store_idea` | long-running | Consolidate + verified memory extraction; quarantine count as a notice |
 | `build_plan` | long-running | The build-prompt capstone, or with `audited:true` the ready-to-build workflow; a new plan version linked to the head; returns the `get_plan` JSON |
 | `run_workflow` | long-running | One named non-capstone workflow (R22's guards, via `guard_workflow`/`spawn_workflow_job`); returns its one turn plus a second content item `{"artifacts": [slug…], "hint": …}` naming the stage artifacts and run record, read with `get_artifact` (ADR-0036) |
+| `make_skill` | long-running | Distil the discussion into a draft skill (R51's guards, via `guard_make_skill`/`spawn_make_skill_job`; also on a Stored idea); writes one `skill_draft` artifact and no turn, and returns the notice naming its slug (read with `get_artifact`). Draft only: there is no save tool, Save is the owner's click on the artifact page (ADR-0042 D5) |
 
-Plus the two-prompt catalog. The six long-running tools (each takes an optional `idempotency_key`)
+Plus the two-prompt catalog. The seven long-running tools (each takes an optional `idempotency_key`)
 are callable both as a task and
 plainly (bounded wait, ADR-0028). A Task-unaware client cannot use the task path. Its plain call
 runs as a real task (`tasks::TaskRegistry::call_sync_bounded`), and when the turn outlives the

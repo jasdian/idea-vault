@@ -94,6 +94,13 @@
   `use_when`/`avoid_when` guidance, role, output contract, and source (`built-in` / `vault
   override` / `vault`), plus any owner file that failed to load; `POST /skills/reload` refreshes it
   live. See [09-web-ui](./09-web-ui.md).
+- **Skill draft** — a `skill_draft` artifact written by the make-skill button: a finalized skill file
+  in a `~~~skill` fence plus its evidence quotes marked ✓ owner / ✓ / ✗. It reaches the skill book
+  only when the owner saves it ([ADR-0042](./adr/0042-make-skill-distil-owner-skills.md)).
+- **Move trace** — the code-built summary of a discussion's turns (heading, first line, audit label
+  counts, capstone turns left out) the make-skill distiller reads to orient itself; never evidence.
+- **Origin** — the optional `origin:` field of a skill file: the idea slug a make-skill draft was
+  distilled from, set by code and shown on the skill book as "distilled from <idea>".
 - **Output contract** — the shape a skill's output must take (`domain::skill::OutputContract`:
   `Free`, `BulletsOrEmpty`, `RankedList`, `FencedMarkdown`, `BuildPlan`, and the workflow engine's
   `GroundClaims`, `Proposal`, `Scorecard`), validated and, for a single

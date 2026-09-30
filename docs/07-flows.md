@@ -23,10 +23,11 @@
 | 12 | Knowledge extraction (fan-out lenses → persist artifacts → converge) | **D30** | [06-concepts/swarm](./06-concepts/swarm.md) |
 | 13 | Plan workbench: answer a build plan's open questions → owner turns → re-gated new plan version (no model call); or re-plan with the model | **D33** | [06-concepts/skills](./06-concepts/skills.md#the-plan-workbench-d33) |
 | 14 | MCP replay of a served long-running result (identical retry creates no job, turn or artifact) | **D34** | [13-mcp-server-inbound](./13-mcp-server-inbound.md) |
+| 15 | Make skill: distil a discussion into a draft skill artifact (job, no turn) → review → Save into `vault/.skills/` (no model call) | **D42** | [06-concepts/skills](./06-concepts/skills.md#make-skill-d42) |
 
 These flows cover every flow named in [CLAUDE.md](../CLAUDE.md); the six *core* flows it calls out
 explicitly are #2, #3, #4, #5, #6, #9. Fork (#11), knowledge extraction (#12), the plan workbench
-(#13) and MCP replay (#14) are newer, additive flows not among those six.
+(#13), MCP replay (#14) and make skill (#15) are newer, additive flows not among those six.
 
 ## The idea lifecycle, end to end (prose)
 

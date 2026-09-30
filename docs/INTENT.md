@@ -36,3 +36,8 @@ under the harvester role.
 - src/web/routes/ideas.rs stored_outcome: the Running arm becomes a visible thinking indicator (was
   an aria-hidden poll); the "Only the store job can finish on a Stored idea" statement is withdrawn
   (D1).
+- web::mcp_server::tools::tests::catalog_is_stable_and_marks_long_running_tools_as_task_optional:
+  the catalog count 16 → 17 and `make_skill` joins the task-optional list (ADR-0042 D5).
+- src/domain/frontmatter.rs SkillFrontmatter: `use_when`, `avoid_when` and `hidden` skip their
+  defaults when serialized, for the new `emit_skill`; parsing is unchanged.
+- web::templates::Stored gains `busy`; the stored panel carries the make-skill button (D1).

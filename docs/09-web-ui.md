@@ -85,6 +85,8 @@ flowchart LR
         R46["POST /idea/:slug/plan/:stem/answer — answer open Q#/T# into a new plan version (D33, sync, no model call) → HX-Redirect new version | 422 _plan_work.html"]
         R47["GET /idea/:slug/plan/latest — 302 to the lineage head's artifact page"]
         R48["POST /idea/:slug/plan/:stem/replan — re-plan with the model (job) → HX-Redirect /idea/:slug"]
+        R51["POST /idea/:slug/make-skill — distil a draft skill (ADR-0042, D42, job; also on a Stored idea) → transcript | stored view + indicator | 400 Draft or nothing to distil"]
+        R52["POST /idea/:slug/artifact/:name/save-skill — save a reviewed skill draft into vault/.skills/ (sync, no model call) → _skill_draft.html | 422 panel | 409 superseded | 404"]
     end
     subgraph admin["Admin"]
         R10["POST /admin/reindex — rebuild index (D15)"]
@@ -146,10 +148,15 @@ flowchart LR
     R46 -->|"success"| T_REDIRECT
     R47 --> T_REDIRECT
     R48 --> T_REDIRECT
+    R51 --> T_TURN
+    R51 -.->|"Stored idea"| T_STORED
+    R52 --> T_SKILLDRAFT["templates/_skill_draft.html (also embedded in artifact.html by R19 for a skill draft)"]
+    R19 -.->|"skill draft: review panel"| T_SKILLDRAFT
 ```
 
 Route groups map to `web::routes` submodules: `plans` (R46–R48 — the plan workbench, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md)),
 `runs` (R50 — the read-only run inspector over one run journal, [ADR-0037](./adr/0037-run-journal-diagnostics-only-call-record.md)),
+`make_skill` (R51, R52 — the make-skill button and its Save, [ADR-0042](./adr/0042-make-skill-distil-owner-skills.md)),
 `ideas` (R1, R2, R3, R8, R9b, R12, R14, R23, R42–R45 —
 `set_tags`/`set_sources`/`cancel_job`/`delete_idea`), `chat`
 (R9, R32 — the send path and its pending-message queue), `memory`/idea-actions (R4–R7, R15, R16, R22 — the module name predates the delete/workflow
@@ -219,6 +226,22 @@ page shows the artifact's `recipe:` line (`skill <name> @ <digest12> (<source>) 
 off-contract lens, and a "recipe changed since" badge when the stored skill or workflow digest
 differs from the live book. `/skills` (R33/R34) shows each skill's and workflow's digest.
 
+**R51–R52 (`web::routes::make_skill`, [ADR-0042](./adr/0042-make-skill-distil-owner-skills.md),
+[D42](./06-concepts/skills.md#make-skill-d42)).** R51 (`make_skill`) is a background job like R6:
+`guard_make_skill` (any state but Draft, and at least two owner turns plus one named move — else
+`400` "nothing to distil yet"), `try_claim`, `spawn_make_skill_job`, then the transcript with the
+thinking indicator. On a Stored idea it answers the stored view instead, and the stored view's
+Running arm is the same visible indicator targeting `#discussion` (owner decision D1). The job
+writes one `skill_draft` artifact and no turn, and ends with a one-shot notice naming the draft;
+the artifacts panel refreshes out of band on both paths. R52 (`save_skill`, form `raw`,
+`base_digest`) is synchronous with no model call and no job slot, like R46: it revalidates the
+edited text with the skill loader's own rules against the live registry, refuses a built-in or
+engine-only name (`422`, panel re-rendered with the owner's text), refuses an update whose
+`base_digest` is not the owner file's current digest (`409`), writes `vault/.skills/<name>.md`
+through `vault::store::write_owner_skill`, reloads the skills and workflows, and re-renders the
+panel as saved. An ungrounded evidence quote is warned about, never refused (owner decision D3).
+Anything but a `.md` skill draft is `404`; the draft artifact itself is never modified.
+
 **R46–R48 (`web::routes::plans`, [ADR-0032](./adr/0032-plan-workbench-answers-and-versions.md),
 [D33](./06-concepts/skills.md#the-plan-workbench-d33)).** R46 (`answer_plan`) is a synchronous,
 deterministic write like R23 and R42: no model call, no job slot (`jobs::try_claim` is not
@@ -276,11 +299,12 @@ templates/
   _discussion.html       # partial — the discussion pane (compose box + transcript/poll target + queue)
   _queue.html            # partial — the #queue panel: chat messages waiting for the foil, each
                           #   removable (R32); also sent OOB with every transcript response
-  _actions.html          # partial — the #idea-actions block (moves/swarm + angle picker/store);
-                          #   also sent OOB
-  _stored.html           # partial — stored view (consolidated body + memory facts); delivered by
-                          #   the R9b poll once a store job (R4) lands truth as Stored, via
-                          #   HX-Retarget #discussion (respond_discussion_or_stored)
+  _actions.html          # partial — the #idea-actions block (moves/swarm + angle picker, the
+                          #   capstones row incl. make skill (R51), store); also sent OOB
+  _stored.html           # partial — stored view (dormant marker, reopen, the make-skill button);
+                          #   delivered by the R9b poll once a store job (R4) lands truth as Stored,
+                          #   via HX-Retarget #discussion (respond_discussion_or_stored); a running
+                          #   job shows the visible thinking indicator under it (ADR-0042 D1)
   _search_results.html   # partial — FTS results
   _related.html          # partial — the #related panel: related ideas (title, hop label, reasons,
                          #   latest fact titles) from memory::related::related_entries, then "Tag
@@ -292,10 +316,14 @@ templates/
                          #   when the index or its lock fails (web::templates::RelatedPanel)
   _memory.html            # partial — the memory panel (re-rendered after a fact delete)
   _settings.html          # partial — the settings form (re-rendered after a save)
-  artifact.html           # extends base — one .md artifact rendered as a full page (R19); a build plan adds the workbench (`_plan_work.html`) and the "Use it" box (PROMPT.md + plan.md copy blocks)
+  artifact.html           # extends base — one .md artifact rendered as a full page (R19); a build plan adds the workbench (`_plan_work.html`) and the "Use it" box (PROMPT.md + plan.md copy blocks); a skill draft adds the review panel (`_skill_draft.html`, ADR-0042)
   _plan_work.html         # partial — the plan workbench (id="work"): lineage line, one <details id="q-Qn"> per
                           #   open question, held-task rows, Save answers / re-plan buttons; pre-rendered into
                           #   artifact.html by R19 (web::templates::PlanWorkView) and re-rendered by R46 on a 422
+  _skill_draft.html       # partial — the make-skill review panel (id="skill-draft", ADR-0042): editable draft,
+                          #   placement (ADD / UPDATE with a line diff / RENAME REQUIRED), similar skills,
+                          #   evidence marked ✓ owner / ✓ / ✗, Save; pre-rendered into artifact.html by R19
+                          #   (web::templates::SkillDraftPanel) and re-rendered by R52
   _artifacts.html         # partial — the artifacts panel (re-rendered after an artifact delete); a plan row shows
                           #   v{n}, and a superseded version is dimmed
   artifact_export.html    # standalone (no base) — the opt-in .html knowledge report, written to
@@ -435,7 +463,8 @@ base.html`.
   `model` columns; only when Verify-first premises exist, a `T0` bootstrap row comes first, with
   fixed `0 | 00000 | haiku` cells). Both are escaped like any template text.
 - **Store's finish path — poll widens to the stored view:** because only the store job can leave an
-  idea `Stored` (every other job route guards on the discussion states), the shared poll handler
+  idea `Stored` (make-skill, R51, may also run on a Stored idea but never changes its state —
+  [ADR-0042](./adr/0042-make-skill-distil-owner-skills.md) D1), the shared poll handler
   (`web::routes::ideas::respond_discussion_or_stored`, serving both R9b and cancel) checks the
   on-disk state on every poll: while `InDiscussion`/`Reopened` it returns the normal transcript
   poll response, but once state is `Stored` it instead renders `_stored.html` (the dormant marker +
@@ -446,9 +475,11 @@ base.html`.
   that held back facts behind the evidence gate (quarantined to an artifact) or read a truncated
   discussion during memory extraction leaves a one-shot `stored_outcome` notice under the stored
   panel (`web::routes::ideas::stored_outcome`) — the quiet `notice_block` styling, consumed on read
-  like the compact route's `NothingToFold` notice; while the store job is still wrapping up,
-  `stored_outcome` instead emits a short follow-up poller targeting `#discussion` so the widened
-  swap still lands once truth catches up.
+  like the compact route's `NothingToFold` notice; while a job is still running (the store wrapping
+  up, or a make-skill distil), `stored_outcome` instead emits the visible thinking indicator
+  targeting `#discussion`, so the widened swap still lands once truth catches up and a model call
+  on a stored idea is never silent (ADR-0042 D1). The stored responses also carry the artifacts
+  panel out of band, so a finished distil's draft appears without a reload.
 - **`_stored.html` no longer carries the consolidated body.** The store job rewrites `idea.md`'s
   body to the consolidated writeup, which is *already* rendered once in the page's top
   `<div class="statement" id="idea-statement">` ([D8](./03-data-model.md) frontmatter, memory

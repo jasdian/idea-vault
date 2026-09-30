@@ -1,6 +1,6 @@
 # ADR-0022 — Skills as markdown files, owner overrides, and the skill book
 
-- **Status:** Accepted — amended by [ADR-0035](./0035-workflows-as-markdown-and-the-workflow-book.md) (workflows are markdown files in the same book; reload re-reads both)
+- **Status:** Accepted — amended by [ADR-0035](./0035-workflows-as-markdown-and-the-workflow-book.md) (workflows are markdown files in the same book; reload re-reads both) and [ADR-0042](./0042-make-skill-distil-owner-skills.md) (an owner skill may be born from a make-skill draft, with an optional `origin` field; `distill-skill` is a third engine-only skill; the button never overwrites a built-in)
 - **Date:** 2026-09-28
 - **Deciders:** owner
 
