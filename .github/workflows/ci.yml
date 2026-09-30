@@ -36,7 +36,7 @@ jobs:
     steps:
       # Full history: gate step 1 (intent freshness) and step 7 (honesty) diff against
       # merge-base(HEAD, main), and step 7 reads the base's scripts/check-invariants.sh.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -52,14 +52,15 @@ jobs:
         run: git branch --no-track main origin/main
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       # The explicit shared-key replaces the default job-id key, so claude-ci-hotfix.yml's
       # `diagnose` job (restore only) hits the cache this job saves.
       - name: Cache cargo + target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: gate
 
