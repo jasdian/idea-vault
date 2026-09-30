@@ -183,27 +183,46 @@ its header comment.
   and `cargo clippy --locked --all-targets -- -D warnings`. That is gate steps 3 to 6. Steps 1, 2
   and 7 (intent, invariants and honesty) run only locally, in `scripts/gate.sh`.
 - **`claude-review.yml`** runs when CI goes green on a same-repo PR by the owner or on a
-  `hotfix/ci-*` PR from the hotfix workflow. Claude posts one review comment. Fork PRs never
-  qualify.
+  `hotfix/ci-*` PR from the hotfix workflow's bot (the `CI_HOTFIX_BOT` app if set, else
+  github-actions). Claude posts one review comment, which is advisory for a bot-authored PR. Fork
+  PRs never qualify.
 - **`claude-ci-hotfix.yml`** runs when CI fails on a push to main. It can also be dispatched with
-  the `run_id` of such a run. It dedupes on the failing sha, so a re-run never files a second issue
-  or PR. It then dumps the failed log and hands it to Claude as untrusted data, and Claude opens a
-  `ci-failure` issue with a diagnosis. There are two outcomes:
-  - **Main is already green** after a later commit: Claude only records the failure and closes the
-    issue.
-  - **Main still fails:** Claude branches `hotfix/ci-<run_id>` from current main, fixes the root
-    cause and re-runs CI's four commands. It then opens a `Fixes #N` PR. The owner merges it; the
-    workflow never pushes to main and never merges.
-- **Guardrails.** These are the [ADR-0041](./adr/0041-no-mistakes-gate.md) guardrails: no lint
-  suppression, no weakened check, no fixture, snapshot or floor edit unless it is declared, and at
-  most 3 fix attempts before the workflow gives a diagnosis only. After Claude finishes, a
-  deterministic step checks that main did not move and that the hotfix diff adds no
-  `#[allow]`/`#[expect]` and touches no workflow, gate or lint config.
-- **CI on the hotfix PR.** It only starts on its own when the repository secret `CI_HOTFIX_TOKEN` is
-  set. Without it the PR is opened with `GITHUB_TOKEN`, which GitHub does not chain runs from, so
-  the PR and the issue tell the owner to start CI by hand.
+  the `run_id` of such a run. It has three jobs:
+  - **`triage`** (serialised, no model) dedupes and files the `ci-failure` issue. The issue carries
+    a marker with the failing sha, so a re-run never files a second issue for a sha (an issue
+    closed as not planned allows a retry). Only one hotfix is in flight at a time: a later
+    failure is noted on the open issue. At most 3 hotfix issues are filed per 24 hours, and a
+    skipped run says why in its summary.
+  - **`diagnose`** runs Claude on current main with a read-only token, no git or gh tools, and no
+    persisted credentials. The cargo cache is restored, never saved. Claude reads the failed log
+    as fenced, untrusted data. If main is already green, or passes CI's four commands, it only
+    diagnoses. Otherwise it fixes the root cause in the working tree, re-runs the four commands,
+    and gives up after 3 attempts. It writes its diagnosis, PR body and commit subject to files.
+  - **`publish`** (no model) posts the diagnosis on the issue. It refuses anything that contains
+    a secret-like string. It runs the guard **before** anything is pushed, and then either closes
+    the issue (already fixed), leaves it open (no fix, or a withheld fix), or pushes
+    `hotfix/ci-<run_id>` and opens a `Fixes #N` PR. The owner merges it; nothing pushes to main or
+    merges.
+- **Guardrails.** These are the [ADR-0041](./adr/0041-no-mistakes-gate.md) guardrails, and the
+  guard enforces them on the diff rather than trusting the prompt. It withholds a fix that adds
+  `#[allow]`, `#[expect]` or a `cfg_attr` lint (counted with whitespace removed, so a split
+  attribute still counts), adds `#[ignore]`, removes a test, changes lint levels in `Cargo.toml`,
+  adds a symlink, or touches `.github/`, `scripts/`, `.cargo/`, `.claude/`, `CLAUDE.md`, a
+  `build.rs`, or lint or toolchain config. A fix that touches `tests/fixtures/`, `tests/support/`,
+  a `*.snap`, `Cargo.toml`, `Cargo.lock` or a `*_FLOOR` value is opened as a draft PR that lists
+  those files.
+- **Owner setup.** A branch ruleset on main that blocks direct and force pushes, with an empty
+  bypass list, is required. CI on the hotfix PR only starts on its own when the repository secret
+  `CI_HOTFIX_TOKEN` (an app or fine-grained PAT with Contents and Pull requests write, and no
+  Workflows permission) is set. Without it the PR is opened with `GITHUB_TOKEN`: that needs
+  "Allow GitHub Actions to create and approve pull requests" turned on, GitHub does not chain
+  runs from that token, and the PR and the issue tell the owner to start CI by hand.
+- **Residual risk.** Claude builds and tests code in `diagnose`, so code it writes can read that
+  job's environment, which includes `CLAUDE_CODE_OAUTH_TOKEN`. The job holds no write token, and
+  `publish` refuses any output that contains a token. If a leak is suspected, rotate the OAuth
+  token.
 - **Not gate-green.** A hotfix branch has run CI's commands, not `scripts/gate.sh`. Run the gate
-  locally before merging it if the fix touches anything steps 1, 2 or 7 check.
+  locally before merging it.
 
 ## What is explicitly not tested by machines
 
