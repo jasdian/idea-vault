@@ -6,7 +6,11 @@ mod support;
 
 use axum::http::StatusCode;
 use chrono::{TimeZone, Utc};
-use idea_vault::domain::{ArtifactKind, Idea, IdeaFrontmatter, IdeaState};
+use idea_vault::ai::provenance::digest12;
+use idea_vault::concepts::make_skill::{finalize, render_draft_body, Draft, EvidenceLine};
+use idea_vault::domain::{
+    Artifact, ArtifactFrontmatter, ArtifactKind, Idea, IdeaFrontmatter, IdeaState,
+};
 use idea_vault::vault::store;
 use support::web::{get, poll_until, post_form, test_state, test_state_with_ollama};
 use support::{spawn, ChatScript};
@@ -144,4 +148,228 @@ async fn r51_button_is_on_the_capstones_row_and_disabled_while_busy() {
     let button = page.split(&form).nth(1).unwrap();
     let button = &button[..button.find("</form>").unwrap()];
     assert!(button.contains(" disabled"), "{button}");
+}
+
+const DRAFT_STEM: &str = "skill-draft-hostile-regulator";
+
+/// The drafted file as the distiller would finalize it for this idea.
+fn drafted_raw() -> String {
+    let file = GOOD_DRAFT
+        .split("~~~skill\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n~~~").next())
+        .unwrap();
+    finalize(file, SLUG).unwrap()
+}
+
+/// Seed an idea with a `skill_draft` artifact (as R51 leaves one) and return the draft's raw file.
+fn seed_draft(vault: &std::path::Path, grounded: bool) -> String {
+    seed(vault, IdeaState::InDiscussion, CONVERSATION);
+    let raw = drafted_raw();
+    let body = render_draft_body(&Draft {
+        raw: raw.clone(),
+        evidence: vec![EvidenceLine {
+            quote: "assume a regulator hates it and wants it dead".into(),
+            grounded,
+            owner: grounded,
+        }],
+    });
+    store::write_artifact(
+        vault,
+        SLUG,
+        &Artifact {
+            frontmatter: ArtifactFrontmatter {
+                slug: DRAFT_STEM.into(),
+                title: "Skill draft: hostile-regulator".into(),
+                kind: ArtifactKind::SkillDraft,
+                lens: Some("distill-skill".into()),
+                created: Utc.with_ymd_and_hms(2026, 9, 30, 11, 0, 0).unwrap(),
+                model: "llama3.2".into(),
+                revises: None,
+                version: None,
+                answered: vec![],
+                recipe: None,
+            },
+            body,
+        },
+    )
+    .unwrap();
+    raw
+}
+
+fn artifact_file(vault: &std::path::Path) -> String {
+    std::fs::read_to_string(
+        vault
+            .join(SLUG)
+            .join("artifacts")
+            .join(format!("{DRAFT_STEM}.md")),
+    )
+    .unwrap()
+}
+
+fn save_uri() -> String {
+    format!("/idea/{SLUG}/artifact/{DRAFT_STEM}.md/save-skill")
+}
+
+fn form(raw: &str, base_digest: Option<&str>) -> String {
+    let mut fields = vec![("raw", raw)];
+    if let Some(d) = base_digest {
+        fields.push(("base_digest", d));
+    }
+    serde_urlencoded::to_string(fields).unwrap()
+}
+
+#[tokio::test]
+async fn r52_add_writes_the_owner_skill_and_the_book_links_its_origin() {
+    let (state, vault) = test_state();
+    let raw = seed_draft(&vault, true);
+    let before = artifact_file(&vault);
+
+    let (status, page) = get(
+        state.clone(),
+        &format!("/idea/{SLUG}/artifact/{DRAFT_STEM}.md"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("id=\"skill-draft\""),
+        "the review panel: {page}"
+    );
+    assert!(page.contains("ADD hostile-regulator"), "{page}");
+    assert!(page.contains("✓ owner"), "{page}");
+
+    let (status, body) = post_form(state.clone(), &save_uri(), &form(&raw, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("saved as"), "{body}");
+    let saved = vault.join(".skills").join("hostile-regulator.md");
+    assert_eq!(std::fs::read_to_string(&saved).unwrap(), raw);
+    assert_eq!(
+        artifact_file(&vault),
+        before,
+        "the draft artifact is never modified"
+    );
+
+    let (_, book) = get(state, "/skills").await;
+    assert!(
+        book.contains("hostile-regulator"),
+        "reloaded without a restart"
+    );
+    assert!(book.contains(&format!("href=\"/idea/{SLUG}\"")), "{book}");
+    assert!(book.contains(&format!("distilled from {SLUG}")), "{book}");
+}
+
+#[tokio::test]
+async fn r52_update_shows_the_diff_and_needs_the_current_digest() {
+    let (state, vault) = test_state();
+    let raw = seed_draft(&vault, true);
+    let current = raw.replace("cheapest first", "in any order");
+    store::write_owner_skill(&vault.join(".skills"), "hostile-regulator", &current).unwrap();
+    state.workflows.reload(&state.skills);
+
+    let (_, page) = get(
+        state.clone(),
+        &format!("/idea/{SLUG}/artifact/{DRAFT_STEM}.md"),
+    )
+    .await;
+    assert!(page.contains("UPDATE hostile-regulator"), "{page}");
+    assert!(page.contains("diff--removed"), "{page}");
+    let digest = digest12(current.as_bytes());
+    assert!(page.contains(&digest), "the base digest rides the form");
+
+    let (status, _) = post_form(state.clone(), &save_uri(), &form(&raw, None)).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an unseen owner file is never overwritten"
+    );
+    let (status, _) = post_form(
+        state.clone(),
+        &save_uri(),
+        &form(&raw, Some("000000000000")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a stale base");
+    let skills_file = vault.join(".skills").join("hostile-regulator.md");
+    assert_eq!(std::fs::read_to_string(&skills_file).unwrap(), current);
+
+    let (status, body) = post_form(state, &save_uri(), &form(&raw, Some(&digest))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(std::fs::read_to_string(&skills_file).unwrap(), raw);
+}
+
+#[tokio::test]
+async fn r52_refuses_builtin_internal_and_invalid_text_with_the_panel() {
+    let (state, vault) = test_state();
+    let raw = seed_draft(&vault, true);
+    for (edited, needle) in [
+        (
+            raw.replace("name: hostile-regulator", "name: premortem"),
+            "built-in",
+        ),
+        (
+            raw.replace("name: hostile-regulator", "name: distill-skill"),
+            "engine-only",
+        ),
+        (raw.replace("{context}", ""), "{context}"),
+    ] {
+        let (status, body) = post_form(state.clone(), &save_uri(), &form(&edited, None)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{edited}");
+        assert!(
+            body.contains("id=\"skill-draft\""),
+            "the panel comes back: {body}"
+        );
+        assert!(body.contains(needle), "{needle}: {body}");
+    }
+    assert!(!vault.join(".skills").exists(), "nothing written");
+    assert!(!vault.join(".skills").join("premortem.md").exists());
+}
+
+#[tokio::test]
+async fn r52_ungrounded_evidence_warns_but_does_not_block() {
+    let (state, vault) = test_state();
+    let raw = seed_draft(&vault, false);
+    let (_, page) = get(
+        state.clone(),
+        &format!("/idea/{SLUG}/artifact/{DRAFT_STEM}.md"),
+    )
+    .await;
+    assert!(
+        page.contains("skilldraft__warn"),
+        "D3 warning shown: {page}"
+    );
+    let (status, _) = post_form(state, &save_uri(), &form(&raw, None)).await;
+    assert_eq!(status, StatusCode::OK, "D3: grounding never blocks a save");
+    assert!(vault.join(".skills").join("hostile-regulator.md").exists());
+}
+
+#[tokio::test]
+async fn r52_not_a_skill_draft_is_404() {
+    let (state, vault) = test_state();
+    let raw = seed_draft(&vault, true);
+    let (status, _) = post_form(
+        state.clone(),
+        &format!("/idea/{SLUG}/artifact/absent.md/save-skill"),
+        &form(&raw, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let mut other = store::read_artifact(&vault, SLUG, DRAFT_STEM).unwrap();
+    other.frontmatter.slug = "a-finding".into();
+    other.frontmatter.kind = ArtifactKind::Finding;
+    store::write_artifact(&vault, SLUG, &other).unwrap();
+    let (status, _) = post_form(
+        state.clone(),
+        &format!("/idea/{SLUG}/artifact/a-finding.md/save-skill"),
+        &form(&raw, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = post_form(
+        state,
+        "/idea/nope/artifact/x.md/save-skill",
+        &form(&raw, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!vault.join(".skills").exists());
 }

@@ -138,7 +138,7 @@ fn write_html_report(
 /// Split an `{name}` path segment into (stem, extension), admitting only the two artifact
 /// extensions and the canonical slug charset for the stem — defense in depth against traversal
 /// before any store call (which re-validates).
-fn split_artifact_name(name: &str) -> Option<(&str, store::ArtifactExt)> {
+pub(crate) fn split_artifact_name(name: &str) -> Option<(&str, store::ArtifactExt)> {
     let (stem, ext) = name.rsplit_once('.')?;
     let ext = match ext {
         "md" => store::ArtifactExt::Md,
@@ -286,6 +286,15 @@ pub async fn view_artifact(
             let plan_work = (artifact.frontmatter.kind == ArtifactKind::BuildPlan)
                 .then(|| plan_work(vault_dir, &slug, stem, idea.frontmatter.state))
                 .flatten();
+            let skill_draft = match (artifact.frontmatter.kind == ArtifactKind::SkillDraft)
+                .then(|| crate::concepts::make_skill::parse_draft_body(&artifact.body))
+                .flatten()
+            {
+                Some(draft) => Some(crate::web::routes::make_skill::skill_draft_panel(
+                    &state, &slug, &name, &draft, &draft.raw, None, None,
+                )?),
+                None => None,
+            };
             Ok(ArtifactPage {
                 title: artifact.frontmatter.title.clone(),
                 meta: artifact_meta(&artifact.frontmatter),
@@ -296,6 +305,7 @@ pub async fn view_artifact(
                 prompt_md,
                 attack_plan_md,
                 plan_work,
+                skill_draft,
                 recipe: recipe_view(
                     artifact.frontmatter.recipe.as_ref(),
                     &state.workflows.snapshot(),

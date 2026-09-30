@@ -81,6 +81,7 @@ fn card(skill: &Skill) -> SkillCard {
         source: skill.source.as_str(),
         digest: skill.digest.clone(),
         hidden: skill.hidden,
+        origin: skill.origin.clone(),
     }
 }
 

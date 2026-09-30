@@ -15,6 +15,8 @@
 {# The workbench sits above the plan body and the copy blocks: what the plan still needs from the
    owner comes first (docs/adr/0032). A Rust-rendered partial, so `safe` is the pre-rendered rule. #}
 {% if let Some(work) = plan_work %}{{ work|safe }}{% endif %}
+{# The make-skill review panel (docs/adr/0042), Rust-rendered like the workbench. #}
+{% if let Some(panel) = skill_draft %}{{ panel|safe }}{% endif %}
 
 <div class="statement">{{ content_html|safe }}</div>
 

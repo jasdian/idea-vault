@@ -6,7 +6,7 @@
   <div class="book__folder">
     <p class="src__note">owner skills are read from <code>{{ dir }}</code> — one
       <code>&lt;name&gt;.md</code> per move: frontmatter (name, description, stage, role, contract,
-      use_when, avoid_when, hidden) then the prompt, which must contain <code>{context}</code>.</p>
+      use_when, avoid_when, hidden, origin) then the prompt, which must contain <code>{context}</code>.</p>
     <form hx-post="/skills/reload" hx-target="#skills" hx-swap="outerHTML">
       <button type="submit" class="chip">↻ reload skills &amp; workflows</button>
     </form>
@@ -46,6 +46,7 @@
           <span class="mcp__token">role · {{ s.role }}</span>
           <span class="mcp__token">output · {{ s.contract }}</span>
           {% if s.hidden %}<span class="mcp__token">orchestrator-only</span>{% endif %}
+          {% if let Some(o) = s.origin %}<a class="mcp__token" href="/idea/{{ o }}" title="made with the make-skill button from this idea's discussion">distilled from {{ o }}</a>{% endif %}
         </div>
       </li>
       {% endfor %}

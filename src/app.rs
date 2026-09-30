@@ -57,6 +57,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Make skill (docs/adr/0042): R51 drafts as a job; R52 saves a reviewed draft.
         .route("/idea/{slug}/make-skill", post(make_skill::make_skill))
+        .route(
+            "/idea/{slug}/artifact/{name}/save-skill",
+            post(make_skill::save_skill),
+        )
         // The plan workbench (docs/adr/0032): answer into a new version, the lineage head, and
         // a model re-plan as a background job.
         .route("/idea/{slug}/plan/latest", get(plans::latest_plan))

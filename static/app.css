@@ -1083,6 +1083,21 @@ a.srcchip:hover { border-color: var(--accent); color: var(--accent); }
 .planwork__note { font-family: var(--serif); font-style: italic; font-size: .8rem; color: var(--faint); }
 .planwork__replan .planwork__flash { flex-basis: 100%; }
 
+/* The make-skill review panel (ADR-0042): placement, diff and evidence marks. */
+.skilldraft__placement { font-family: var(--mono); font-size: .85rem; }
+.skilldraft__placement--rename, .skilldraft__placement--unknown { color: var(--warn); }
+.skilldraft__saved { color: var(--ok); }
+.skilldraft__similar { color: var(--muted); font-size: .9rem; }
+.skilldraft__raw { width: 100%; font-family: var(--mono); font-size: .85rem; }
+.skilldraft__diff { font-size: .8rem; overflow-x: auto; }
+.diff--added { color: var(--ok); }
+.diff--removed { color: var(--danger); }
+.diff--same { color: var(--faint); }
+.evidence--owner, .evidence--grounded { color: var(--ok); }
+.evidence--ungrounded { color: var(--danger); }
+.skilldraft__warn { background: var(--warn-soft); color: var(--warn); padding: .4rem .6rem; border-radius: var(--radius); }
+.stored form + form { margin-top: .5rem; }
+
 /* The idea page's way back to the plan, beside the build chips; indigo while questions wait. */
 .chip--plan { text-decoration: none; color: var(--muted); }
 .chip--plan::before { content: "§ "; }

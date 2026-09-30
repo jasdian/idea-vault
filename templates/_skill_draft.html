@@ -1,0 +1,41 @@
+{# The make-skill review panel (docs/adr/0042, D42): the draft is editable, Save revalidates it
+   by the skill loader's rules and writes vault/.skills/<name>.md with no model call. The draft
+   artifact itself is never changed. A 422 (the text does not load, or names a built-in or
+   engine-only skill) swaps this panel with the owner's text kept; a 409 (the owner file changed
+   since this was shown) lands its text in the flash line — reload for the new diff. The 422
+   opt-in sits on the section, the swap target, as on the plan workbench. #}
+<section class="skilldraft planwork" id="skill-draft"
+         hx-on::before-swap="if (event.target === this && event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }">
+  <h2 class="planwork__title">Review this skill draft</h2>
+  {% if let Some(name) = saved %}
+  <p class="skilldraft__saved" role="status">saved as <code>.skills/{{ name }}.md</code> · see it on the <a href="/skills">skill book</a></p>
+  {% endif %}
+  <p class="skilldraft__placement skilldraft__placement--{{ placement_kind }}">{{ placement_line }}</p>
+  {% if !similar.is_empty() %}
+  <p class="skilldraft__similar">similar to: {{ similar|join(", ") }}</p>
+  {% endif %}
+  {% if !diff.is_empty() %}
+  <pre class="skilldraft__diff">{% for d in diff %}<span class="diff diff--{{ d.kind }}">{{ d.sign }} {{ d.text }}</span>
+{% endfor %}</pre>
+  {% endif %}
+
+  <h3 class="useit__label">Evidence</h3>
+  <ul class="skilldraft__evidence">
+    {% for e in evidence %}<li class="evidence evidence--{{ e.kind }}">{{ e.mark }} “{{ e.quote }}”</li>{% endfor %}
+  </ul>
+  {% if ungrounded > 0 %}
+  <p class="skilldraft__warn" role="note">{{ ungrounded }} quote{% if ungrounded != 1 %}s were{% else %} was{% endif %} not found in the discussion (✗): read the draft closely before you save it.</p>
+  {% endif %}
+
+  <form class="planwork__form" hx-post="/idea/{{ slug }}/artifact/{{ file_name }}/save-skill"
+        hx-target="#skill-draft" hx-swap="outerHTML" hx-disabled-elt="find button"
+        hx-on::response-error="this.parentElement.querySelector('.planwork__flash').textContent = event.detail.xhr.responseText">
+    <textarea name="raw" rows="18" class="skilldraft__raw" spellcheck="false">{{ raw }}</textarea>
+    {% if let Some(d) = base_digest %}<input type="hidden" name="base_digest" value="{{ d }}">{% endif %}
+    <div class="composer__row">
+      <button type="submit" class="btn">Save to the skill book</button>
+      <button type="button" class="chip" onclick="navigator.clipboard.writeText(this.form.raw.value)">copy</button>
+    </div>
+  </form>
+  <p class="planwork__flash" role="alert">{% if let Some(m) = message %}{{ m }}{% endif %}</p>
+</section>
