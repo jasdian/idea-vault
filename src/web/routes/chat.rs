@@ -98,7 +98,7 @@ pub(crate) fn spawn_chat_turn(
 ) -> Result<(), WebError> {
     let vault_dir = state.config.vault_dir.clone();
     // Persist the user turn now (survives navigation, shows under the indicator) and make the D9
-    // Draft→InDiscussion transition. If this fails, release the slot so the idea isn't stuck busy.
+    // Draft→InDiscussion transition. If either fails, release the slot so the idea isn't stuck busy.
     if let Err(e) = store::append_turn(&vault_dir, slug, "user", message) {
         jobs::mark_done(&state.jobs, slug);
         return Err(e.into());
@@ -106,7 +106,12 @@ pub(crate) fn spawn_chat_turn(
     if idea.frontmatter.state == IdeaState::Draft {
         idea.frontmatter.state = IdeaState::InDiscussion;
         idea.frontmatter.updated = Utc::now();
-        let _ = store::write_idea(&vault_dir, &idea);
+        // State is canonical in frontmatter (ARCH-4, ADR-0007): a failed transition is the send's
+        // error, never a discarded Result (BE-007).
+        if let Err(e) = store::write_idea(&vault_dir, &idea) {
+            jobs::mark_done(&state.jobs, slug);
+            return Err(e.into());
+        }
     }
     reindex_logged(state);
 

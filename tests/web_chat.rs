@@ -2,6 +2,10 @@
 //! delete route. The browser SSE approach was dropped (the htmx SSE extension was never vendored);
 //! chat is now a normal POST that persists nothing until the reply succeeds — so a failed send
 //! leaves no orphan user turn. Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 
@@ -322,4 +326,44 @@ async fn lone_idea_prompt_has_no_related_block() {
     let prompt = prompt_of(&mock.chat_bodies()[0]);
     assert!(!prompt.contains(RELATED_HEADER), "got:\n{prompt}");
     assert!(prompt.contains("\n## Idea\nThe idea body.\n"));
+}
+
+/// BE-007, ARCH-4: the Draft→InDiscussion frontmatter write is truth, so a failed write is the
+/// route's error, never a discarded `Result`; the slot is released and no model call starts.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_state_write_fails_the_send_and_frees_the_slot() {
+    use std::os::unix::fs::PermissionsExt;
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["ok".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::Draft);
+    let dir = vault_dir.join("chatty");
+    // The transcript exists and stays appendable; only the atomic idea.md rewrite (temp + rename
+    // in the idea dir) is denied.
+    std::fs::write(dir.join("conversation.md"), "").expect("conversation.md");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    if std::fs::write(dir.join("probe"), "").is_ok() {
+        // Root ignores the write bit, so the denied write cannot be staged.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        return;
+    }
+
+    let (status, _) = post_form(state.clone(), "/idea/chatty/chat", "message=hello").await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        store::read_idea(&vault_dir, "chatty")
+            .expect("idea")
+            .frontmatter
+            .state,
+        IdeaState::Draft
+    );
+    assert!(
+        mock.chat_bodies().is_empty(),
+        "no model call after a failed state write"
+    );
+
+    // The slot was released: the next send starts a turn (200), it is not queued (202).
+    let (status, _) = post_form(state, "/idea/chatty/chat", "message=again").await;
+    assert_eq!(status, StatusCode::OK);
 }
