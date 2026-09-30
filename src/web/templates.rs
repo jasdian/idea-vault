@@ -504,6 +504,8 @@ pub struct ArtifactExport {
 #[template(path = "_stored.html")]
 pub struct Stored {
     pub slug: String,
+    /// A job holds the slot: the make-skill button renders disabled (ADR-0042 D1).
+    pub busy: bool,
 }
 
 /// The MCP servers page shell (`templates/mcp.html`); the list is pre-rendered so a mutation can
