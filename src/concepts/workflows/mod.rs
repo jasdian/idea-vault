@@ -123,6 +123,19 @@ impl Stage {
         }
     }
 
+    /// The most model calls this stage can have in flight at once, before the shared bound K
+    /// (ADR-0006) serialises them: `width / K` rounded up is how many waves the stage waits
+    /// through, which the chips and the book show next to the ceiling (ADR-0034).
+    pub fn width(&self) -> usize {
+        match self {
+            Stage::FanOut(steps) => steps.len(),
+            Stage::Ground(g) => g.readers,
+            Stage::Panel(p) => p.proposers.len().max(p.judges * p.proposers.len()),
+            Stage::Loop(l) => l.steps.len(),
+            Stage::Chain(_) | Stage::Audit | Stage::Synthesize | Stage::Refine(_) => 1,
+        }
+    }
+
     /// This stage's exact worst-case model calls, repair retries included (ADR-0034): a chained
     /// step may be asked once more on a contract violation, as may each Ground reader.
     pub fn call_ceiling(&self) -> u32 {
@@ -190,6 +203,12 @@ impl Workflow {
             .iter()
             .map(Stage::call_ceiling)
             .fold(0, u32::saturating_add)
+    }
+
+    /// The widest stage's [`Stage::width`]: what the ceiling's `⌈width/K⌉` waves are counted
+    /// from.
+    pub fn width(&self) -> usize {
+        self.stages.iter().map(Stage::width).max().unwrap_or(0)
     }
 
     /// Whether a run does its best work with sources attached (it has a Ground stage).

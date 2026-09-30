@@ -191,6 +191,10 @@ pub async fn reopen_idea(
         &state.llm.model(),
         true,
         &book,
+        crate::web::routes::ideas::ChipCtx::new(
+            &state,
+            &crate::web::routes::scoped_llm(&state, &slug),
+        ),
         pending,
         queued_items,
         state.llm.context_budget().max_bytes,

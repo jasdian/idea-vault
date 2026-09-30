@@ -1,12 +1,14 @@
 {# The swappable #skills panel: where owner skill files live + reload, any files that failed to
-   load, then one group per spine stage. Reload re-reads the folder and swaps this panel. #}
+   load, one group per spine stage, then the workflow book (ADR-0035) with its own folder note and
+   issues. Reload re-reads both folders — skills first, then workflows against those fresh skills
+   — and swaps this panel. #}
 <section class="mcp book" id="skills">
   <div class="book__folder">
     <p class="src__note">owner skills are read from <code>{{ dir }}</code> — one
       <code>&lt;name&gt;.md</code> per move: frontmatter (name, description, stage, role, contract,
       use_when, avoid_when, hidden) then the prompt, which must contain <code>{context}</code>.</p>
     <form hx-post="/skills/reload" hx-target="#skills" hx-swap="outerHTML">
-      <button type="submit" class="chip">↻ reload skills</button>
+      <button type="submit" class="chip">↻ reload skills &amp; workflows</button>
     </form>
   </div>
 
@@ -49,4 +51,51 @@
     {% endif %}
   </div>
   {% endfor %}
+
+  {# The workflow book (ADR-0035): each workflow's stages with their share of the worst-case call
+     ceiling, so the cost is visible before anything runs (ADR-0034). #}
+  <div class="book__stage book__workflows" id="workflows">
+    <h2 class="book__stage-name">workflows</h2>
+    <p class="book__stage-blurb">Fixed pipelines of moves: code decides the order, when a loop
+      stops and who wins a panel; the model only writes each stage's content.</p>
+    <p class="src__note">owner workflows are read from <code>{{ workflow_dir }}</code> — one
+      <code>&lt;name&gt;.md</code> each: frontmatter (name, description, use_when, avoid_when,
+      hidden, stages) then an explanation for you. A same-named file overrides the built-in.</p>
+
+    {% if !workflow_issues.is_empty() %}
+    <div class="src__banner book__issues">
+      <p>{{ workflow_issues.len() }} workflow file{% if workflow_issues.len() != 1 %}s{% endif %} skipped — the built-in (if any) stays active:</p>
+      <ul>
+        {% for issue in workflow_issues %}
+        <li><code>{{ issue.file }}</code> — {{ issue.message }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    <ul class="mcp__list">
+      {% for w in workflows %}
+      <li class="mcp__row">
+        <div class="mcp__row-line1">
+          <a class="mcp__name book__link" href="/skills/workflow/{{ w.name }}">{{ w.name }}</a>
+          <span class="mcp__pill{% if w.source != "built-in" %} mcp__pill--on{% endif %}">{{ w.source }}</span>
+        </div>
+        <p class="book__desc">{{ w.description }}</p>
+        {% if !w.use_when.is_empty() %}<p class="book__when"><span class="book__label">use when</span> {{ w.use_when }}</p>{% endif %}
+        {% if !w.avoid_when.is_empty() %}<p class="book__when"><span class="book__label">not when</span> {{ w.avoid_when }}</p>{% endif %}
+        <ol class="book__stages">
+          {% for st in w.stages %}
+          <li><span class="book__kind">{{ st.kind }}</span> {{ st.detail }} <span class="book__calls">≤{{ st.calls }}</span></li>
+          {% endfor %}
+        </ol>
+        <div class="mcp__row-line2">
+          <span class="mcp__token book__cost">{{ w.cost }}</span>
+          {% if w.needs_sources %}<span class="mcp__token">grounds in attached sources</span>{% endif %}
+          {% if w.capstone %}<span class="mcp__token">capstone</span>{% endif %}
+          {% if w.hidden %}<span class="mcp__token">hidden</span>{% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
 </section>

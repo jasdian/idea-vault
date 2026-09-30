@@ -722,3 +722,38 @@ async fn stage_artifacts_are_never_memory_evidence() {
         "the workflow's own turn stays evidence, as every workflow turn is"
     );
 }
+
+#[tokio::test]
+async fn progress_note_sequence_for_design_panel() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path());
+    let (_src, sources) = source_tree();
+    let mut scripts = vec![tokens(READER_ONE), tokens(READER_TWO)];
+    scripts.extend(panel_scripts());
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let rig = Rig::new(&mock, 1).with_sources(sources);
+
+    rig.run(tmp.path(), "design-panel").await.unwrap();
+
+    // The single `jobs::set_note` string is the whole progress UI (spec §2.6), rendered verbatim,
+    // so its grammar is pinned here: `workflow · {name} · {i}/{n} {kind}: {detail} · calls
+    // {c}/{ceiling}`, calls counted against the ceiling the chip showed before the run.
+    let notes = rig.notes.lock().unwrap().clone();
+    let expected = [
+        "1/4 ground: mapping the sources · calls 0/12",
+        "1/4 ground: reader 1/2 · calls 1/12",
+        "1/4 ground: reader 2/2 · calls 2/12",
+        "1/4 ground: verified 1 of 3 (0 moved, 2 disproved) · calls 2/12",
+        "2/4 panel: 3 proposals · calls 2/12",
+        "2/4 panel: proposal 1/3 · calls 3/12",
+        "2/4 panel: proposal 2/3 · calls 4/12",
+        "2/4 panel: proposal 3/3 · calls 5/12",
+        "2/4 panel: scoring 1/3 · calls 6/12",
+        "2/4 panel: scoring 2/3 · calls 7/12",
+        "2/4 panel: scoring 3/3 · calls 8/12",
+        "2/4 panel: P1 wins 8/12 · calls 8/12",
+        "4/4 synthesize: converging 3 findings · calls 8/12",
+    ]
+    .map(|tail| format!("workflow · design-panel · {tail}"));
+    assert_eq!(notes, expected, "audit is off here, so stage 3 is silent");
+}

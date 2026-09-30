@@ -80,6 +80,8 @@ pub fn build_router(state: AppState) -> Router {
         // The skill book: built-in + owner skills by spine stage, with live reload (ADR-0022).
         .route("/skills", get(skills::skills_page))
         .route("/skills/reload", post(skills::reload_skills))
+        // R49: one workflow in full — stages, cost, rubric and source (ADR-0035).
+        .route("/skills/workflow/{name}", get(skills::workflow_page))
         // MCP server management (owner-configured tool endpoints, `crate::mcp`).
         .route("/mcp", get(mcp::mcp_page))
         .route("/mcp/add", post(mcp::add_server))
