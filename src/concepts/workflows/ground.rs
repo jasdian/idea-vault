@@ -376,7 +376,7 @@ pub fn dedupe(claims: Vec<Claim>, probe: &SourceProbe) -> Vec<Claim> {
                 .to_string(),
         )
     };
-    normalized.sort_by(|a, b| (key(a), a.first, a.last).cmp(&(key(b), b.first, b.last)));
+    normalized.sort_by_key(|a| (key(a), a.first, a.last));
     let mut out: Vec<Claim> = Vec::new();
     for c in normalized {
         match out.last_mut() {
