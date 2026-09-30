@@ -226,7 +226,10 @@ async fn claude_argv_is_the_locked_down_foil() {
     assert!(argv.iter().any(|a| a == "--strict-mcp-config"), "{argv:?}");
     assert_eq!(after("--tools"), "Read,Grep,Glob");
     assert_eq!(after("--allowedTools"), "Read,Grep,Glob");
-    assert_eq!(after("--disallowedTools"), "WebSearch,WebFetch");
+    assert_eq!(
+        after("--disallowedTools"),
+        "Read(./.runs/**),WebSearch,WebFetch"
+    );
     // Always an MCP config file, even with no server registered; removed once the turn ends.
     let mcp_path = after("--mcp-config");
     assert!(

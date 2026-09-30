@@ -14,12 +14,24 @@
 //! - **Bounded output.** Search returns at most [`MAX_RESULTS`] hits; a fetched page is
 //!   tag-stripped and truncated to [`FETCH_MAX_CHARS`] so one tool round can never blow the
 //!   context budget.
+//! - **Public hosts only for `fetch_url`.** The URL comes from the model, and the model reads
+//!   pages an attacker may write: a page saying "fetch http://localhost:3000/idea/<other>" would
+//!   otherwise read another idea off the unauthenticated owner UI and hand it to the next fetch
+//!   (ADR-0017, ADR-0039). So a fetch refuses loopback, private, link-local and single-label
+//!   hosts (the compose service names `ollama`, `idea-vault`) — checked on the URL of every
+//!   redirect hop and again on every resolved address, so neither a redirect nor a DNS name that
+//!   resolves inward gets past it. The owner-configured search endpoint is not model-chosen and
+//!   may legitimately be a local SearXNG, so `web_search` is not fenced this way.
 //! - **The search endpoint is swappable** via `IDEA_VAULT_SEARCH_URL` (e.g. a self-hosted
 //!   SearXNG instance with `/search?format=...`-compatible HTML) — read per call, so tests and
 //!   privacy-minded owners can redirect it without a rebuild.
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::redirect;
+use reqwest::Url;
 use serde_json::{json, Value};
 
 /// DuckDuckGo's no-JS HTML frontend — returns server-rendered results, no API key, no JS.
@@ -30,6 +42,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 pub const MAX_RESULTS: usize = 5;
 /// Max characters of tag-stripped page text handed back from one fetch.
 pub const FETCH_MAX_CHARS: usize = 12_000;
+/// Redirect hops a fetch follows (reqwest's own default), each re-checked by [`public_url`].
+const FETCH_MAX_REDIRECTS: usize = 10;
 
 /// One search result, already unwrapped from DuckDuckGo's redirect link.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,13 +82,120 @@ pub async fn web_search(query: &str) -> Result<Vec<SearchHit>, String> {
     Ok(parse_ddg_html(&body, MAX_RESULTS))
 }
 
-/// Fetch one page and return its tag-stripped text, truncated to [`FETCH_MAX_CHARS`].
+/// Whether `ip` is reachable from the public internet. Everything else — loopback, private,
+/// carrier-grade NAT, link-local, unspecified, broadcast, multicast, unique-local — can be the
+/// app itself, the Ollama container or the owner's LAN, so a model-chosen fetch never goes there.
+pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b)))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// `Ok` when `url` is http(s) to a host a model may fetch: an IP literal must be public, and a
+/// name must have a dot and not be `localhost` or under `.localhost`/`.local`/`.internal`. A name
+/// that passes is still resolved through [`PublicResolver`], which drops inward addresses.
+pub(crate) fn public_url(url: &Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("only http(s) URLs can be fetched, got: {url}"));
+    }
+    let refused = || {
+        Err(format!(
+            "refusing to fetch a local or private address: {url}"
+        ))
+    };
+    let Some(host) = url.host_str() else {
+        return refused();
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return if is_public_ip(ip) { Ok(()) } else { refused() };
+    }
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    let inward = !name.contains('.')
+        || name == "localhost"
+        || [".localhost", ".local", ".internal"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix));
+    if inward {
+        refused()
+    } else {
+        Ok(())
+    }
+}
+
+/// The fetch client's resolver: the system resolver, keeping only public addresses, so a name
+/// that resolves to loopback or a private network (DNS rebinding included) fails to connect.
+struct PublicResolver;
+
+impl Resolve for PublicResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let all: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let public: Vec<SocketAddr> =
+                all.into_iter().filter(|a| is_public_ip(a.ip())).collect();
+            if public.is_empty() {
+                return Err(format!("{host} resolves only to local or private addresses").into());
+            }
+            let addrs: Addrs = Box::new(public.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+/// The client for model-chosen fetches: [`http_client`]'s bounds plus the public-host fence on
+/// every redirect hop and every resolved address.
+fn fetch_client() -> Result<reqwest::Client, String> {
+    let policy = redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= FETCH_MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        match public_url(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(e) => attempt.error(e),
+        }
+    });
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .user_agent("idea-vault/0.1 (localhost ideation tool)")
+        .redirect(policy)
+        .dns_resolver(PublicResolver)
+        .build()
+        .map_err(|e| format!("http client: {e}"))
+}
+
+/// Fetch one page and return its tag-stripped text, truncated to [`FETCH_MAX_CHARS`]. Public
+/// hosts only ([`public_url`]): the URL is model-chosen.
 pub async fn fetch_url(url: &str) -> Result<String, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!("only http(s) URLs can be fetched, got: {url}"));
     }
-    let resp = http_client()?
-        .get(url)
+    let parsed = Url::parse(url).map_err(|e| format!("not a valid URL ({e}): {url}"))?;
+    public_url(&parsed)?;
+    let resp = fetch_client()?
+        .get(parsed)
         .send()
         .await
         .map_err(|e| format!("fetch failed: {e}"))?;
@@ -516,5 +637,74 @@ mod tests {
         // String-encoded arguments (some models) are accepted.
         let out = execute_tool("fetch_url", &json!("{\"url\": \"ftp://x\"}")).await;
         assert!(out.contains("only http(s)"));
+    }
+
+    #[test]
+    fn public_url_refuses_inward_hosts() {
+        for url in [
+            "http://localhost:3000/idea/other",
+            "http://LOCALHOST./settings",
+            "http://app.localhost/",
+            "http://127.0.0.1:8080/idea/other",
+            "http://127.8.9.10/",
+            "http://0.0.0.0:8080/",
+            "http://10.1.2.3/",
+            "http://172.16.0.5/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.64.0.1/",
+            "http://[::1]:3000/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://ollama:11434/api/tags",
+            "http://idea-vault:3000/",
+            "http://printer.local/",
+            "http://metadata.google.internal/",
+        ] {
+            let parsed = Url::parse(url).unwrap();
+            assert!(public_url(&parsed).is_err(), "{url} must be refused");
+        }
+        for url in [
+            "https://example.com/page",
+            "http://93.184.216.34/",
+            "https://[2606:4700:4700::1111]/",
+        ] {
+            let parsed = Url::parse(url).unwrap();
+            assert_eq!(public_url(&parsed), Ok(()), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_url_never_reaches_a_loopback_server() {
+        // A live listener standing in for the owner UI: the refusal must come before any I/O.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(500), listener.accept())
+                .await
+                .is_ok()
+        });
+        for url in [
+            format!("http://127.0.0.1:{port}/idea/other"),
+            format!("http://localhost:{port}/settings"),
+        ] {
+            let out = execute_tool("fetch_url", &json!({ "url": url })).await;
+            assert!(out.contains("refusing to fetch"), "{url}: {out}");
+        }
+        assert!(
+            !accepted.await.unwrap(),
+            "no connection reached the listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_drops_inward_addresses() {
+        let err = PublicResolver
+            .resolve("localhost".parse().unwrap())
+            .await
+            .err()
+            .expect("localhost resolves only inward");
+        assert!(err.to_string().contains("local or private"), "{err}");
     }
 }

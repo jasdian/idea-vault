@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 
 use crate::ai::budget::ContextBudget;
-use crate::ai::call::{fill_slot, read_slot, CallMeta, CallUsage, MetaSlot};
+use crate::ai::call::{fill_slot, read_slot, CallMeta, CallUsage, MetaSlot, RoundTotals};
 use crate::ai::claude_code::{ClaudeCodeClient, ClaudeCodeConfig};
 use crate::ai::contract::ContractOutcome;
 use crate::ai::journal::{self, CallRecord, JournalHandle, ToolRecord};
@@ -873,7 +873,8 @@ impl LlmBackend {
     /// around, never a turn failure.
     ///
     /// The returned meta sums every round (docs/adr/0037): each request is one `api_call`, and the
-    /// stop reason is the final round's. Every executed tool call is appended to `tool_log`.
+    /// stop reason is the final round's. `peak_prompt_tokens` is the largest single round, which
+    /// is what input truncation is judged by. Every executed tool call is appended to `tool_log`.
     async fn ollama_chat_with_tools(
         &self,
         options: ChatOptions,
@@ -955,13 +956,15 @@ impl LlmBackend {
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect();
 
-        let mut usage = CallUsage::default();
+        // Summed usage for the budget and the journal, the peak prompt for input truncation
+        // (each round re-sends the whole conversation, docs/adr/0037).
+        let mut totals = RoundTotals::default();
         let (max_rounds, max_calls) = self.tool_budget;
         for round in 0..max_rounds {
             self.count_request();
             let msg = match self.ollama.chat_tools(options, &convo, Some(&tools)).await {
                 Ok((msg, meta)) => {
-                    usage += meta.usage;
+                    totals.add(meta.usage.clone());
                     if msg
                         .get("tool_calls")
                         .and_then(|c| c.as_array())
@@ -973,7 +976,7 @@ impl LlmBackend {
                             .and_then(|c| c.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        return Ok((text, CallMeta { usage, ..meta }));
+                        return Ok((text, totals.finish(meta)));
                     }
                     msg
                 }
@@ -988,11 +991,11 @@ impl LlmBackend {
                          does not support tool calling; falling back to a plain call"
                     );
                     // The refused round was a request too.
-                    usage.api_calls += 1;
+                    totals.add_request();
                     self.count_request();
                     let (text, meta) = self.ollama.chat_with(options, messages).await?;
-                    usage += meta.usage;
-                    return Ok((text, CallMeta { usage, ..meta }));
+                    totals.add(meta.usage.clone());
+                    return Ok((text, totals.finish(meta)));
                 }
                 Err(e) => return Err(e),
             };
@@ -1079,13 +1082,13 @@ impl LlmBackend {
         // everything it gathered.
         self.count_request();
         let (msg, meta) = self.ollama.chat_tools(options, &convo, None).await?;
-        usage += meta.usage;
+        totals.add(meta.usage.clone());
         let text = msg
             .get("content")
             .and_then(|c| c.as_str())
             .unwrap_or_default()
             .to_string();
-        Ok((text, CallMeta { usage, ..meta }))
+        Ok((text, totals.finish(meta)))
     }
 
     /// Streaming completion (D11). Terminal on error; aborts its backend when dropped, so a partial

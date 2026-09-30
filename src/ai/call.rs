@@ -46,6 +46,11 @@ pub struct CallMeta {
     pub stop_reason: Option<String>,
     /// The context window actually sent (Ollama `num_ctx`); `None` for claude-code.
     pub num_ctx: Option<u32>,
+    /// The largest single request's prompt of a multi-round tool loop. `usage.prompt_tokens` sums
+    /// every round (each re-sends the whole conversation), so only this is comparable with one
+    /// `num_ctx` window. `None` for a single request, whose `usage.prompt_tokens` is that number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_prompt_tokens: Option<u64>,
     /// Wall-clock milliseconds of the whole call, tool rounds included.
     pub ms: u64,
     /// The journal sequence number this call was recorded under, so a later `Contract` entry can
@@ -66,9 +71,45 @@ impl CallMeta {
     /// The prompt filled at least 98% of the window, so Ollama very likely dropped its head
     /// (ADR-0014). Unknown counts are never a truncation.
     pub fn input_truncated(&self) -> bool {
-        match (self.usage.prompt_tokens, self.num_ctx) {
+        let prompt = self.peak_prompt_tokens.or(self.usage.prompt_tokens);
+        match (prompt, self.num_ctx) {
             (Some(prompt), Some(ctx)) if ctx > 0 => prompt >= u64::from(ctx) * 98 / 100,
             _ => false,
+        }
+    }
+}
+
+/// The running totals of a multi-request call (the Ollama tool loop): usage summed across rounds,
+/// and the largest single prompt, which is what [`CallMeta::input_truncated`] must compare with
+/// the window.
+#[derive(Debug, Clone, Default)]
+pub struct RoundTotals {
+    usage: CallUsage,
+    peak_prompt: Option<u64>,
+}
+
+impl RoundTotals {
+    /// Count one request.
+    pub fn add(&mut self, usage: CallUsage) {
+        self.peak_prompt = match (self.peak_prompt, usage.prompt_tokens) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        self.usage += usage;
+    }
+
+    /// Count a request that reported nothing (a refused round).
+    pub fn add_request(&mut self) {
+        self.usage.api_calls = self.usage.api_calls.saturating_add(1);
+    }
+
+    /// The whole call's meta: `last` (the final round, which owns the stop reason) with the
+    /// totals in place of its own usage.
+    pub fn finish(self, last: CallMeta) -> CallMeta {
+        CallMeta {
+            usage: self.usage,
+            peak_prompt_tokens: self.peak_prompt,
+            ..last
         }
     }
 }
@@ -117,6 +158,43 @@ mod tests {
         assert!(!meta(None, Some(1000)).input_truncated());
         assert!(!meta(Some(5000), None).input_truncated());
         assert!(!meta(Some(1), Some(0)).input_truncated());
+    }
+
+    #[test]
+    fn tool_loop_rounds_sum_usage_but_truncation_reads_the_peak_prompt() {
+        // Four healthy rounds of ~3k prompt tokens against an 8192 window: 12k summed, never full.
+        let mut totals = RoundTotals::default();
+        for prompt in [2_800, 3_000, 3_100, 3_200] {
+            totals.add(CallUsage {
+                prompt_tokens: Some(prompt),
+                output_tokens: Some(100),
+                api_calls: 1,
+            });
+        }
+        let mut meta = totals.finish(CallMeta {
+            stop_reason: Some("stop".into()),
+            ..CallMeta::default()
+        });
+        meta.num_ctx = Some(8192);
+        assert_eq!(meta.usage.prompt_tokens, Some(12_100));
+        assert_eq!(meta.usage.output_tokens, Some(400));
+        assert_eq!(meta.usage.api_calls, 4);
+        assert_eq!(meta.peak_prompt_tokens, Some(3_200));
+        assert_eq!(meta.stop_reason.as_deref(), Some("stop"));
+        assert!(!meta.input_truncated(), "no single round filled the window");
+
+        // One round that did fill the window is still a truncation.
+        let mut totals = RoundTotals::default();
+        totals.add_request();
+        totals.add(CallUsage {
+            prompt_tokens: Some(8_100),
+            output_tokens: None,
+            api_calls: 1,
+        });
+        let mut meta = totals.finish(CallMeta::default());
+        meta.num_ctx = Some(8192);
+        assert_eq!(meta.usage.api_calls, 2);
+        assert!(meta.input_truncated());
     }
 
     #[test]

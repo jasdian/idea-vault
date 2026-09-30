@@ -24,8 +24,7 @@ use crate::concepts::audit::{self, AuditReport, Finding};
 use crate::concepts::build_plan::finish::PlanMode;
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::skills::{
-    ask_on_contract, hydrate_context, off_contract_note, persist_plan, prior_plan_block,
-    RelatedProvider,
+    ask_on_contract, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
 };
 use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize_brief, Brief};
 use crate::concepts::workflows::ground::{self, GroundMap, GROUND_DIVISOR};
@@ -423,6 +422,9 @@ struct RunState {
     output: String,
     logs: Vec<StageLog>,
     pending: Vec<(usize, PendingArtifact)>,
+    /// Off-contract notes of the model calls that are not fan-out results (a chained step, a
+    /// Ground reader), from the outcome each call recorded (ADR-0040).
+    contract_notes: Vec<String>,
 }
 
 impl RunState {
@@ -660,7 +662,8 @@ async fn run_stage(
             let prompt = build_prompt(registry, &task)?;
             let llm = ctx.llm.for_role(step.role.as_str());
             match ask_on_contract(&llm, ctx.sem, prompt, contract, label, ctx.progress).await {
-                Ok((answer, _)) => {
+                Ok((answer, outcome)) => {
+                    state.contract_notes.extend(outcome.note(label));
                     if last {
                         state.output = answer;
                     } else {
@@ -766,7 +769,8 @@ async fn run_stage(
             Ok(StageOutcome::ran(detail))
         }
         Stage::Ground(spec) => {
-            let (outcome, map) = ground::run_ground(ctx, spec, note).await?;
+            let (outcome, map, notes) = ground::run_ground(ctx, spec, note).await?;
+            state.contract_notes.extend(notes);
             if let Some(map) = map {
                 state.carried.push(ground::carried_block(
                     &map,
@@ -848,8 +852,9 @@ fn run_record(
 }
 
 /// The recipe every artifact of this run carries (ADR-0040): the workflow's digest, the audit
-/// templates when an audit ran, and each step whose kept answer is off its skill's contract.
-fn run_recipe(ctx: &RunCtx<'_>, workflow: &Workflow, state: &RunState) -> Recipe {
+/// templates when an audit ran, and each call whose kept answer is off its contract — as the call
+/// recorded it (truncations included), never re-derived from the kept text.
+fn run_recipe(workflow: &Workflow, state: &RunState) -> Recipe {
     let templates: &[PromptTemplate] = if state.report.is_some() {
         &[audit::AUDIT_TEMPLATE, audit::REASK_TEMPLATE]
     } else {
@@ -860,10 +865,8 @@ fn run_recipe(ctx: &RunCtx<'_>, workflow: &Workflow, state: &RunState) -> Recipe
         .1
         .iter()
         .flatten()
-        .filter_map(|r| {
-            let skill = ctx.book.skills.get(r.lens.as_deref()?)?;
-            off_contract_note(&skill.name, skill.contract, &r.content)
-        })
+        .filter_map(|r| r.contract.note(r.lens.as_deref()?))
+        .chain(state.contract_notes.iter().cloned())
         .collect();
     Recipe {
         contract,
@@ -888,7 +891,7 @@ fn staged_artifacts(
     let now = Utc::now();
     let stamp = now.format("%Y%m%d-%H%M%S").to_string();
     let model = ctx.llm.model();
-    let recipe = run_recipe(ctx, workflow, state);
+    let recipe = run_recipe(workflow, state);
     let taken = |candidate: &str| {
         store::artifact_exists(ctx.vault_dir, ctx.idea_slug, candidate).unwrap_or(false)
     };
@@ -969,7 +972,7 @@ async fn persist(
             _ => None,
         };
         let skipped = (!ctx.audit_on).then_some(AUDIT_OFF_REASON);
-        let recipe = run_recipe(ctx, workflow, &state);
+        let recipe = run_recipe(workflow, &state);
         let finished = persist_plan(
             &ctx.llm.for_role(role.as_str()),
             ctx.vault_dir,

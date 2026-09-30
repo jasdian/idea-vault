@@ -526,6 +526,41 @@ async fn extraction_artifact_shows_off_contract_badge() {
     );
 }
 
+#[tokio::test]
+async fn truncated_but_shape_valid_lens_is_flagged_in_the_recipe() {
+    // Every lens answers a valid bullet cut off at the output limit: the recorded outcome, not a
+    // re-validation of the kept text, decides the recipe note (ADR-0040).
+    let mock = spawn(
+        &["llama3.2"],
+        ChatScript::Finished {
+            tokens: vec!["- a decision".into()],
+            done_reason: "length".into(),
+            prompt_eval_count: 100,
+            eval_count: 512,
+        },
+    )
+    .await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion);
+    let (status, _) = post_form(state.clone(), "/idea/movable/extract", "").await;
+    assert_eq!(status, StatusCode::OK);
+    support::web::poll_until(state.clone(), "/idea/movable/pending", "foil · knowledge").await;
+    let artifact = lens_artifact(&vault_dir, "extract-key-decisions");
+    assert_eq!(
+        artifact.body.trim(),
+        "- a decision",
+        "the valid text is kept"
+    );
+    let recipe = artifact.frontmatter.recipe.unwrap();
+    assert_eq!(recipe.contract.len(), 1, "{:?}", recipe.contract);
+    assert!(
+        recipe.contract[0].starts_with("extract-key-decisions: off-contract: ")
+            && recipe.contract[0].contains("output limit"),
+        "{:?}",
+        recipe.contract
+    );
+}
+
 const RUN_ID: &str = "20260930T120000123Z-skill";
 
 #[tokio::test]

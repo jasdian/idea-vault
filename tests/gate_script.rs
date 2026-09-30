@@ -305,6 +305,52 @@ fn intent_freshness_skipped_on_main() {
 }
 
 #[test]
+fn unlisted_fixture_change_on_main_fails_step7() {
+    // Only freshness is skipped on main; honesty diffs the working tree against HEAD.
+    let repo = Repo::new();
+    repo.write("tests/fixtures/case.md", "a changed expectation on main\n");
+    let out = repo.gate(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let t = text(&out);
+    assert!(t.contains("freshness skipped on main"), "{t}");
+    assert!(
+        t.contains("undeclared expectation change: tests/fixtures/case.md"),
+        "{t}"
+    );
+    assert!(t.contains("GATE FAILED at: honesty"), "{t}");
+}
+
+#[test]
+fn raised_floor_on_main_needs_a_declaration() {
+    let repo = Repo::new();
+    let n = floor("CLIPPY_ALLOW_FLOOR");
+    let script = repo.root().join("scripts/check-invariants.sh");
+    let raised = fs::read_to_string(&script).unwrap().replace(
+        &format!("CLIPPY_ALLOW_FLOOR={n}\n"),
+        &format!("CLIPPY_ALLOW_FLOOR={}\n", n + 1),
+    );
+    fs::write(&script, raised).unwrap();
+    repo.write("src/allows.rs", &allows_rs(n + 1));
+    let out = repo.gate(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        text(&out).contains("undeclared expectation change: CLIPPY_ALLOW_FLOOR"),
+        "{}",
+        text(&out)
+    );
+    // Declared in the top intent block, the same change passes.
+    repo.write(
+        "docs/INTENT.md",
+        &format!(
+            "{}\n## Expectation changes\n\n- CLIPPY_ALLOW_FLOOR: one justified allow\n",
+            support::gate::INTENT
+        ),
+    );
+    let out = repo.gate(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+}
+
+#[test]
 fn bless_env_fails_step4_before_cargo_test() {
     let repo = Repo::new();
     repo.feature("");

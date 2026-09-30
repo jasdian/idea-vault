@@ -41,6 +41,10 @@ pub const FOIL_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
 /// Added to [`FOIL_TOOLS`] only while the live web-access toggle is on (ADR-0017).
 pub const FOIL_WEB_TOOLS: &[&str] = &["WebSearch", "WebFetch"];
 
+/// The permission rule that keeps the foil out of the run journal under its cwd
+/// (`vault/<slug>/.runs/`, ADR-0037): a `Read` deny, which the CLI also applies to Grep and Glob.
+pub const RUN_JOURNAL_DENY: &str = "Read(./.runs/**)";
+
 /// The foil's MCP config when no server is registered: `--strict-mcp-config` still needs a file,
 /// and an empty one strips any user-level servers the CLI would otherwise inherit (ADR-0039).
 pub const EMPTY_MCP_CONFIG: &str = r#"{"mcpServers":{}}"#;
@@ -244,6 +248,19 @@ impl ClaudeCodeConfig {
         out
     }
 
+    /// The deny rules. Always [`RUN_JOURNAL_DENY`]: the idea's run journal sits inside the foil's
+    /// cwd, and it holds every earlier call's verbatim answer, REFUTED findings and fetched text
+    /// included, which the foil must never read back as if it were the discussion (ADR-0037,
+    /// ADR-0039). With web access off, also the web tools: a deny on top of the absent tool, so
+    /// the off state stays honest even if a CLI version ever widened `--tools` (ADR-0017).
+    fn denials(&self) -> Vec<String> {
+        let mut out = vec![RUN_JOURNAL_DENY.to_string()];
+        if !self.web_access {
+            out.extend(FOIL_WEB_TOOLS.iter().map(|t| t.to_string()));
+        }
+        out
+    }
+
     /// The CLI argument vector for one turn, given where the MCP config file was written. Pure, so
     /// the lockdown (ADR-0039) is assertable without spawning anything.
     pub fn args(&self, mcp_config_path: &Path) -> Vec<OsString> {
@@ -263,12 +280,8 @@ impl ClaudeCodeConfig {
         args.push(foil_tools(self.web_access).join(",").into());
         args.push("--allowedTools".into());
         args.push(self.approvals().join(",").into());
-        if !self.web_access {
-            // A deny on top of the absent tool, so the off state stays honest even if a CLI
-            // version ever widened `--tools` (ADR-0017).
-            args.push("--disallowedTools".into());
-            args.push(FOIL_WEB_TOOLS.join(",").into());
-        }
+        args.push("--disallowedTools".into());
+        args.push(self.denials().join(",").into());
         for dir in &self.add_dirs {
             args.push("--add-dir".into());
             args.push(dir.into());
@@ -959,7 +972,7 @@ mod tests {
         );
         assert_eq!(
             value_after(&args, "--disallowedTools").unwrap(),
-            "WebSearch,WebFetch"
+            "Read(./.runs/**),WebSearch,WebFetch"
         );
         assert_eq!(value_after(&args, "--mcp-config").unwrap(), "/tmp/mcp.json");
         assert_eq!(
@@ -982,8 +995,21 @@ mod tests {
             value_after(&args, "--allowedTools").unwrap(),
             "Read,Grep,Glob,WebSearch,WebFetch,mcp__tracker"
         );
-        assert!(!args.contains(&"--disallowedTools".to_string()));
+        assert_eq!(
+            value_after(&args, "--disallowedTools").unwrap(),
+            RUN_JOURNAL_DENY,
+            "the run journal stays denied with web access on"
+        );
         assert!(args.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn journal_deny_names_the_journal_dir() {
+        // The deny must follow the journal if its directory name ever changes.
+        assert_eq!(
+            RUN_JOURNAL_DENY,
+            format!("Read(./{}/**)", crate::ai::journal::RUNS_DIR)
+        );
     }
 
     #[test]

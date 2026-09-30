@@ -125,26 +125,16 @@ pub struct Skill {
 
 impl Skill {
     /// The recipe of an artifact this skill wrote: its name, digest and source, this build, and
-    /// the lens's contract note when `content` breaks the skill's output contract.
-    pub fn recipe(&self, content: &str) -> Recipe {
+    /// the lens's contract note when the call's recorded `outcome` is off contract (ADR-0040).
+    pub fn recipe(&self, outcome: &ContractOutcome) -> Recipe {
         Recipe {
             skill: Some(self.name.clone()),
             skill_digest: Some(self.digest.clone()),
             skill_source: Some(self.source.as_str().to_string()),
-            contract: off_contract_note(&self.name, self.contract, content)
-                .into_iter()
-                .collect(),
+            contract: outcome.note(&self.name).into_iter().collect(),
             ..provenance::recipe(&[])
         }
     }
-}
-
-/// `<lens>: off-contract: <violation>` when `content` as kept breaks `contract` — the
-/// recipe's record of a lens that degraded to its raw answer (ADR-0040). `None` when it holds.
-pub fn off_contract_note(lens: &str, contract: OutputContract, content: &str) -> Option<String> {
-    contract::validate(contract, content)
-        .err()
-        .map(|violation| format!("{lens}: off-contract: {violation}"))
 }
 
 /// A skill file that failed to load. The registry keeps running on everything else; the skill
@@ -526,6 +516,13 @@ pub(crate) async fn ask_on_contract(
     let plan_contract = contract == OutputContract::BuildPlan;
     let first_score = plan_contract.then(|| plan_score(&first));
     let validated = contract::validate(contract, &first);
+    // The first answer as it would be kept: repaired when it validated. A truncated first answer
+    // can be shape-valid yet still earn the retry, and then it outranks a retry that is not
+    // (except for a build plan, which the plan score decides).
+    let first_kept = validated
+        .as_ref()
+        .map_or_else(|_| first.trim().to_string(), Clone::clone);
+    let first_shape_wins = validated.is_ok() && !plan_contract;
     if first_meta.input_truncated() {
         tracing::warn!(
             label,
@@ -538,11 +535,7 @@ pub(crate) async fn ask_on_contract(
             }
             .to_string(),
         );
-        let kept = match validated {
-            Ok(repaired) => repaired,
-            Err(_) => first.trim().to_string(),
-        };
-        return settle(kept, &first_meta, outcome);
+        return settle(first_kept, &first_meta, outcome);
     }
     let violation = match validated {
         _ if first_meta.output_truncated() => contract::Violation::Truncated {
@@ -576,9 +569,7 @@ pub(crate) async fn ask_on_contract(
             contract::validate(contract, second)
         };
         match checked {
-            Ok(_) if first_wins(second) => {
-                return settle(first.trim().to_string(), &first_meta, off)
-            }
+            Ok(_) if first_wins(second) => return settle(first_kept, &first_meta, off),
             Ok(repaired) => return settle(repaired, meta, ContractOutcome::Retried),
             Err(again) => {
                 tracing::warn!(label, %again, "retry did not produce an on-contract answer; keeping the best one")
@@ -588,10 +579,12 @@ pub(crate) async fn ask_on_contract(
         tracing::warn!(label, "retry failed; keeping the first answer");
     }
     match retried {
-        Ok((second, meta)) if !second.trim().is_empty() && !first_wins(&second) => {
+        Ok((second, meta))
+            if !second.trim().is_empty() && !first_wins(&second) && !first_shape_wins =>
+        {
             settle(second.trim().to_string(), &meta, off)
         }
-        _ => settle(first.trim().to_string(), &first_meta, off),
+        _ => settle(first_kept, &first_meta, off),
     }
     // permit released on return — before any vault write, which needs no AI slot
 }
@@ -719,8 +712,8 @@ pub async fn invoke(
         .replace("{context}", &format!("{block}{prior}{}", context.text));
     let llm = ollama.for_role(AgentRole::from(skill.role).as_str());
     // The outcome is already in the run journal (docs/adr/0037); a single skill turn shows no
-    // badge of its own.
-    let (output, _) = ask_on_contract(
+    // badge of its own, but a build plan's recipe carries it (ADR-0040).
+    let (output, outcome) = ask_on_contract(
         &llm,
         ai_semaphore,
         prompt,
@@ -731,7 +724,7 @@ pub async fn invoke(
     .await?;
 
     if skill.contract == OutputContract::BuildPlan {
-        let recipe = skill.recipe(&output);
+        let recipe = skill.recipe(&outcome);
         let finished = persist_plan(
             &llm,
             vault_dir,
@@ -782,16 +775,33 @@ mod tests {
         assert!(issues.is_empty(), "{issues:?}");
         let over = owned.get("premortem").unwrap();
         assert_ne!(over.digest, skill.digest);
-        let recipe = over.recipe("1. a cause");
+        let recipe = over.recipe(&ContractOutcome::Repaired);
         assert_eq!(recipe.skill_digest.as_deref(), Some(over.digest.as_str()));
         assert_eq!(recipe.skill_source.as_deref(), Some("vault override"));
-        assert!(recipe.contract.is_empty(), "a numbered list holds");
+        assert!(
+            recipe.contract.is_empty(),
+            "a repaired answer met its contract"
+        );
         assert_eq!(
-            over.recipe("just prose").contract,
+            over.recipe(&ContractOutcome::OffContract(
+                contract::Violation::NoNumberedList.to_string()
+            ))
+            .contract,
             [format!(
                 "premortem: off-contract: {}",
                 contract::Violation::NoNumberedList
             )]
+        );
+        // A truncated answer is often shape-valid; the recorded outcome still flags it.
+        let truncated = contract::Violation::Truncated {
+            output: true,
+            input: false,
+        }
+        .to_string();
+        assert_eq!(
+            over.recipe(&ContractOutcome::OffContract(truncated.clone()))
+                .contract,
+            [format!("premortem: off-contract: {truncated}")]
         );
     }
 

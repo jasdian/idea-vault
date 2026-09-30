@@ -164,7 +164,7 @@ pub async fn extract_knowledge(
         }
         // Each lens artifact carries its own skill's recipe (ADR-0040); the synthesis collects
         // every lens that fell off its contract.
-        let recipe = registry.get(lens).map(|s| s.recipe(&result.content));
+        let recipe = registry.get(lens).map(|s| s.recipe(&result.contract));
         off_contract.extend(recipe.iter().flat_map(|r| r.contract.iter().cloned()));
         let file_slug = slug::disambiguate(&format!("{run_stamp}-{}", lens_short(lens)), taken);
         store::write_artifact(

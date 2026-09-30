@@ -60,6 +60,19 @@ impl ContractOutcome {
     pub fn is_clean(&self) -> bool {
         matches!(self, ContractOutcome::Clean)
     }
+
+    /// `<lens>: off-contract: <violation>` for a kept answer that never met its contract,
+    /// truncations included — the line an artifact's recipe carries (ADR-0040). Read from the
+    /// outcome the call recorded, never re-derived from the kept text: a truncated answer is often
+    /// shape-valid. `None` for every on-contract outcome.
+    pub fn note(&self, lens: &str) -> Option<String> {
+        match self {
+            ContractOutcome::OffContract(violation) => {
+                Some(format!("{lens}: off-contract: {violation}"))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Violation {

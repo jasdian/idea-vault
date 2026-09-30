@@ -467,6 +467,7 @@ mod tests {
                 },
                 stop_reason: Some("stop".into()),
                 num_ctx: Some(8192),
+                peak_prompt_tokens: None,
                 ms: 12,
                 journal_seq: None,
             },

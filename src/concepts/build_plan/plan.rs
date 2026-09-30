@@ -1631,7 +1631,7 @@ pub fn render_attack_plan(plan: &BuildPlan) -> String {
         GOAL_FIRST_CHARS,
     );
     let mut out = format!(
-        "Goal: {goal}\nRules: PROMPT.md (How to run this, Findings, PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\nCommands: a `\\|` inside a cell is the table escape for `|`; run the command with a plain `|` (PROMPT.md has every command unescaped)\n"
+        "Goal: {goal}\nRules: PROMPT.md (How to run this and its rule 10 Findings, PINNED, Fence)\nSelection rule: the topmost [ ] whose Depends are all [x]; never [?]\nCommands: a `\\|` inside a cell is the table escape for `|`; run the command with a plain `|` (PROMPT.md has every command unescaped)\n"
     );
     let fence: Vec<&str> = plan.fence.iter().map(|f| f.text.as_str()).collect();
     if fence.is_empty() {
@@ -3013,7 +3013,9 @@ Run the cheapest disproof before any Rust exists.
             from += at + phrase.len();
         }
         assert!(
-            out.contains("\nRules: PROMPT.md (How to run this, Findings, PINNED, Fence)\n"),
+            out.contains(
+                "\nRules: PROMPT.md (How to run this and its rule 10 Findings, PINNED, Fence)\n"
+            ),
             "{out}"
         );
     }
@@ -3066,13 +3068,44 @@ Run the cheapest disproof before any Rust exists.
     }
 
     #[test]
+    fn rules_header_names_only_what_prompt_md_contains() {
+        // Every name the plan.md Rules: header points an executor at exists in PROMPT.md: the
+        // sections as headings, Findings as the numbered rule 10 inside How to run this.
+        let plan = gated_plan();
+        let out = render_attack_plan(&plan);
+        let header = out
+            .lines()
+            .find_map(|l| l.strip_prefix("Rules: PROMPT.md ("))
+            .and_then(|l| l.strip_suffix(')'))
+            .expect("a Rules: header");
+        let prompt = render_prompt(&plan, &RunHeader::default(), "Trader", "stem");
+        for name in header.split(", ") {
+            match name {
+                "How to run this and its rule 10 Findings" => {
+                    let at = prompt.find("## How to run this\n").expect("the protocol");
+                    let rule = &prompt[at..];
+                    assert!(
+                        rule.contains("\n10. Act on a failure by what fixing it would change"),
+                        "rule 10 is the findings rule: {prompt}"
+                    );
+                }
+                section => assert!(
+                    prompt.lines().any(|l| l == format!("## {section}")
+                        || l.starts_with(&format!("## {section} "))),
+                    "{section} is not a PROMPT.md section: {prompt}"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn attack_plan_header_names_rules_fence_and_stop_lines() {
         let out = render_attack_plan(&gated_plan());
         let table = out.find("\n| [ ] | T |").unwrap();
         let header = &out[..table];
         for line in [
             "Goal: Run the cheapest disproof before any Rust exists.\n",
-            "Rules: PROMPT.md (How to run this, Findings, PINNED, Fence)\n",
+            "Rules: PROMPT.md (How to run this and its rule 10 Findings, PINNED, Fence)\n",
             "Selection rule: the topmost [ ] whose Depends are all [x]; never [?]\n",
             "Fence: `src/domain/links.rs`\n",
             "STOP if The backtest prints KILL → stop and report; checked by T2; blocks T3\n",

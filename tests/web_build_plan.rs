@@ -147,7 +147,8 @@ async fn prompt_md_carries_findings_protocol_end_to_end() {
     let pinned = prompt.find("## PINNED").expect("the PINNED section");
     assert!(ask < pinned, "{prompt}");
     assert!(
-        blocks[1].contains("Rules: PROMPT.md (How to run this, Findings, PINNED, Fence)"),
+        blocks[1]
+            .contains("Rules: PROMPT.md (How to run this and its rule 10 Findings, PINNED, Fence)"),
         "{}",
         blocks[1]
     );

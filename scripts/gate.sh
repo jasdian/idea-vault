@@ -12,7 +12,8 @@
 #   5. fmt         — cargo fmt --check
 #   6. clippy      — cargo clippy --all-targets -D warnings
 #   7. honesty     — every changed fixture/snapshot, rising floor and removed or downgraded
-#                    invariant id is declared under `## Expectation changes`; then the parser
+#                    invariant id since the merge-base (HEAD on main) is declared under
+#                    `## Expectation changes`; then the parser
 #                    corpus is replayed on its own (ADR-0038), so its verdict is named in the log
 # Budget is deliberately not a step: there is no metered spend (Ollama is local, claude runs on a
 # subscription) and the runtime cap is the workflow CallBudget (ADR-0034).
@@ -106,10 +107,13 @@ base=$(git merge-base HEAD main) || fail "intent (no merge-base between HEAD and
 # "On main" is the main branch itself (or a detached HEAD at the merge-base), not merely HEAD ==
 # merge-base: a new branch before its first commit sits at the base, and the gate runs before
 # that commit, so freshness and honesty diff the working tree against the base there too.
+# On main only freshness is skipped: honesty diffs the working tree and index against HEAD, the
+# last commit, so a commit made straight to main still declares its expectation changes.
 on_main=0
 branch=$(git symbolic-ref -q --short HEAD || true)
 if [ "$branch" = main ] || { [ -z "$branch" ] && [ "$(git rev-parse HEAD)" = "$base" ]; }; then
     on_main=1
+    base=$(git rev-parse HEAD)
 fi
 if [ "$on_main" = 1 ]; then
     echo "  top intent block well-formed; freshness skipped on main"
@@ -138,9 +142,7 @@ step "6/7 clippy (-D warnings)"
 cargo clippy --all-targets --quiet -- -D warnings || fail "cargo clippy"
 
 step "7/7 honesty (expectation changes declared)"
-if [ "$on_main" = 1 ]; then
-    echo "  skipped on main: there is no merge-base to diff against"
-else
+{
     surface=()
     # Changed or new fixtures and snapshots since the merge-base, working tree included.
     while IFS= read -r p; do
@@ -197,7 +199,7 @@ else
         fail "honesty (list each under '## Expectation changes' in the top intent block as '- <path or id>: <why>')"
     fi
     echo "  ${#surface[@]} expectation change(s), all declared"
-fi
+}
 # The corpus already ran inside step 4; replaying it here names a parser flip as a weakened
 # expectation rather than one failure among many (ADR-0038, D40). Needs no vault, unlike
 # `idea-vault regrade --strict`, which stays outside the offline gate.

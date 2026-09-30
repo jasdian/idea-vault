@@ -29,7 +29,7 @@ UNSAFE_FLOOR=0
 IGNORE_FLOOR=0
 
 # id|severity|ADR/D|zero-state — the order is the report order. checklist-mirror is an error,
-# downgraded to info only when .claude/ is absent (a fresh clone or a worktree without it).
+# reported as info only for a mirror file that is absent (.claude/ is unversioned).
 CATALOG='ollama-url|error|CLAUDE.md, docs/12-deployment.md|no hardcoded localhost:11434 in src/ outside src/config.rs
 bind-addr|error|CLAUDE.md|no hardcoded 127.0.0.1:3000 or 0.0.0.0:3000 in src/ outside src/config.rs
 restart-no|error|ADR-0020|every compose restart: directive is exactly restart: "no"
@@ -281,8 +281,10 @@ fi
 report doc-range-gaps
 
 # checklist-mirror: the docs/14 [dev] checklist is mirrored verbatim in the unversioned .claude/
-# skill and rules (scripts/skill-check.sh). .claude/ is gitignored, so a fresh clone or a
-# worktree has none: that is reported, never an error.
+# skill and rules (scripts/skill-check.sh). .claude/ is gitignored, so a fresh clone, or a
+# worktree whose .claude/ holds only a campaign workspace, lacks a mirror file: that is reported,
+# never an error (ADR-0041). A mirror file that exists and drifted, or a malformed docs/14
+# checklist, is an error.
 if [ ! -d .claude ]; then
     found INFO .claude "absent (fresh clone or worktree): the [dev] checklist mirrors are unchecked"
 else
@@ -293,6 +295,8 @@ else
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             case "$line" in
+                *" — missing: it mirrors "*)
+                    found INFO "${line%% — *}" "absent (unversioned): its [dev] checklist mirror is unchecked" ;;
                 *" — "*) found ERROR "${line%% — *}" "${line#* — }" ;;
                 *) found ERROR scripts/skill-check.sh "$line" ;;
             esac

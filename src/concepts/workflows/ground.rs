@@ -663,22 +663,28 @@ fn mined_text(ctx: &RunCtx<'_>) -> Result<String, ConceptError> {
 
 /// Run one Ground stage. With no source attached it skips with no call, no carried block and no
 /// artifact, so a workflow over an idea without sources runs exactly as it would without Ground.
-/// Otherwise the map comes back for the caller to carry and stage as an artifact.
+/// Otherwise the map comes back for the caller to carry and stage as an artifact, with the
+/// off-contract note of every reader that kept an off-contract answer (ADR-0040).
 pub(crate) async fn run_ground(
     ctx: &RunCtx<'_>,
     spec: &GroundSpec,
     note: &(dyn Fn(&str) + Sync),
-) -> Result<(StageOutcome, Option<GroundMap>), ConceptError> {
+) -> Result<(StageOutcome, Option<GroundMap>, Vec<String>), ConceptError> {
     let probe = ctx.llm.source_probe();
     if probe.is_empty() {
         note("no sources attached — ground skipped");
-        return Ok((StageOutcome::skipped("no sources attached"), None));
+        return Ok((
+            StageOutcome::skipped("no sources attached"),
+            None,
+            Vec::new(),
+        ));
     }
     note("mapping the sources");
     let text = mined_text(ctx)?;
     let (probe, code) = blocking(probe, move |p| code_map(p, &text)).await?;
 
     let mut claims: Vec<Claim> = Vec::new();
+    let mut contract_notes: Vec<String> = Vec::new();
     let readers = spec.readers.min(DEFAULT_ANGLES.len());
     if readers > 0 {
         let outline = format!("## Code outline\n{}", code.outline.join("\n"));
@@ -723,9 +729,12 @@ pub(crate) async fn run_ground(
             }
         }))
         .await;
-        for answer in answers {
+        for (r, answer) in answers.into_iter().enumerate() {
             match answer {
-                Ok((text, _)) => claims.extend(parse_claims(&text)),
+                Ok((text, outcome)) => {
+                    contract_notes.extend(outcome.note(&format!("{READER_SKILL} {}", r + 1)));
+                    claims.extend(parse_claims(&text));
+                }
                 Err(ConceptError::SemaphoreClosed) => return Err(ConceptError::SemaphoreClosed),
                 Err(e) => tracing::warn!(error = %e, "ground reader failed; counted as no claims"),
             }
@@ -751,7 +760,7 @@ pub(crate) async fn run_ground(
             body: artifact_body(&map),
         }),
     };
-    Ok((outcome, Some(map)))
+    Ok((outcome, Some(map), contract_notes))
 }
 
 #[cfg(test)]

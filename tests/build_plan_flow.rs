@@ -891,6 +891,52 @@ async fn audited_plan_pointer_names_the_workflow() {
 }
 
 #[tokio::test]
+async fn workflow_plan_recipe_flags_an_off_contract_planner_step() {
+    // The chained planner kept an off-grammar answer after its one retry: the outcome it recorded
+    // reaches the plan's recipe (ADR-0040), not only the journal.
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let mut scripts = vec![support::ChatScript::Tokens(vec!["- Ship solo first".to_string()]); 5];
+    scripts.push(support::ChatScript::Tokens(vec![without_section(
+        PLANNER_ANSWER,
+        "## Settled",
+    )]));
+    scripts.push(support::ChatScript::Tokens(vec![
+        "Sorry, I cannot format that.".to_string(),
+    ]));
+    let mock = support::spawn_sequence(&["llama3.2"], scripts).await;
+    idea_vault::concepts::workflows::run_workflow(
+        &RunCtx {
+            llm: &mock_backend(&mock),
+            sem: &tokio::sync::Semaphore::new(1),
+            book: &Book::builtin(),
+            vault_dir: dir.path(),
+            idea_slug: SLUG,
+            budget: idea_vault::ai::budget::ContextBudget::new(8192),
+            audit_on: false,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
+        "ready-to-build",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock.chat_bodies().len(),
+        7,
+        "5 harvesters + planner + retry"
+    );
+    let plan = plan_artifacts(dir.path()).remove(0);
+    let recipe = plan.frontmatter.recipe.expect("a plan's recipe");
+    assert_eq!(recipe.contract.len(), 1, "{:?}", recipe.contract);
+    assert!(
+        recipe.contract[0].contains(": off-contract: ") && recipe.contract[0].contains("Settled"),
+        "{:?}",
+        recipe.contract
+    );
+}
+
+#[tokio::test]
 async fn both_persist_callers_share_one_gated_path() {
     let (quick_dir, _mock, quick) = quick_plan(&[PLANNER_ANSWER]).await;
     quick.unwrap();

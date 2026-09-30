@@ -528,6 +528,58 @@ async fn length_stop_triggers_single_reask_as_truncated() {
 }
 
 #[tokio::test]
+async fn truncated_valid_first_beats_an_off_contract_retry() {
+    let (output, bodies, entries) = invoke_journaled(
+        "premortem",
+        vec![
+            // Shape-valid after repair (the preamble goes), but cut off by the output limit.
+            ChatScript::Finished {
+                tokens: vec!["Sure:\n1. Nobody pays.\n2. Ch".into()],
+                done_reason: "length".into(),
+                prompt_eval_count: 100,
+                eval_count: 512,
+            },
+            tokens("Honestly it is fine, no list needed."),
+        ],
+    )
+    .await;
+    assert_eq!(bodies.len(), 2, "exactly one re-ask");
+    assert_eq!(
+        output, "1. Nobody pays.\n2. Ch",
+        "the repaired first answer"
+    );
+    let recorded = contracts(&entries);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0].0, 1, "recorded against the kept first call");
+    assert!(
+        matches!(&recorded[0].1, ContractOutcome::OffContract(v) if v.contains("output limit")),
+        "{recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn truncated_valid_first_is_kept_repaired_when_the_retry_is_empty() {
+    let (output, bodies, _) = invoke_journaled(
+        "premortem",
+        vec![
+            ChatScript::Finished {
+                tokens: vec!["Sure:\n1. Nobody pays.\n2. Ch".into()],
+                done_reason: "length".into(),
+                prompt_eval_count: 100,
+                eval_count: 512,
+            },
+            tokens("   "),
+        ],
+    )
+    .await;
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(
+        output, "1. Nobody pays.\n2. Ch",
+        "repaired, not the raw first"
+    );
+}
+
+#[tokio::test]
 async fn input_truncation_is_recorded_without_a_reask() {
     let (output, bodies, entries) = invoke_journaled(
         "premortem",

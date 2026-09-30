@@ -1,12 +1,13 @@
-//! scripts/check-invariants.sh under test (ADR-0041, docs/14-no-mistakes-gate.md): every catalog
-//! rule has a seeded violation that flags exactly its own id, the catalog and the seed table are
-//! the same set (so a rule cannot ship without a seed), and the committed tree is clean.
+//! scripts/check-invariants.sh under test (ADR-0041, docs/14-no-mistakes-gate.md): every detection
+//! arm of every catalog rule has a seeded violation that flags exactly its own id, the catalog and
+//! the seed table's ids are the same set (so a rule cannot ship without a seed), and the versioned
+//! tree is clean whatever the unversioned `.claude/` holds.
 mod support;
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Output;
+use std::process::{Command, Output};
 
 use support::gate::{
     allows_rs, catalog, clean_tree, floor, invariants, repo_root, write, CLAUDE_MD, COMPOSE, INTENT,
@@ -44,93 +45,94 @@ fn findings(out: &Output) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A catalog id and the function that plants one violation of it.
-type Seed = (&'static str, fn(&Path));
+/// A catalog id, the detection arm it exercises, and the function that plants one violation of it.
+type Seed = (&'static str, &'static str, fn(&Path));
 
-/// One row per catalog id; each plants exactly one violation of that rule in a clean tree.
+/// At least one row per catalog id and one per detection arm of a multi-arm rule; each plants
+/// exactly one violation of that rule in a clean tree, so deleting an arm goes red.
 /// Forbidden tokens are spelled in pieces so this file never trips the rules it seeds.
 const SEEDS: &[Seed] = &[
-    ("ollama-url", |r| {
+    ("ollama-url", "src literal", |r| {
         write(
             r,
             "src/ai/url.rs",
             concat!("const U: &str = \"http://local", "host:11434\";\n"),
         )
     }),
-    ("bind-addr", |r| {
+    ("bind-addr", "src literal", |r| {
         write(
             r,
             "src/web/bind.rs",
             concat!("const B: &str = \"127.0.0.1", ":3000\";\n"),
         )
     }),
-    ("restart-no", |r| {
+    ("restart-no", "compose directive", |r| {
         write(
             r,
             "docker-compose.yml",
             &COMPOSE.replace("\"no\"", "unless-stopped"),
         )
     }),
-    ("vault-bind-long", |r| {
+    ("vault-bind-long", "short bind", |r| {
         write(
             r,
             "docker-compose.yml",
             &format!("{COMPOSE}      - ./vault:/vault\n"),
         )
     }),
-    ("no-docker-exec", |r| {
+    ("no-docker-exec", "Command::new", |r| {
         write(
             r,
             "src/web/run.rs",
             concat!("fn f() { Command::new(\"doc", "ker\"); }\n"),
         )
     }),
-    ("doc-links", |r| {
+    ("doc-links", "CLAUDE.md ADR path", |r| {
         write(
             r,
             "CLAUDE.md",
             &format!("{CLAUDE_MD}Also docs/adr/0009-gone.md.\n"),
         )
     }),
-    ("ratchet", |r| {
+    ("ratchet", "unsafe over floor", |r| {
         write(r, "src/raw.rs", concat!("fn f() { uns", "afe { } }\n"))
     }),
-    ("d4-config", |r| {
+    ("d4-config", "use path", |r| {
         write(
             r,
             "src/ai/cfg.rs",
             concat!("use crate::con", "fig::Config;\n"),
         )
     }),
-    ("d4-web-app", |r| {
+    ("d4-web-app", "use path", |r| {
         write(r, "src/web/up.rs", concat!("use crate::ap", "p::App;\n"))
     }),
-    ("ratchet-slack", |r| {
+    ("ratchet-slack", "clippy allows under floor", |r| {
         let n = floor("CLIPPY_ALLOW_FLOOR");
         assert!(n > 0, "the slack seed needs a clippy floor above 0");
         write(r, "src/allows.rs", &allows_rs(n - 1))
     }),
-    ("ignore-ratchet", |r| {
+    ("ignore-ratchet", "ignore over floor", |r| {
         write(
             r,
             "tests/skipped.rs",
             concat!("#[test]\n#[ign", "ore]\nfn t() {}\n"),
         )
     }),
-    ("doc-ranges", |r| {
+    ("doc-ranges", "D range stale", |r| {
         write(r, "CLAUDE.md", &CLAUDE_MD.replace("(D1–D1)", "(D1–D2)"))
     }),
-    ("doc-range-gaps", |r| {
+    ("doc-range-gaps", "ADR gap", |r| {
         write(r, "docs/adr/0003-y.md", "# ADR-0003\n");
         write(r, "CLAUDE.md", &CLAUDE_MD.replace("0001–0001", "0001–0003"))
     }),
-    ("checklist-mirror", |r| {
+    ("checklist-mirror", "mirror lacks a phrase", |r| {
         write(r, ".claude/rules/core.md", "- [CORE-8] something else\n")
     }),
-    ("intent-archive", |r| {
+    ("intent-archive", "two blocks", |r| {
         write(r, "docs/INTENT.md", &format!("{INTENT}\n{INTENT}"))
     }),
-    ("tool-fence", |r| {
+    ("tool-fence", "unfenced tool message", |r| {
         write(
             r,
             "src/ai/tool_loop.rs",
@@ -140,14 +142,14 @@ const SEEDS: &[Seed] = &[
             ),
         )
     }),
-    ("runs-not-truth", |r| {
+    ("runs-not-truth", "journal path in index", |r| {
         write(
             r,
             "src/index/scan.rs",
             concat!("const R: &str = \".ru", "ns\";\n"),
         )
     }),
-    ("no-skip-permissions", |r| {
+    ("no-skip-permissions", "flag in src", |r| {
         write(
             r,
             "src/ai/foil.rs",
@@ -155,6 +157,51 @@ const SEEDS: &[Seed] = &[
                 "fn f() { cmd.arg(\"--dangerously-skip",
                 "-permissions\"); }\n"
             ),
+        )
+    }),
+    ("doc-links", "08-diagrams relative link", |r| {
+        let text = fs::read_to_string(r.join("docs/08-diagrams.md")).unwrap();
+        write(
+            r,
+            "docs/08-diagrams.md",
+            &format!("{text}\nSee [gone](./adr/0009-gone.md).\n"),
+        )
+    }),
+    ("ratchet", "clippy allows over floor", |r| {
+        write(
+            r,
+            "src/allows.rs",
+            &allows_rs(floor("CLIPPY_ALLOW_FLOOR") + 1),
+        )
+    }),
+    ("doc-ranges", "ADR range stale", |r| {
+        write(r, "CLAUDE.md", &CLAUDE_MD.replace("0001–0001", "0001–0002"))
+    }),
+    ("doc-ranges", "no D range sentence", |r| {
+        write(r, "CLAUDE.md", &CLAUDE_MD.replace(" (D1–D1)", ""))
+    }),
+    ("doc-ranges", "no ADR range sentence", |r| {
+        write(
+            r,
+            "CLAUDE.md",
+            &CLAUDE_MD.replace(", and ADRs 0001–0001", ""),
+        )
+    }),
+    ("doc-ranges", "CLAUDE.md missing", |r| {
+        fs::remove_file(r.join("CLAUDE.md")).unwrap()
+    }),
+    ("checklist-mirror", "numbering gap", |r| {
+        write(
+            r,
+            "docs/14-no-mistakes-gate.md",
+            "# 14\n\n## Checklist\n\n1. **alpha rule holds** [dev]\n3. **beta rule holds** [product]\n",
+        )
+    }),
+    ("checklist-mirror", "malformed checklist line", |r| {
+        write(
+            r,
+            "docs/14-no-mistakes-gate.md",
+            "# 14\n\n## Checklist\n\n1. **alpha rule holds** [dev]\n2. beta rule holds\n",
         )
     }),
 ];
@@ -171,9 +218,44 @@ fn clean_tree_passes_with_every_id_ok() {
     }
 }
 
+/// The versioned tree (tracked plus untracked-but-not-ignored files) copied into a tempdir, so the
+/// verdict never depends on gitignored state such as `.claude/`.
+fn versioned_tree() -> TempDir {
+    let root = repo_root();
+    let out = Command::new("git")
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git ls-files: {out:?}");
+    let dir = TempDir::new().unwrap();
+    for rel in out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let rel = std::str::from_utf8(rel).unwrap();
+        let from = root.join(rel);
+        // A tracked file deleted in the working tree is not part of the tree being checked.
+        if from.is_file() {
+            let to = dir.path().join(rel);
+            fs::create_dir_all(to.parent().unwrap()).unwrap();
+            fs::copy(&from, &to).unwrap();
+        }
+    }
+    dir
+}
+
 #[test]
 fn committed_tree_is_clean() {
-    let out = invariants(&["--strict", "--root", repo_root().to_str().unwrap()]);
+    let tree = versioned_tree();
+    assert!(
+        !tree.path().join(".claude").exists(),
+        ".claude/ is unversioned"
+    );
+    let out = invariants(&["--strict", "--root", tree.path().to_str().unwrap()]);
     let text = stdout(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(
@@ -185,7 +267,7 @@ fn committed_tree_is_clean() {
 #[test]
 fn each_seed_flags_exactly_its_own_id() {
     let severities = catalog();
-    for (id, seed) in SEEDS {
+    for (id, arm, seed) in SEEDS {
         let dir = tree();
         seed(dir.path());
         let sev = &severities
@@ -199,10 +281,10 @@ fn each_seed_flags_exactly_its_own_id() {
         assert_eq!(
             got.len(),
             1,
-            "{id}: exactly one finding\n{}",
+            "{id} ({arm}): exactly one finding\n{}",
             stdout(&plain)
         );
-        assert_eq!(&got[0].1, id, "{id}\n{}", stdout(&plain));
+        assert_eq!(&got[0].1, id, "{id} ({arm})\n{}", stdout(&plain));
         let (plain_exit, strict_exit, shown) = match sev.as_str() {
             "error" => (1, 1, "ERROR"),
             "warn" => (0, 1, "WARN"),
@@ -228,15 +310,16 @@ fn each_seed_flags_exactly_its_own_id() {
 #[test]
 fn every_catalog_id_has_a_seed() {
     let listed: BTreeSet<String> = catalog().into_iter().map(|(id, _)| id).collect();
-    let seeded: BTreeSet<String> = SEEDS.iter().map(|(id, _)| id.to_string()).collect();
-    assert_eq!(seeded.len(), SEEDS.len(), "a seed id is duplicated");
+    let seeded: BTreeSet<String> = SEEDS.iter().map(|(id, _, _)| id.to_string()).collect();
+    let arms: BTreeSet<(&str, &str)> = SEEDS.iter().map(|(id, arm, _)| (*id, *arm)).collect();
+    assert_eq!(arms.len(), SEEDS.len(), "a seed (id, arm) is duplicated");
     assert_eq!(listed, seeded);
 }
 
 #[test]
 fn collect_all_reports_two_seeded_violations() {
     let dir = tree();
-    for (id, seed) in SEEDS {
+    for (id, _, seed) in SEEDS {
         if ["ollama-url", "d4-web-app"].contains(id) {
             seed(dir.path());
         }
@@ -263,6 +346,40 @@ fn checklist_mirror_is_info_without_dot_claude() {
     assert_eq!(
         findings(&out),
         [("INFO".to_string(), "checklist-mirror".to_string())]
+    );
+}
+
+#[test]
+fn checklist_mirror_is_info_for_an_absent_mirror_file() {
+    // A worktree whose .claude/ holds only a campaign workspace has neither mirror file.
+    let dir = tree();
+    fs::remove_dir_all(dir.path().join(".claude/skills")).unwrap();
+    fs::remove_file(dir.path().join(".claude/rules/core.md")).unwrap();
+    write(dir.path(), ".claude/attack-workspace/plan.md", "# plan\n");
+    let out = run(dir.path(), true);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    let info = ("INFO".to_string(), "checklist-mirror".to_string());
+    assert_eq!(findings(&out), [info.clone(), info], "{}", stdout(&out));
+}
+
+#[test]
+fn checklist_mirror_errors_on_a_drifted_mirror_beside_an_absent_one() {
+    let dir = tree();
+    fs::remove_file(dir.path().join(".claude/rules/core.md")).unwrap();
+    write(
+        dir.path(),
+        ".claude/skills/attack/SKILL.md",
+        "6. something else\n",
+    );
+    let out = run(dir.path(), false);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let got = findings(&out);
+    assert!(
+        got.contains(&("ERROR".to_string(), "checklist-mirror".to_string()))
+            && got.contains(&("INFO".to_string(), "checklist-mirror".to_string()))
+            && got.len() == 2,
+        "{}",
+        stdout(&out)
     );
 }
 
