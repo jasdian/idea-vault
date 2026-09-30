@@ -1,5 +1,5 @@
 //! The Task↔Job bridge (docs/adr/0024): maps the long-running tools' (`chat`, `store_idea`,
-//! `run_skill`, `run_swarm`, `build_plan`) MCP-task lifecycle
+//! `run_skill`, `run_swarm`, `build_plan`, `run_workflow`) MCP-task lifecycle
 //! (`tasks/get`/`tasks/result`/`tasks/cancel`, SEP-1686) onto idea-vault's existing
 //! slug-keyed background-job machinery (`web::jobs`, ADR-0010), without any change to `jobs.rs`
 //! itself — every job-state read/write below goes through its existing public functions.
@@ -46,6 +46,7 @@ use rmcp::ErrorData as McpError;
 use serde_json::Value;
 
 use crate::concepts::build_plan::workbench;
+use crate::concepts::workflows::run::STAGE_ARTIFACTS_LABEL;
 use crate::domain::IdeaState;
 use crate::vault::store;
 use crate::web::jobs::{self, Pending};
@@ -88,6 +89,9 @@ enum TaskKind {
     /// `build_plan` (docs/adr/0033): the build-prompt capstone skill, or the ready-to-build
     /// workflow when audited — either way one pointer turn and one new plan version.
     Plan,
+    /// `run_workflow` (docs/adr/0036): a non-capstone workflow — one turn, plus the stage
+    /// artifacts and run record it names.
+    Workflow,
 }
 
 fn kind_for(name: &str) -> Result<TaskKind, McpError> {
@@ -97,6 +101,7 @@ fn kind_for(name: &str) -> Result<TaskKind, McpError> {
         "run_skill" => Ok(TaskKind::Skill),
         "run_swarm" => Ok(TaskKind::Swarm),
         "build_plan" => Ok(TaskKind::Plan),
+        "run_workflow" => Ok(TaskKind::Workflow),
         _ => Err(McpError::invalid_params(
             format!("'{name}' does not support task-based invocation"),
             None,
@@ -113,6 +118,7 @@ fn tool_name(kind: TaskKind) -> &'static str {
         TaskKind::Skill => "run_skill",
         TaskKind::Swarm => "run_swarm",
         TaskKind::Plan => "build_plan",
+        TaskKind::Workflow => "run_workflow",
     }
 }
 
@@ -588,7 +594,11 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
         // reader, and the newest turn belongs to someone else.
         (
             Terminal::Completed,
-            TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm | TaskKind::Plan,
+            TaskKind::Chat
+            | TaskKind::Skill
+            | TaskKind::Swarm
+            | TaskKind::Plan
+            | TaskKind::Workflow,
         ) if !turn_landed => Terminal::Failed(CONSUMED_ELSEWHERE.to_string()),
         // A store appends no turn; its effect is the Stored state. `Idle` without it means the
         // job failed and another reader took its `Failed` slot — never report "stored".
@@ -604,7 +614,11 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
         }
         (
             Terminal::Completed | Terminal::Notice(_),
-            TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm | TaskKind::Plan,
+            TaskKind::Chat
+            | TaskKind::Skill
+            | TaskKind::Swarm
+            | TaskKind::Plan
+            | TaskKind::Workflow,
         ) => turn_landed,
     };
     entry.rendered = Some(terminal_result(
@@ -673,7 +687,11 @@ fn claim_counted(
     let key = claim_and_spawn(state, slug, kind, args)?;
     let turns_at_claim = match kind {
         TaskKind::Chat => before + 1,
-        TaskKind::Store | TaskKind::Skill | TaskKind::Swarm | TaskKind::Plan => before,
+        TaskKind::Store
+        | TaskKind::Skill
+        | TaskKind::Swarm
+        | TaskKind::Plan
+        | TaskKind::Workflow => before,
     };
     Ok(Claimed {
         key,
@@ -684,11 +702,11 @@ fn claim_counted(
 /// The operation key a plain retry reattaches on: the `chat` message, the skill name, the
 /// swarm's comma-joined angle list (empty for the default set), the constant `"store"` — one
 /// slug has only one store, and a named key keeps every kind on the same `Some` shape — or the
-/// plan's mode, `"quick"` or `"audited"` (docs/adr/0033).
+/// plan's mode, `"quick"` or `"audited"` (docs/adr/0033), or the workflow name.
 fn op_key(kind: TaskKind, args: &Value) -> Result<Option<String>, McpError> {
     match kind {
         TaskKind::Chat => Ok(Some(required_str(args, "message")?.to_string())),
-        TaskKind::Skill => Ok(Some(required_str(args, "name")?.to_string())),
+        TaskKind::Skill | TaskKind::Workflow => Ok(Some(required_str(args, "name")?.to_string())),
         TaskKind::Swarm => Ok(Some(swarm_angles(args)?.join(","))),
         TaskKind::Store => Ok(Some("store".to_string())),
         TaskKind::Plan => Ok(Some(
@@ -832,6 +850,28 @@ fn claim_and_spawn(
             }
             Ok(key)
         }
+        // R22's guards (HND-10): an unknown name, including one present only as an invalid owner
+        // file, is refused before any claim. A capstone is refused too (docs/adr/0036): its plan
+        // lineage and answers belong to `build_plan`, the one MCP door onto plan versions.
+        TaskKind::Workflow => {
+            let name = required_str(args, "name")?.to_string();
+            let book = guard_workflow(state, &idea, &name)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            if book.workflows.get(&name).is_some_and(|w| w.capstone) {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "'{name}' is the build-plan capstone — call build_plan with audited:true \
+                         instead, which versions the plan and carries the owner's answers forward"
+                    ),
+                    None,
+                ));
+            }
+            if !jobs::try_claim(&state.jobs, slug) {
+                return Err(busy_error(slug));
+            }
+            spawn_workflow_job(state, slug, name.clone(), book);
+            Ok(Some(name))
+        }
     }
 }
 
@@ -909,7 +949,46 @@ fn finish_result(
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
         },
         TaskKind::Plan => plan_result(state, slug, own_turn),
+        // A non-capstone workflow also appends exactly one turn; its stage artifacts are listed
+        // beside it so the client can read them without scanning get_idea (docs/adr/0036).
+        TaskKind::Workflow => match own_turn_text(state, slug, own_turn) {
+            Ok(turn) => {
+                let artifacts = stage_artifact_slugs(&turn);
+                CallToolResult::success(vec![
+                    Content::text(turn),
+                    Content::text(
+                        serde_json::json!({
+                            "artifacts": artifacts,
+                            "hint": "read each with get_artifact",
+                        })
+                        .to_string(),
+                    ),
+                ])
+            }
+            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+        },
     }
+}
+
+/// The stage artifacts and run record a workflow turn names (docs/adr/0034, 0036): the
+/// `[[slug]]` links on its trailing [`STAGE_ARTIFACTS_LABEL`] line. Only the turn's last line is
+/// read — the engine appends that line after all model output, so a model-written look-alike
+/// earlier in the turn is never taken for it. Empty when the run staged none.
+fn stage_artifact_slugs(turn: &str) -> Vec<String> {
+    let Some(links) = turn
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| l.trim().strip_prefix(STAGE_ARTIFACTS_LABEL))
+    else {
+        return Vec::new();
+    };
+    links
+        .split(" · ")
+        .filter_map(|l| l.trim().strip_prefix("[[")?.strip_suffix("]]"))
+        .filter(|s| crate::domain::slug::is_valid(s))
+        .map(str::to_string)
+        .collect()
 }
 
 /// A finished `build_plan`: the lineage head the run just wrote, as the same view `get_plan`
@@ -959,4 +1038,24 @@ fn next_task_id() -> String {
         "task-{}-{n}",
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_artifact_slugs_reads_only_the_trailing_engine_line() {
+        let turn = "## assistant (workflow: exhaust)\n\none position\n\n\
+                    Stage artifacts: [[20260930-x-exhaust-1-loop]] · [[20260930-x-exhaust-run]]\n";
+        assert_eq!(
+            stage_artifact_slugs(turn),
+            ["20260930-x-exhaust-1-loop", "20260930-x-exhaust-run"]
+        );
+        // A model-written look-alike above the engine's last line is not a listing.
+        let forged =
+            "## assistant (workflow: interrogate)\n\nStage artifacts: [[fake]]\n\nposition\n";
+        assert!(stage_artifact_slugs(forged).is_empty());
+        assert!(stage_artifact_slugs("Stage artifacts: [[../escape]]").is_empty());
+    }
 }

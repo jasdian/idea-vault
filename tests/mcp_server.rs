@@ -160,6 +160,8 @@ async fn tools_list_includes_the_catalog() {
         "list_skills",
         "run_skill",
         "run_swarm",
+        "list_workflows",
+        "run_workflow",
         "get_artifact",
     ] {
         assert!(
@@ -2066,4 +2068,251 @@ async fn build_plan_audited_as_task_writes_linked_plan() {
         text_of(&result).starts_with(&format!("plan {audited}")),
         "{result}"
     );
+}
+
+// ---- Workflows over MCP (docs/adr/0036) ----
+
+/// The mock answers for one `exhaust` run at K=1 (the sequence `workflow_stages.rs` pins): two
+/// loop rounds of three lenses, the second adding nothing new, a clean audit (so refine is
+/// skipped) and the synthesis — eight calls.
+fn exhaust_scripts() -> Vec<ChatScript> {
+    [
+        "- the market is too small\n- churn will be high",
+        "- pricing is unproven",
+        "- support load grows with every user",
+        "- The market is too small.",
+        "- churn will be high",
+        "- pricing is unproven",
+        "F1: CONFIRMED — a\nF2: CONFIRMED — b\nF3: CONFIRMED — c\nF4: CONFIRMED — d",
+        "one converged position",
+    ]
+    .into_iter()
+    .map(plan_tokens)
+    .collect()
+}
+
+/// The slugs a `run_workflow` result lists beside its turn.
+fn workflow_artifacts(result: &Value) -> Vec<String> {
+    let listed: Value = serde_json::from_str(
+        result["content"][1]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no artifact listing: {result}")),
+    )
+    .unwrap();
+    listed["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn list_workflows_shape() {
+    let (state, _vault) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+
+    let listed = tool_json(&call_tool(&app, &session, "list_workflows", json!({})).await);
+    let listed = listed.as_array().expect("workflows array");
+    let names: Vec<&str> = listed.iter().map(|w| w["name"].as_str().unwrap()).collect();
+    for expected in ["interrogate", "design-panel", "exhaust", "ready-to-build"] {
+        assert!(names.contains(&expected), "missing {expected}: {names:?}");
+    }
+    let exhaust = listed.iter().find(|w| w["name"] == "exhaust").unwrap();
+    assert_eq!(
+        exhaust["call_ceiling"],
+        9 + 1 + 2 + 1,
+        "loop min(12, 3×3), audit, refine 2×1, synthesize — the engine's own ceiling"
+    );
+    assert_eq!(
+        exhaust["stages"],
+        json!(["loop", "audit", "refine", "synthesize"])
+    );
+    assert_eq!(exhaust["needs_sources"], false);
+    assert_eq!(exhaust["capstone"], false);
+    assert_eq!(exhaust["source"], "built-in");
+    for key in ["description", "use_when", "avoid_when"] {
+        assert!(exhaust[key].is_string(), "{key}: {exhaust}");
+    }
+    let design = listed.iter().find(|w| w["name"] == "design-panel").unwrap();
+    assert_eq!(design["needs_sources"], true);
+    let capstone = listed
+        .iter()
+        .find(|w| w["name"] == "ready-to-build")
+        .unwrap();
+    assert_eq!(capstone["capstone"], true, "listed, flagged for build_plan");
+}
+
+#[tokio::test]
+async fn run_workflow_task_round_trip_returns_artifact_slugs() {
+    let f = plan_ready(exhaust_scripts()).await;
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 110, "method": "tools/call",
+        "params": {
+            "name": "run_workflow",
+            "arguments": { "slug": f.slug, "name": "exhaust" },
+            "task": {}
+        }
+    });
+    let (status, _, body) = send(&f.app, mcp_request(enqueue, Some(&f.session), Some(TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a task was minted: {body}"))
+        .to_string();
+    assert_eq!(wait_task(&f.app, &f.session, &task_id).await, "completed");
+    let result = task_result(&f.app, &f.session, &task_id).await;
+    assert_ne!(result["isError"], true, "{result}");
+    assert_eq!(f.mock.chat_bodies().len(), 8);
+
+    let turn = text_of(&result);
+    assert!(turn.contains("one converged position"), "{turn}");
+    let conversation = conversation_of(&f.vault_dir, &f.slug);
+    assert_eq!(
+        conversation
+            .matches("## assistant (workflow: exhaust)")
+            .count(),
+        1,
+        "{conversation}"
+    );
+
+    let slugs = workflow_artifacts(&result);
+    assert_eq!(
+        slugs.len(),
+        2,
+        "the loop's findings and the run record: {slugs:?}"
+    );
+    let kinds: Vec<idea_vault::domain::ArtifactKind> = slugs
+        .iter()
+        .map(|s| {
+            assert!(turn.contains(&format!("[[{s}]]")), "{s} named in the turn");
+            idea_vault::vault::store::read_artifact(&f.vault_dir, &f.slug, s)
+                .unwrap_or_else(|e| panic!("{s} readable: {e}"))
+                .frontmatter
+                .kind
+        })
+        .collect();
+    assert!(kinds.contains(&idea_vault::domain::ArtifactKind::Finding));
+    assert!(kinds.contains(&idea_vault::domain::ArtifactKind::WorkflowRun));
+}
+
+#[tokio::test]
+async fn run_workflow_unknown_or_invalid_is_invalid_params_no_claim() {
+    let f = plan_ready(vec![plan_tokens("x")]).await;
+    let dir = f.state.workflows.dir().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    // Well-formed but naming a missing skill: it loads as a book issue, never as a workflow.
+    std::fs::write(
+        dir.join("broken.md"),
+        "---\nname: broken\ndescription: d\nstages:\n  - kind: fan_out\n    steps:\n      - {role: critic, skill: no-such-skill}\n  - kind: synthesize\n---\n",
+    )
+    .unwrap();
+    f.state.workflows.reload(&f.state.skills);
+    let before = conversation_of(&f.vault_dir, &f.slug);
+
+    for args in [
+        json!({ "slug": f.slug, "name": "nope" }),
+        json!({ "slug": f.slug, "name": "broken" }),
+        json!({ "slug": f.slug }),
+        json!({ "slug": "no-such-idea", "name": "exhaust" }),
+    ] {
+        let body = call_tool_body(&f.app, &f.session, "run_workflow", args.clone()).await;
+        assert_eq!(
+            body["error"]["code"], -32602,
+            "{args} is invalid_params: {body}"
+        );
+        assert!(
+            !idea_vault::web::jobs::is_running(&f.state.jobs, &f.slug),
+            "{args} claimed nothing"
+        );
+    }
+    set_state(&f.vault_dir, &f.slug, idea_vault::domain::IdeaState::Draft);
+    let body = call_tool_body(
+        &f.app,
+        &f.session,
+        "run_workflow",
+        json!({ "slug": f.slug, "name": "exhaust" }),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32602, "a Draft refuses: {body}");
+    assert!(!idea_vault::web::jobs::is_running(&f.state.jobs, &f.slug));
+
+    assert!(f.mock.chat_bodies().is_empty(), "no model call");
+    assert_eq!(conversation_of(&f.vault_dir, &f.slug), before);
+}
+
+#[tokio::test]
+async fn run_workflow_capstone_points_to_build_plan() {
+    let f = plan_ready(vec![plan_tokens("x")]).await;
+    let before = conversation_of(&f.vault_dir, &f.slug);
+
+    let body = call_tool_body(
+        &f.app,
+        &f.session,
+        "run_workflow",
+        json!({ "slug": f.slug, "name": "ready-to-build" }),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32602, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("build_plan"), "{message}");
+    assert!(!idea_vault::web::jobs::is_running(&f.state.jobs, &f.slug));
+    assert!(f.mock.chat_bodies().is_empty());
+    assert_eq!(conversation_of(&f.vault_dir, &f.slug), before);
+    assert!(
+        plan_stems(&f.vault_dir, &f.slug).is_empty(),
+        "no plan written"
+    );
+}
+
+#[tokio::test]
+async fn run_workflow_replay_is_idempotent() {
+    let f = plan_ready(exhaust_scripts()).await;
+    let keyed = json!({ "slug": f.slug, "name": "exhaust", "idempotency_key": "wf-1" });
+
+    let first = call_until_done(&f.app, &f.session, "run_workflow", keyed.clone()).await;
+    assert_ne!(first["isError"], true, "{first}");
+    assert_eq!(f.mock.chat_bodies().len(), 8);
+    let conversation = conversation_of(&f.vault_dir, &f.slug);
+    let artifacts = idea_vault::vault::store::read_artifacts(&f.vault_dir, &f.slug)
+        .unwrap()
+        .len();
+
+    let unkeyed = json!({ "slug": f.slug, "name": "exhaust" });
+    for args in [keyed, unkeyed] {
+        let again = call_until_done(&f.app, &f.session, "run_workflow", args.clone()).await;
+        assert_ne!(again["isError"], true, "{again}");
+        let text = text_of(&again);
+        assert!(
+            text.starts_with(REPLAY_PREFIX) && text.ends_with(&text_of(&first)),
+            "{args} replays the served turn: {text}"
+        );
+        assert_eq!(
+            workflow_artifacts(&again),
+            workflow_artifacts(&first),
+            "{args} replays the same artifact slugs"
+        );
+    }
+    assert_eq!(f.mock.chat_bodies().len(), 8, "no second run");
+    assert_eq!(conversation_of(&f.vault_dir, &f.slug), conversation);
+    assert_eq!(
+        idea_vault::vault::store::read_artifacts(&f.vault_dir, &f.slug)
+            .unwrap()
+            .len(),
+        artifacts,
+        "no second set of stage artifacts"
+    );
+
+    // The key names one operation: reusing it for a different workflow is refused, not replayed.
+    let reused = call_tool_body(
+        &f.app,
+        &f.session,
+        "run_workflow",
+        json!({ "slug": f.slug, "name": "interrogate", "idempotency_key": "wf-1" }),
+    )
+    .await;
+    assert_eq!(reused["error"]["code"], -32602, "{reused}");
 }
