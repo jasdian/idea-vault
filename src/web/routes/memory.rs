@@ -415,28 +415,39 @@ pub async fn run_workflow(
     State(state): State<AppState>,
     Path((slug, name)): Path<(String, String)>,
 ) -> Result<axum::response::Html<String>, WebError> {
-    let vault_dir = state.config.vault_dir.clone();
-    let idea = store::read_idea(&vault_dir, &slug)?; // 404 if missing
-    guard_discussion_state(idea.frontmatter.state)?;
-    // Unknown name is a synchronous 404, not an error turn (run_workflow checks again, but that
-    // now runs in the background task).
-    if concepts::workflows::get_workflow(&name).is_none() {
-        return Err(WebError::NotFound(format!("workflow: {name}")));
-    }
+    let idea = store::read_idea(&state.config.vault_dir, &slug)?; // 404 if missing
+    guard_workflow(&idea, &name)?;
 
     if !jobs::try_claim(&state.jobs, &slug) {
         return respond_with_transcript(&state, &slug);
     }
+    spawn_workflow_job(&state, &slug, name);
+    respond_with_transcript(&state, &slug)
+}
+
+/// R22's synchronous guards, shared with the plan workbench's re-plan (R48) and the MCP
+/// `build_plan` tool (HND-10, docs/adr/0032): the idea must be in an active discussion state, and
+/// an unknown name is a synchronous 404, not an error turn (`run_workflow` checks again, but that
+/// runs in the background task).
+pub(crate) fn guard_workflow(idea: &Idea, name: &str) -> Result<(), WebError> {
+    guard_discussion_state(idea.frontmatter.state)?;
+    if concepts::workflows::get_workflow(name).is_none() {
+        return Err(WebError::NotFound(format!("workflow: {name}")));
+    }
+    Ok(())
+}
+
+/// Spawn R22's detached workflow job on an already-claimed slot — see [`spawn_skill_job`].
+pub(crate) fn spawn_workflow_job(state: &AppState, slug: &str, name: String) {
     let ts = state.clone();
-    let tslug = slug.clone();
-    let abort = jobs::spawn_job(&state.jobs, &slug, async move {
+    let tslug = slug.to_string();
+    let abort = jobs::spawn_job(&state.jobs, slug, async move {
         match run_workflow_work(&ts, &tslug, &name).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
     });
-    jobs::set_abort(&state.jobs, &slug, abort);
-    respond_with_transcript(&state, &slug)
+    jobs::set_abort(&state.jobs, slug, abort);
 }
 
 async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(), String> {

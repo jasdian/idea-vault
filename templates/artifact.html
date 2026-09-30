@@ -6,6 +6,10 @@
   <span class="artifacts__meta">{{ meta }} · <code>artifacts/{{ file_name }}</code></span>
 </div>
 
+{# The workbench sits above the plan body and the copy blocks: what the plan still needs from the
+   owner comes first (docs/adr/0032). A Rust-rendered partial, so `safe` is the pre-rendered rule. #}
+{% if let Some(work) = plan_work %}{{ work|safe }}{% endif %}
+
 <div class="statement">{{ content_html|safe }}</div>
 
 {% if let Some(prompt) = prompt_md %}{% if let Some(attack) = attack_plan_md %}

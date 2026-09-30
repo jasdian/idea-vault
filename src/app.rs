@@ -9,7 +9,7 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::web::routes::{
-    admin, artifacts, chat, compact, ideas, mcp, memory, settings, skills, sources,
+    admin, artifacts, chat, compact, ideas, mcp, memory, plans, settings, skills, sources,
 };
 pub use crate::web::state::AppState;
 
@@ -54,6 +54,11 @@ pub fn build_router(state: AppState) -> Router {
             "/idea/{slug}/artifact/{name}/delete",
             post(artifacts::delete_artifact),
         )
+        // The plan workbench (docs/adr/0032): answer into a new version, the lineage head, and
+        // a model re-plan as a background job.
+        .route("/idea/{slug}/plan/latest", get(plans::latest_plan))
+        .route("/idea/{slug}/plan/{stem}/answer", post(plans::answer_plan))
+        .route("/idea/{slug}/plan/{stem}/replan", post(plans::replan))
         // Chat + the background-job poll endpoint (D11 async model call).
         .route("/idea/{slug}/chat", post(chat::chat))
         // Remove a message still waiting in the per-idea send queue.

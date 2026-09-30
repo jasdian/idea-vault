@@ -1,0 +1,115 @@
+{# The plan workbench (docs/adr/0032): what this plan still needs from the owner, and the two ways
+   forward — answer in your own words (a deterministic new version, no model call) or re-plan
+   with the model. Forms render only on the lineage head of an idea in discussion. The answer
+   form swaps this section on a 422 (the field errors, with the owner's words kept); a 409 or
+   400 lands its text in the flash line instead, since htmx swaps no error response by default. #}
+<section class="planwork" id="work">
+  <h2 class="planwork__title">Work this plan</h2>
+  <p class="planwork__lineage">
+    <span class="planwork__v">v{{ version }}</span>
+    {% if let Some(base) = revises %} · revises <a href="/idea/{{ slug }}/artifact/{{ base }}.md#work">{{ base }}</a>{% endif %}
+    {% if !answered.is_empty() %} · answered {{ answered|join(", ") }}{% endif %}
+    · <span class="planwork__mode">{{ mode }}</span>
+  </p>
+  {% if lineage.len() > 1 %}
+  <ol class="planwork__trail" aria-label="plan versions">
+    {% for step in lineage %}
+    <li>{% if step.stem == stem %}<b>v{{ step.version }}</b>{% else %}<a href="/idea/{{ slug }}/artifact/{{ step.stem }}.md#work">v{{ step.version }}</a>{% endif %}</li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+
+  {% if !is_head %}
+  <p class="planwork__superseded" role="note">
+    Superseded{% for s in superseded_by %} by <a href="/idea/{{ slug }}/artifact/{{ s }}.md#work">{{ s }}</a>{% endfor %} →
+    answers go on the latest version, <a href="/idea/{{ slug }}/artifact/{{ head }}.md#work">{{ head }}</a>. This page is kept as it was.
+  </p>
+  {% else if !can_answer %}
+  <p class="planwork__superseded" role="note">The idea is stored — reopen it to answer this plan.</p>
+  {% endif %}
+
+  {% if open.is_empty() && blocked.is_empty() %}
+  <p class="planwork__done">Nothing here waits on you: no open question, no task held for your decision.</p>
+  {% else if is_answerable() %}
+  <ol class="planwork__how">
+    <li>Answer a question or a held task below, in your own words. Leave the rest empty.</li>
+    <li><b>Save answers</b> makes v{{ version + 1 }} at once — no model call. Each answer is saved as your turn in the conversation, the tasks it held are released, and the plan is re-checked. This version stays as it is.</li>
+    <li>Or <b>re-plan with the model</b> to rewrite the whole plan around what you have answered.</li>
+  </ol>
+  {% endif %}
+
+  {% if is_answerable() %}
+  <form class="planwork__form" hx-post="/idea/{{ slug }}/plan/{{ stem }}/answer"
+        hx-target="#work" hx-swap="outerHTML" hx-disabled-elt="find .planwork__save"
+        hx-on::before-swap="if (event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }"
+        hx-on::response-error="this.querySelector('.planwork__flash').textContent = event.detail.xhr.responseText">
+  {% endif %}
+
+  {% if !open.is_empty() %}
+  <h3 class="planwork__label">Open questions · {{ open.len() }}</h3>
+  {% for q in open %}
+  <details class="planwork__item" id="q-{{ q.id }}" open>
+    <summary><span class="planwork__id">{{ q.id }}</span> {{ q.text }}{% if !q.blocks.is_empty() %} <span class="planwork__holds">holds {{ q.blocks|join(", ") }}</span>{% endif %}</summary>
+    {% for m in q.markers %}<p class="planwork__marker">{{ m }}</p>{% endfor %}
+    {% if is_answerable() %}
+    <label class="planwork__hint" for="answer-{{ q.id }}">your own words, ≥3 words; saved as your turn in the conversation</label>
+    <textarea class="planwork__field" id="answer-{{ q.id }}" name="{{ q.id }}" rows="3">{{ q.value }}</textarea>
+    {% endif %}
+    {% if let Some(e) = q.error %}<p class="planwork__err" role="alert">{{ e }}</p>{% endif %}
+    {% if let Some(h) = q.hedge %}<p class="planwork__hedge" role="note">“{{ h }}” reads as undecided — a hedged answer keeps the question open. Say what you chose.</p>{% endif %}
+  </details>
+  {% endfor %}
+  {% endif %}
+
+  {% if !blocked.is_empty() %}
+  <h3 class="planwork__label">Tasks waiting on you · {{ blocked.len() }}</h3>
+  {% for t in blocked %}
+  <div class="planwork__item planwork__item--task" id="t-{{ t.id }}">
+    <p class="planwork__task"><span class="planwork__id">{{ t.id }}</span> {{ t.text }}</p>
+    <ul class="planwork__reasons">
+      {% for b in t.blocked_by %}
+      <li>blocked by {% if b.starts_with("Q") %}<a href="#q-{{ b }}">{{ b }}</a> — answer it above{% else %}<a href="#t-{{ b }}">{{ b }}</a> — released with it{% endif %}</li>
+      {% endfor %}
+      {% for r in t.reasons %}{% if !r.starts_with("blocked by ") %}<li>{{ r }}</li>{% endif %}{% endfor %}
+    </ul>
+    {% if t.answerable %}
+    {% if is_answerable() %}
+    <label class="planwork__hint" for="answer-{{ t.id }}">decide it in your own words, ≥3 words — releases {{ t.id }}; saved as your turn in the conversation</label>
+    <textarea class="planwork__field" id="answer-{{ t.id }}" name="{{ t.id }}" rows="2">{{ t.value }}</textarea>
+    {% endif %}
+    {% else if t.blocked_by.is_empty() %}
+    <p class="planwork__marker">an answer here cannot release this — re-plan with the model</p>
+    {% endif %}
+    {% if let Some(e) = t.error %}<p class="planwork__err" role="alert">{{ e }}</p>{% endif %}
+    {% if let Some(h) = t.hedge %}<p class="planwork__hedge" role="note">“{{ h }}” reads as undecided — say what you chose.</p>{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if is_answerable() %}
+  {% if !open.is_empty() || !blocked.is_empty() %}
+  <div class="planwork__submit">
+    <button type="submit" class="btn planwork__save">Save answers → new version</button>
+    <span class="planwork__note">no model call · makes v{{ version + 1 }}</span>
+  </div>
+  {% endif %}
+  <p class="planwork__flash" role="alert">{% if let Some(e) = form_error %}{{ e }}{% endif %}</p>
+  </form>
+
+  <div class="planwork__replan">
+    <span class="planwork__label planwork__label--inline">Re-plan with the model</span>
+    <form hx-post="/idea/{{ slug }}/plan/{{ stem }}/replan" hx-disabled-elt="find button"
+          hx-on::response-error="this.parentElement.querySelector('.planwork__flash').textContent = event.detail.xhr.responseText">
+      <input type="hidden" name="audited" value="0">
+      <button type="submit" class="chip chip--build" title="1 model call: a new plan version from the discussion, your answers carried in. Runs in the background.">⌁ quick re-plan</button>
+    </form>
+    <form hx-post="/idea/{{ slug }}/plan/{{ stem }}/replan" hx-disabled-elt="find button"
+          hx-on::response-error="this.parentElement.querySelector('.planwork__flash').textContent = event.detail.xhr.responseText">
+      <input type="hidden" name="audited" value="1">
+      <button type="submit" class="chip chip--build chip--build-audited" title="About 7 model calls: harvest, audit, plan — your answers carried in. Runs in the background.">⌁⌁ audited re-plan</button>
+    </form>
+    <span class="planwork__note">rewrites the plan around your answers; answered questions are not asked again</span>
+    <p class="planwork__flash" role="alert"></p>
+  </div>
+  {% endif %}
+</section>

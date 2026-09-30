@@ -311,20 +311,51 @@ pub(crate) fn skill_tooltip(skill: &crate::concepts::skills::Skill) -> String {
     }
 }
 
+/// What [`render_actions`] renders from.
+pub(crate) struct ActionsInput<'a> {
+    pub vault_dir: &'a std::path::Path,
+    pub slug: &'a str,
+    pub skills: &'a crate::concepts::skills::SkillRegistry,
+    pub conversation: &'a str,
+    pub can_store: bool,
+    pub busy: bool,
+    pub settings: &'a crate::ai::LlmSettings,
+    pub oob: bool,
+}
+
+/// The "Plan · vN · k open" chip for the idea's plan lineage head (docs/adr/0032). Degrades to
+/// no chip: an unreadable plan must not take the moves block (and the idea page) down.
+fn plan_chip(vault_dir: &std::path::Path, slug: &str) -> Option<crate::web::templates::PlanChip> {
+    use crate::concepts::build_plan::workbench::{plan_view, WorkbenchError};
+    match plan_view(vault_dir, slug, None) {
+        Ok(view) => Some(crate::web::templates::PlanChip {
+            version: view.version,
+            open: view.open.len(),
+        }),
+        Err(WorkbenchError::NotFound(_)) => None,
+        Err(e) => {
+            tracing::warn!(slug, error = %e, "plan chip skipped");
+            None
+        }
+    }
+}
+
 /// Render the `#idea-actions` block (`_actions.html`) — the state-dependent moves/swarm/store
 /// controls. Shared by the full-page `_discussion.html` render (`oob = false`) and the
 /// out-of-band fragment appended to transcript responses (`oob = true`).
-pub(crate) fn render_actions(
-    slug: &str,
-    skills: &crate::concepts::skills::SkillRegistry,
-    conversation: &str,
-    can_store: bool,
-    busy: bool,
-    settings: &crate::ai::LlmSettings,
-    oob: bool,
-) -> Result<String, WebError> {
+pub(crate) fn render_actions(input: ActionsInput) -> Result<String, WebError> {
     use crate::domain::SkillStage;
     use askama::Template as _;
+    let ActionsInput {
+        vault_dir,
+        slug,
+        skills,
+        conversation,
+        can_store,
+        busy,
+        settings,
+        oob,
+    } = input;
     // The workflow chips come straight off the static built-in registry — no caller threading.
     let workflows = crate::concepts::workflows::builtin_workflows()
         .iter()
@@ -391,6 +422,7 @@ pub(crate) fn render_actions(
         workflows,
         backend_note: backend_note(settings.backend),
         audit_on: settings.audit_findings,
+        plan: plan_chip(vault_dir, slug),
         oob,
     }
     .render()
@@ -446,15 +478,16 @@ pub(crate) fn respond_with_transcript(
     );
     let skills = state.skills.snapshot();
     html.push_str(&state_badge_oob(idea.frontmatter.state));
-    html.push_str(&render_actions(
+    html.push_str(&render_actions(ActionsInput {
+        vault_dir: &state.config.vault_dir,
         slug,
-        &skills,
-        &conversation,
+        skills: &skills,
+        conversation: &conversation,
         can_store,
         busy,
-        &llm.settings(),
-        true,
-    )?);
+        settings: &llm.settings(),
+        oob: true,
+    })?);
     // Third OOB fragment: the artifacts panel, so a finished extraction (or any transcript
     // refresh) surfaces the new files without a reload — the panel sits outside `#transcript`.
     html.push_str(&crate::web::routes::artifacts::render_artifacts_panel(
@@ -762,8 +795,16 @@ pub(crate) fn build_discussion(
         budget_bytes,
         tools_bytes,
     )?;
-    let actions_html =
-        render_actions(slug, skills, conversation, can_store, busy, settings, false)?;
+    let actions_html = render_actions(ActionsInput {
+        vault_dir,
+        slug,
+        skills,
+        conversation,
+        can_store,
+        busy,
+        settings,
+        oob: false,
+    })?;
     let queue_html = render_queue_panel(slug, queued_items, false)?;
 
     Ok(crate::web::templates::Discussion {
