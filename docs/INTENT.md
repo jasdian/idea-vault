@@ -69,3 +69,12 @@ expectation changes are red.
 - concepts::workflows::rounds::tests::refine_skips_with_zero_calls_when_clean: the call budget is
   charged by the backend's request meter instead of by `charge` calls (ADR-0037), so the test's
   dead backend carries the budget's meter; the zero-calls assertion stays.
+- tests/fixtures/raw-outputs/: new parser corpus (ADR-0038), ten hand-seeded cases (a clean, a
+  garbled and a partial audit; an escaped-quote and an invented-quote store extraction; three
+  contract answers; a gated and an unusable build plan). Later cases come only from an explicit
+  `idea-vault regrade --export`.
+- tests/fixtures/parser-corpus.snap: new snapshot of today's verdict line per corpus case
+  (ADR-0038), written once with `PARSER_CORPUS_BLESS=1 cargo test --test parser_corpus`.
+- journal_flow::skill_job_writes_started_llmcall_contract_finished: the journaled sequence gains the
+  `verdict` entry P2 writes beside each contract-checked call (ADR-0038); every other assertion
+  stays.

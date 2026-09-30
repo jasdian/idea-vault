@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use tokio::sync::Semaphore;
 
+use crate::ai::call::CallMeta;
 use crate::ai::contract::{self, ContractOutcome};
 use crate::ai::ollama::ChatMessage;
 use crate::ai::{LlmBackend, RoleProfile};
@@ -187,6 +188,19 @@ pub async fn run_agent(
     registry: &SkillRegistry,
     task: AgentTask,
 ) -> Result<AgentResult, ConceptError> {
+    run_agent_meta(ollama, ai_semaphore, registry, task)
+        .await
+        .map(|(result, _)| result)
+}
+
+/// [`run_agent`] plus the call's [`CallMeta`], for a caller that journals its own verdict on the
+/// answer (the Auditor, docs/adr/0038).
+pub async fn run_agent_meta(
+    ollama: &LlmBackend,
+    ai_semaphore: &Semaphore,
+    registry: &SkillRegistry,
+    task: AgentTask,
+) -> Result<(AgentResult, CallMeta), ConceptError> {
     let prompt = build_prompt(registry, &task)?;
 
     let llm = ollama.for_role(task.role.as_str());
@@ -202,6 +216,9 @@ pub async fn run_agent(
         .await?
     };
     let (content, meta) = content;
+    if let Some(skill) = task.skill.as_deref().and_then(|name| registry.get(name)) {
+        llm.record_contract_verdict(&meta, skill.contract, &content);
+    }
 
     // Repair only, never retry (docs/adr/0023): a retry per fan-out agent would double the
     // fan-out's model calls. A lens whose answer can't be repaired degrades to the raw text, and
@@ -241,12 +258,15 @@ pub async fn run_agent(
     if content.is_empty() {
         tracing::warn!(role = task.role.as_str(), "agent returned empty output");
     }
-    Ok(AgentResult {
-        role: task.role,
-        lens: task.skill,
-        content,
-        contract: outcome,
-    })
+    Ok((
+        AgentResult {
+            role: task.role,
+            lens: task.skill,
+            content,
+            contract: outcome,
+        },
+        meta,
+    ))
 }
 
 #[cfg(test)]

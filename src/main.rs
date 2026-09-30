@@ -3,7 +3,8 @@
 //! Load config → ensure the vault dir → open the index (create if missing) → reindex if drifted →
 //! spawn a non-blocking LLM-backend probe (absence is valid, D20) → build state + router → bind and
 //! serve. Boot must never block on the model and must not crash on a reindex error. A `import
-//! <dir>` subcommand runs the Obsidian importer instead of the server (docs/adr/0009).
+//! <dir>` subcommand runs the Obsidian importer instead of the server (docs/adr/0009), and a
+//! `regrade` subcommand replays the parsers over the run journals (docs/adr/0038).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
             config.vault_dir.display()
         );
         return Ok(());
+    }
+
+    // Subcommand: `idea-vault regrade …` replays today's parsers over the run journals and exits
+    // without starting the server (docs/adr/0038). Read-only on the vault.
+    if args.get(1).map(String::as_str) == Some("regrade") {
+        return regrade_command(&config.vault_dir, &args[2..]);
     }
 
     // 2. Vault dir (source of truth). Boot does not fail on a suspect vault: under compose's
@@ -242,4 +249,60 @@ fn claude_system_prompt(add_dirs: &[PathBuf]) -> Option<String> {
          the idea, Grep/Read those directories for relevant prior thinking and cite what you find. \
          Do not modify the owner's files unless they explicitly ask."
     ))
+}
+
+const REGRADE_USAGE: &str = "usage: idea-vault regrade [--idea <slug>] \
+[--parser audit|facts|contract|plan-gates] [--strict]\n       \
+idea-vault regrade --export <slug>/<run_id>#<seq> <case-name>";
+
+/// `idea-vault regrade`: print the flip report and exit 0, or 1 on a flip under `--strict`.
+/// `--export` copies one journaled answer into the repo's parser corpus, relative to the working
+/// directory (docs/adr/0038; only ever by hand, owner decision 2026-09-30).
+fn regrade_command(vault: &std::path::Path, args: &[String]) -> anyhow::Result<()> {
+    use idea_vault::regrade;
+    if args.first().map(String::as_str) == Some("--export") {
+        let [_, reference, case] = args else {
+            anyhow::bail!("{REGRADE_USAGE}");
+        };
+        let path = regrade::export(
+            vault,
+            reference,
+            case,
+            std::path::Path::new(regrade::CORPUS_DIR),
+        )?;
+        println!(
+            "exported {reference} to {} — run PARSER_CORPUS_BLESS=1 cargo test --test \
+             parser_corpus to add it to the snapshot",
+            path.display()
+        );
+        return Ok(());
+    }
+    let mut filter = regrade::Filter::default();
+    let mut strict = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--idea" => match rest.next() {
+                Some(slug) => filter.idea = Some(slug.clone()),
+                None => anyhow::bail!("{REGRADE_USAGE}"),
+            },
+            "--parser" => {
+                let p = rest.next().cloned();
+                if !p
+                    .as_deref()
+                    .is_some_and(|p| ["audit", "facts", "contract", "plan-gates"].contains(&p))
+                {
+                    anyhow::bail!("{REGRADE_USAGE}");
+                }
+                filter.parser = p;
+            }
+            "--strict" => strict = true,
+            _ => anyhow::bail!("unknown argument {arg}\n{REGRADE_USAGE}"),
+        }
+    }
+    let stats = regrade::run(vault, &filter, &mut std::io::stdout().lock())?;
+    if strict && stats.flips() > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }

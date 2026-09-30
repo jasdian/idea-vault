@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::call::CallMeta;
 use crate::ai::contract::ContractOutcome;
+use crate::ai::verdict::{HaystackRef, ParserKind};
 
 /// The journal line format; bumped on any incompatible entry change.
 pub const FORMAT_VERSION: u32 = 1;
@@ -112,6 +113,15 @@ pub enum JournalEntry {
         result_text: String,
         is_error: bool,
     },
+    /// A deterministic parser's verdict on the answer of call `call_seq`, as
+    /// `regrade::summarize` wrote it (docs/adr/0038): what `regrade` replays today's parser
+    /// against. `haystack` names the evidence a grounding parser read.
+    Verdict {
+        call_seq: u32,
+        parser: ParserKind,
+        summary: String,
+        haystack: Option<HaystackRef>,
+    },
     /// How the answer of call `call_seq` met its output contract (docs/adr/0023).
     Contract {
         call_seq: u32,
@@ -136,6 +146,10 @@ pub struct JournalWriter {
     broken: bool,
     next_seq: u32,
     llm_calls: u32,
+    /// The call each contract last settled on, by contract name: how a verdict computed after
+    /// the call returned (a build plan's gates run once the planner's answer is kept) finds the
+    /// call it judges.
+    last_contract_call: std::collections::BTreeMap<String, u32>,
 }
 
 /// A run's journal as the job and every scoped backend clone share it.
@@ -157,6 +171,7 @@ impl JournalWriter {
             broken: false,
             next_seq: 1,
             llm_calls: 0,
+            last_contract_call: std::collections::BTreeMap::new(),
         };
         writer.append(&started)?;
         Ok(writer)
@@ -234,11 +249,34 @@ impl JournalWriter {
 
     /// Record how call `call_seq`'s answer met `contract`.
     pub fn record_contract(&mut self, call_seq: u32, contract: &str, outcome: ContractOutcome) {
+        self.last_contract_call
+            .insert(contract.to_string(), call_seq);
         self.append_logged(&JournalEntry::Contract {
             call_seq,
             contract: contract.to_string(),
             outcome,
         });
+    }
+
+    /// Record a parser's verdict on the answer of call `call_seq` (docs/adr/0038).
+    pub fn record_verdict(
+        &mut self,
+        call_seq: u32,
+        parser: ParserKind,
+        summary: String,
+        haystack: Option<HaystackRef>,
+    ) {
+        self.append_logged(&JournalEntry::Verdict {
+            call_seq,
+            parser,
+            summary,
+            haystack,
+        });
+    }
+
+    /// The call `contract` (its frontmatter name) last settled on in this run, if any.
+    pub fn last_contract_call(&self, contract: &str) -> Option<u32> {
+        self.last_contract_call.get(contract).copied()
     }
 }
 

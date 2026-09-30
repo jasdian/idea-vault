@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 
 use crate::ai::contract;
 use crate::ai::sources::SourceProbe;
+use crate::ai::verdict::{Haystack, HaystackRef};
 use crate::concepts::audit::Label;
 use crate::concepts::build_plan::gates::{
     self, AuditView, Evidence, GateInputs, GateReport, OpenArtifact,
@@ -23,7 +24,7 @@ use crate::concepts::build_plan::plan::{self, BuildPlan, Provenance};
 use crate::concepts::ConceptError;
 use crate::domain::evidence::POINTER_PREFIX;
 use crate::domain::frontmatter::ArtifactFrontmatter;
-use crate::domain::{slug, Artifact, ArtifactKind};
+use crate::domain::{slug, Artifact, ArtifactKind, OutputContract};
 use crate::vault::store;
 
 /// The harvest lens whose artifacts list an idea's open questions.
@@ -68,6 +69,10 @@ pub struct Finished {
     pub pointer: String,
     pub report: GateReport,
     pub plan: BuildPlan,
+    /// [`summarize_plan_gates`] of the answer against the evidence it was gated on, and where
+    /// that evidence is: what the run journal records for `regrade` (docs/adr/0038).
+    pub verdict: String,
+    pub evidence: HaystackRef,
 }
 
 /// `<stamp>-open-questions` or a same-second `<stamp>-open-questions-<n>`.
@@ -320,6 +325,51 @@ fn pointer_turn(
     out
 }
 
+/// The canonical verdict line for a planner answer (docs/adr/0038): repair it as its output
+/// contract would, parse it and run the gates against `haystack` alone — no audit, open-questions artifact, owner answers or attached
+/// sources, because none of those can be replayed from the journal. `pass` counts the settled
+/// claims and tasks that survive, then the section sizes and the gates' tally (as `gate.<key>`)
+/// follow. The line therefore judges the parser and the evidence-driven gates, not a run's full
+/// inputs.
+pub fn summarize_plan_gates(raw: &str, haystack: Option<Haystack>) -> String {
+    // Repair is idempotent, so the raw journaled answer and the kept (already repaired) one
+    // summarize alike; the parser corpus holds that for every plan fixture.
+    let text = contract::validate(OutputContract::BuildPlan, raw)
+        .unwrap_or_else(|_| raw.trim().to_string());
+    let Ok(mut plan) = plan::parse(&text) else {
+        return "pass=0 unusable".to_string();
+    };
+    let evidence = haystack
+        .map(|h| Evidence::new(h.idea_body, h.conversation))
+        .unwrap_or_default();
+    let probe = SourceProbe::new(&[]);
+    let report = gates::run(
+        &mut plan,
+        &GateInputs {
+            evidence: &evidence,
+            open_artifact: None,
+            audit: None,
+            probe: &probe,
+            answered: &[],
+        },
+    );
+    let mut line = format!(
+        "pass={} settled={} verify={} open={} tasks={} kills={} quarantined={} missing={}",
+        plan.settled.len() + plan.tasks.len(),
+        plan.settled.len(),
+        plan.verify.len(),
+        plan.open.len(),
+        plan.tasks.len(),
+        plan.kills.len(),
+        plan.quarantined.len(),
+        plan.missing.len(),
+    );
+    for (key, n) in &report.tally {
+        line.push_str(&format!(" gate.{}={n}", key.replace(' ', "_")));
+    }
+    line
+}
+
 /// Parse, gate and persist one build plan: every read first, then the artifact, then the
 /// pointer turn. An answer with neither a goal nor a task is [`ConceptError::PlanUnusable`] and
 /// persists nothing. Being blocking, it runs to completion once started — aborting the job that
@@ -339,6 +389,12 @@ pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, Concept
     let idea = store::read_idea(inputs.vault_dir, inputs.idea_slug)?;
     let conversation = store::read_conversation(inputs.vault_dir, inputs.idea_slug)?;
     let evidence = Evidence::new(&idea.body, &conversation);
+    let haystack = Haystack {
+        idea_body: &idea.body,
+        conversation: &conversation,
+    };
+    let verdict = summarize_plan_gates(inputs.answer, Some(haystack));
+    let evidence_ref = HaystackRef::of(haystack);
     let excluded = excluded_turns(&conversation);
     let (open_artifact, open_note) = latest_open_questions(inputs.vault_dir, inputs.idea_slug)?;
     let plans = lineage::list_plans(inputs.vault_dir, inputs.idea_slug)?;
@@ -406,6 +462,8 @@ pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, Concept
         pointer,
         report,
         plan,
+        verdict,
+        evidence: evidence_ref,
     })
 }
 

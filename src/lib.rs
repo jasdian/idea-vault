@@ -10,6 +10,7 @@ pub mod import;
 pub mod index;
 pub mod mcp;
 pub mod memory;
+pub mod regrade;
 pub mod sources;
 pub mod vault;
 pub mod web;

@@ -458,6 +458,23 @@ pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation
     }
 }
 
+/// The canonical verdict line for `raw` checked against `contract` (docs/adr/0038): `pass=1` with
+/// the repaired answer's item and line counts, or `pass=0` with the violation. The violation is
+/// its variant, not its prose, so rewording a retry note is not a flip.
+pub fn summarize_contract(contract: OutputContract, raw: &str) -> String {
+    match validate(contract, raw) {
+        Ok(repaired) => format!(
+            "pass=1 items={} lines={}",
+            items(&repaired).len(),
+            repaired.lines().count()
+        ),
+        Err(violation) => format!(
+            "pass=0 violation={}",
+            format!("{violation:?}").replace([' ', '"'], "")
+        ),
+    }
+}
+
 /// The list items of a bullets or numbered answer, markers stripped — how an orchestrator splits
 /// one agent's answer into separately auditable findings. Text with no list becomes one item.
 pub fn items(text: &str) -> Vec<String> {

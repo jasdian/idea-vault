@@ -15,8 +15,9 @@ use tokio::sync::Semaphore;
 
 use crate::ai::budget::ContextBudget;
 use crate::ai::contract;
+use crate::ai::verdict::ParserKind;
 use crate::ai::LlmBackend;
-use crate::concepts::agents::{run_agent, AgentResult, AgentRole, AgentTask};
+use crate::concepts::agents::{run_agent_meta, AgentResult, AgentRole, AgentTask};
 use crate::concepts::skills::{hydrate_context, SkillRegistry};
 use crate::concepts::ConceptError;
 
@@ -264,6 +265,51 @@ pub fn parse_audit(raw: &str, n: usize) -> AuditReport {
     }
 }
 
+/// The canonical verdict line for an audit answer over `n` findings (docs/adr/0038): `pass` is how
+/// many findings the auditor answered, then one `F<i>=LABEL` per finding, `unanswered` where
+/// [`parse_audit`] fell back to its default. The run journal and the parser corpus both record
+/// this line, so a parser change shows up as a flip in either.
+pub fn summarize_audit(raw: &str, n: usize) -> String {
+    let report = parse_audit(raw, n);
+    let mut line = format!("pass={} n={n} failed={}", report.answered, report.failed);
+    let answered = answered_ids(raw, n);
+    for (i, v) in report.verdicts.iter().enumerate() {
+        let label = if answered.contains(&(i + 1)) {
+            v.label.as_str()
+        } else {
+            "unanswered"
+        };
+        line.push_str(&format!(" F{}={label}", i + 1));
+    }
+    line
+}
+
+/// The finding ids `raw` gave a verdict line for, by the same rules as [`parse_audit`].
+fn answered_ids(raw: &str, n: usize) -> Vec<usize> {
+    (1..=n)
+        .filter(|&id| {
+            // Answered iff its own lines, parsed alone, still yield a verdict: this reuses
+            // parse_audit's label rules instead of restating them.
+            let own: Vec<&str> = raw
+                .lines()
+                .filter(|l| audit_line_id(l) == Some(id))
+                .collect();
+            !own.is_empty() && parse_audit(&own.join("\n"), n).answered == 1
+        })
+        .collect()
+}
+
+/// The `F<i>` id a line starts with, after the markers [`parse_audit`] tolerates.
+fn audit_line_id(line: &str) -> Option<usize> {
+    let t = line
+        .trim()
+        .trim_start_matches(['-', '*', ' '])
+        .trim_start_matches("**");
+    let rest = t.strip_prefix(['F', 'f'])?;
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    rest[..digits].parse().ok()
+}
+
 /// Run the Auditor over `findings` for `idea_slug`: one bounded model call (its own permit via
 /// `run_agent` — callers must not hold one) whose context is the numbered findings plus the
 /// idea/memory/discussion, budgeted to what is left after the findings. Never fails the run: a
@@ -302,9 +348,15 @@ pub async fn audit(
             material.text
         ),
     };
-    match run_agent(llm, ai_semaphore, registry, task).await {
-        Ok(answer) => {
+    match run_agent_meta(llm, ai_semaphore, registry, task).await {
+        Ok((answer, meta)) => {
             let report = parse_audit(&answer.content, findings.len());
+            llm.record_verdict(
+                &meta,
+                ParserKind::Audit { n: findings.len() },
+                summarize_audit(&answer.content, findings.len()),
+                None,
+            );
             if report.failed {
                 tracing::warn!(
                     idea_slug,

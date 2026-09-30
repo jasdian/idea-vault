@@ -1,0 +1,10 @@
+audit/clean pass=3 n=3 failed=false F1=CONFIRMED F2=REFUTED F3=UNCERTAIN
+audit/garbled-prose pass=0 n=3 failed=true F1=unanswered F2=unanswered F3=unanswered
+audit/partial-with-markup pass=2 n=4 failed=false F1=CONFIRMED F2=unanswered F3=REFUTED F4=unanswered
+contract/bullets-answered-in-prose pass=0 violation=NotBullets
+contract/fenced-block-unclosed pass=0 violation=NoFencedBlock
+contract/ranked-list-with-preamble pass=1 items=3 lines=5
+facts/escaped-quote-grounds pass=2 facts=2 tags=pricing,saas fact1=add:kept fact2=add:kept
+facts/invented-quote-and-noop pass=1 facts=4 tags=solo,launch,a-b-c fact1=add:kept fact2=add:held fact3=noop:noop fact4=update(launch-plan):held
+plan-gates/headings-missing pass=0 unusable
+plan-gates/unquoted-settled-claim pass=2 settled=1 verify=0 open=1 tasks=1 kills=1 quarantined=1 missing=0 gate.leaf_ok=1 gate.quarantined=1 gate.settled_owner=1 gate.waves=1

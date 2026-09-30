@@ -19,6 +19,8 @@
 //! - [`contract`] — pure output-shape checks + repair for skill answers (docs/adr/0023).
 //! - [`untrusted`] — the fence every tool result passes through before it reaches the Ollama
 //!   tool loop as a `role: "tool"` message (ADR-0039).
+//! - [`verdict`] — the parser kind and evidence reference a journaled verdict names, which the
+//!   `regrade` subcommand replays (docs/adr/0038).
 //! - [`web`] — keyless web-search + page-fetch tool leaves (ADR-0017), executed by the router's
 //!   bounded Ollama tool loop; claude-code uses its own WebSearch/WebFetch instead.
 //! - [`sources`] — deterministic read-only tool leaves (`source_list`/`source_grep`/`source_read`)
@@ -41,6 +43,7 @@ pub mod ollama;
 pub mod sources;
 pub mod stream;
 pub mod untrusted;
+pub mod verdict;
 pub mod web;
 
 pub use backend::{LlmBackend, LlmBackendKind, LlmSettings, RoleProfile};

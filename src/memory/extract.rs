@@ -22,6 +22,7 @@ use chrono::Utc;
 
 use crate::ai::budget::{assemble_context, ContextBudget, ContextInput};
 use crate::ai::ollama::ChatMessage;
+use crate::ai::verdict::{Haystack, HaystackRef, ParserKind};
 use crate::ai::LlmBackend;
 use crate::domain::evidence::{grounded, normalize_for_match};
 use crate::domain::{links, slug as domain_slug};
@@ -265,6 +266,54 @@ fn parse_facts(raw: &str) -> Vec<Candidate> {
         .collect()
 }
 
+/// The evidence gate: a fact is kept only when its quote occurs in `haystack` (normalized, from
+/// [`evidence_haystack`]).
+fn quote_grounds(candidate: &Candidate, haystack: &str) -> bool {
+    candidate
+        .quote
+        .as_deref()
+        .is_some_and(|q| grounded(q, haystack))
+}
+
+/// The canonical verdict line for an extraction answer (docs/adr/0038): `pass` is how many facts
+/// the evidence gate keeps, then the parsed tags and one `fact<i>=<op>:<gate>` per candidate,
+/// where the gate is `kept`, `held` or `noop`. Without a haystack the gate cannot run, so each
+/// fact reads `quoted` or `unquoted` and `pass` counts the quoted ones.
+pub fn summarize_facts(raw: &str, haystack: Option<Haystack>) -> String {
+    let candidates = parse_facts(raw);
+    let normalized = haystack.map(|h| evidence_haystack(h.idea_body, h.conversation));
+    let mut pass = 0;
+    let mut facts = String::new();
+    for (i, c) in candidates.iter().enumerate() {
+        let op = match &c.op {
+            FactOp::Add => "add".to_string(),
+            FactOp::Update(slug) => format!("update({slug})"),
+            FactOp::Noop => "noop".to_string(),
+        };
+        let gate = match (&c.op, &normalized) {
+            (FactOp::Noop, _) => "noop",
+            (_, Some(hay)) if quote_grounds(c, hay) => "kept",
+            (_, Some(_)) => "held",
+            (_, None) if c.quote.is_some() => "quoted",
+            (_, None) => "unquoted",
+        };
+        if matches!(gate, "kept" | "quoted") {
+            pass += 1;
+        }
+        facts.push_str(&format!(" fact{}={op}:{gate}", i + 1));
+    }
+    let tags = parse_tags(raw);
+    format!(
+        "pass={pass} facts={} tags={}{facts}",
+        candidates.len(),
+        if tags.is_empty() {
+            "-".to_string()
+        } else {
+            tags.join(",")
+        }
+    )
+}
+
 /// The quarantine artifact body: every fact the evidence gate held back, with why.
 fn quarantine_body(held: &[Candidate]) -> String {
     let mut body = String::from(
@@ -350,12 +399,24 @@ pub async fn extract_and_store(
                 turns: &turns,
             },
         );
-        let facts_raw = ollama
-            .chat(vec![ChatMessage {
+        let (facts_raw, facts_meta) = ollama
+            .chat_meta(vec![ChatMessage {
                 role: "user".to_string(),
                 content: format!("{EXTRACT_INSTRUCTION}\n\n{}", extract_context.text),
             }])
             .await?;
+        // The verdict names the pre-store body by text: this store is about to replace it, so the
+        // live idea.md could never be matched again (docs/adr/0038).
+        let evidence = Haystack {
+            idea_body: &original_body,
+            conversation: &conversation,
+        };
+        ollama.record_verdict(
+            &facts_meta,
+            ParserKind::Facts,
+            summarize_facts(&facts_raw, Some(evidence)),
+            Some(HaystackRef::of_rewritten(evidence)),
+        );
         (consolidated, facts_raw, extract_context.truncated)
     };
     let context_truncated = consolidate_context.truncated || extract_truncated;
@@ -389,11 +450,7 @@ pub async fn extract_and_store(
         if candidate.op == FactOp::Noop {
             continue;
         }
-        let ok = candidate
-            .quote
-            .as_deref()
-            .is_some_and(|q| grounded(q, &haystack));
-        if ok {
+        if quote_grounds(&candidate, &haystack) {
             accepted.push(candidate);
         } else {
             held.push(candidate);
