@@ -197,6 +197,8 @@ fn scope_fence(plan: &mut BuildPlan, report: &mut GateReport) {
             }
         }
     }
+    // A re-gated plan (docs/adr/0032) already holds the question it asked the first time.
+    questions.retain(|text| !plan.open.iter().any(|q| &q.text == text));
     for text in questions {
         let mut q = Item::new("", &text);
         q.id = next_open_id(plan);
@@ -595,7 +597,10 @@ fn executable_tasks(plan: &mut BuildPlan, report: &mut GateReport) {
             )
             .to_lowercase(),
         );
-        if OWNER_WORK.iter().any(|p| everything.contains(p)) {
+        // A task the owner answered on the plan workbench (docs/adr/0032) no longer waits on
+        // them, however its text reads.
+        let answered = task.fields.contains_key("unblocked");
+        if !answered && OWNER_WORK.iter().any(|p| everything.contains(p)) {
             mark(task, "needs you");
             need_owner(task, report);
         }
@@ -747,6 +752,7 @@ mod tests {
             open_artifact: None,
             audit: None,
             probe: &probe,
+            answered: &[],
         };
         let mut report = GateReport::default();
         apply(plan, &inputs, &mut report);

@@ -1260,6 +1260,9 @@ mod tests {
                 },
                 created: Utc.with_ymd_and_hms(2026, 7, 8, 19, 30, 45).unwrap(),
                 model: "qwen3-8b-local".into(),
+                revises: None,
+                version: None,
+                answered: Vec::new(),
             },
             body: "- the sidecar stays\n".into(),
         }

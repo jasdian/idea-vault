@@ -18,6 +18,7 @@ use crate::concepts::audit::Label;
 use crate::concepts::build_plan::gates::{
     self, AuditView, Evidence, GateInputs, GateReport, OpenArtifact,
 };
+use crate::concepts::build_plan::lineage;
 use crate::concepts::build_plan::plan::{self, BuildPlan, Provenance};
 use crate::concepts::ConceptError;
 use crate::domain::evidence::POINTER_PREFIX;
@@ -53,6 +54,9 @@ pub enum PlanMode<'a> {
     Quick,
     /// The multi-step `ready-to-build` workflow; `skipped` is why no audit ran, when none did.
     ReadyToBuild { skipped: Option<&'a str> },
+    /// A version the plan workbench made from the owner's answers on `base`, re-gated without a
+    /// model call or an audit (docs/adr/0032).
+    Answered { base: &'a str },
 }
 
 /// What [`finish`] persisted.
@@ -78,7 +82,7 @@ fn is_open_questions_stem(stem: &str) -> bool {
 /// The idea's latest readable open-questions artifact (stems sort by their fixed-width run
 /// stamp), and a note when a newer one could not be read. A plan is never lost to a bad sibling
 /// artifact: unreadable files are skipped.
-fn latest_open_questions(
+pub(crate) fn latest_open_questions(
     vault_dir: &Path,
     idea_slug: &str,
 ) -> Result<(Option<OpenArtifact>, Option<String>), ConceptError> {
@@ -111,7 +115,7 @@ fn latest_open_questions(
 
 /// `settled 2 (1 you · 1 foil) · opened 1 · quarantined 1 · premises 2 · tasks 4 (2 need you) ·
 /// kill criteria 1` — `opened` is the gates' own count of Settled claims moved to Open.
-fn tally_line(plan: &BuildPlan, report: &GateReport) -> String {
+pub(crate) fn tally_line(plan: &BuildPlan, report: &GateReport) -> String {
     let by = |p: Provenance| {
         plan.settled
             .iter()
@@ -147,7 +151,7 @@ fn tally_line(plan: &BuildPlan, report: &GateReport) -> String {
     .join(" · ")
 }
 
-fn mode_label(mode: PlanMode, audit: Option<&AuditView>) -> String {
+pub(crate) fn mode_label(mode: PlanMode, audit: Option<&AuditView>, version: u32) -> String {
     match (mode, audit) {
         (PlanMode::Quick, None) => "quick · unaudited".into(),
         (PlanMode::Quick, Some(a)) if a.failed => "audited · audit unavailable".into(),
@@ -163,6 +167,9 @@ fn mode_label(mode: PlanMode, audit: Option<&AuditView>) -> String {
             "audited · uniform pass (weak)".into()
         }
         (PlanMode::ReadyToBuild { .. }, Some(_)) => "audited".into(),
+        (PlanMode::Answered { base }, _) => {
+            format!("v{version} · answers on {base} · audit not re-run")
+        }
     }
 }
 
@@ -192,24 +199,32 @@ fn audit_tally(audit: Option<&AuditView>) -> String {
     }
 }
 
+/// What the two code-owned header lines of a plan artifact record about the run.
+pub(crate) struct RunLine<'a> {
+    pub title: &'a str,
+    pub mode: PlanMode<'a>,
+    pub version: u32,
+    pub model: &'a str,
+    pub now: DateTime<Utc>,
+    pub excluded: usize,
+    pub consulted: &'a str,
+    pub probe: &'a SourceProbe,
+    pub audit: Option<&'a AuditView>,
+}
+
 /// The artifact body: a title, the two code-owned header lines, any gate notes, then the plan in
 /// the canonical grammar.
-fn artifact_body(
-    title: &str,
-    inputs: &PlanInputs,
-    mode: PlanMode,
-    excluded: usize,
-    consulted: &str,
-    plan: &BuildPlan,
-    report: &GateReport,
-) -> String {
+pub(crate) fn artifact_body(run: &RunLine, plan: &BuildPlan, report: &GateReport) -> String {
     let mut out = format!(
-        "# Build plan — {title}\n_{} · {} · {} · {excluded} capstone turn(s) excluded from evidence · consulted: {consulted} · sources: {} · audit: {}_\n_gates: {}_\n\n",
-        mode_label(mode, inputs.audit),
-        inputs.model,
-        inputs.now.format("%Y-%m-%d %H:%M"),
-        sources_label(inputs.probe),
-        audit_tally(inputs.audit),
+        "# Build plan — {}\n_{} · {} · {} · {} capstone turn(s) excluded from evidence · consulted: {} · sources: {} · audit: {}_\n_gates: {}_\n\n",
+        run.title,
+        mode_label(run.mode, run.audit, run.version),
+        run.model,
+        run.now.format("%Y-%m-%d %H:%M"),
+        run.excluded,
+        run.consulted,
+        sources_label(run.probe),
+        audit_tally(run.audit),
         tally_line(plan, report),
     );
     for note in &report.notes {
@@ -223,23 +238,83 @@ fn artifact_body(
     out
 }
 
+/// How many capstone turns (earlier plans and their pointers) the evidence leaves out.
+pub(crate) fn excluded_turns(conversation: &str) -> usize {
+    store::split_turns(conversation)
+        .iter()
+        .filter(|t| store::is_capstone_turn(t))
+        .count()
+}
+
+/// A new plan version to persist: its place in the lineage (docs/adr/0032) and its body.
+pub(crate) struct NewPlan<'a> {
+    pub vault_dir: &'a Path,
+    pub idea_slug: &'a str,
+    pub idea_title: &'a str,
+    pub lens: Option<String>,
+    pub model: String,
+    pub now: DateTime<Utc>,
+    pub revises: Option<String>,
+    pub version: u32,
+    pub answered: Vec<String>,
+    pub body: String,
+}
+
+/// Write `plan` as a fresh `<stamp>-build-plan` artifact (never over an existing one) and return
+/// its stem. A version-1 root carries no lineage fields, like a plan written before lineage.
+pub(crate) fn write_plan(plan: NewPlan) -> Result<String, ConceptError> {
+    let stamp = plan.now.format("%Y%m%d-%H%M%S").to_string();
+    let taken = |candidate: &str| {
+        store::artifact_exists(plan.vault_dir, plan.idea_slug, candidate).unwrap_or(false)
+    };
+    let file_slug = slug::disambiguate(&format!("{stamp}-build-plan"), taken);
+    store::write_artifact(
+        plan.vault_dir,
+        plan.idea_slug,
+        &Artifact {
+            frontmatter: ArtifactFrontmatter {
+                slug: file_slug.clone(),
+                title: format!("Build plan — {}", plan.idea_title),
+                kind: ArtifactKind::BuildPlan,
+                lens: plan.lens,
+                created: plan.now,
+                model: plan.model,
+                revises: plan.revises,
+                version: (plan.version > 1).then_some(plan.version),
+                answered: plan.answered,
+            },
+            body: plan.body,
+        },
+    )?;
+    Ok(file_slug)
+}
+
 fn pointer_turn(
     inputs: &PlanInputs,
     mode: PlanMode,
+    version: u32,
     file_slug: &str,
     plan: &BuildPlan,
     report: &GateReport,
 ) -> String {
+    let slug = inputs.idea_slug;
     let mut out = format!(
-        "{POINTER_PREFIX}{file_slug}](/idea/{}/artifact/{file_slug}.md) · {}\n\n{}\n",
-        inputs.idea_slug,
-        mode_label(mode, inputs.audit),
+        "{POINTER_PREFIX}{file_slug}](/idea/{slug}/artifact/{file_slug}.md) · {}\n\n{}\n",
+        mode_label(mode, inputs.audit, version),
         tally_line(plan, report),
     );
     if !plan.open.is_empty() {
-        out.push_str("\n**Open questions for you** — answer in chat, then build again:\n");
+        // Answers go to the plan workbench, which versions the plan deterministically
+        // (docs/adr/0032); the anchors are the ones the plan page renders.
+        out.push_str(&format!(
+            "\n**Open questions for you** — answer them on [the plan](/idea/{slug}/artifact/{file_slug}.md#work):\n"
+        ));
         for q in &plan.open {
-            out.push_str(&format!("- {}: {}\n", q.id, q.text));
+            out.push_str(&format!(
+                "- [{id}](/idea/{slug}/artifact/{file_slug}.md#q-{id}): {}\n",
+                q.text,
+                id = q.id
+            ));
         }
     }
     out
@@ -255,16 +330,26 @@ pub fn finish(inputs: PlanInputs) -> Result<Finished, ConceptError> {
 
 /// [`finish`] with the pipeline that produced the plan named, so the pointer turn and the
 /// artifact header label a skipped, failed or uniform audit loudly.
+///
+/// Every run joins the idea's plan lineage (docs/adr/0032): the new plan revises the current
+/// head, the owner answers recorded on the head's chain are carried into it, and an Open
+/// question re-asking one of them is dropped before the gates run.
 pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, ConceptError> {
     let mut plan = plan::parse(inputs.answer).map_err(|_| ConceptError::PlanUnusable)?;
     let idea = store::read_idea(inputs.vault_dir, inputs.idea_slug)?;
     let conversation = store::read_conversation(inputs.vault_dir, inputs.idea_slug)?;
     let evidence = Evidence::new(&idea.body, &conversation);
-    let excluded = store::split_turns(&conversation)
-        .iter()
-        .filter(|t| store::is_capstone_turn(t))
-        .count();
+    let excluded = excluded_turns(&conversation);
     let (open_artifact, open_note) = latest_open_questions(inputs.vault_dir, inputs.idea_slug)?;
+    let plans = lineage::list_plans(inputs.vault_dir, inputs.idea_slug)?;
+    let head = lineage::head(&plans).cloned();
+    let answers = match &head {
+        Some(h) => lineage::answered_in_lineage(inputs.vault_dir, inputs.idea_slug, &h.stem)?,
+        None => Vec::new(),
+    };
+    let mut suppressed = GateReport::default();
+    lineage::carry_answers(&mut plan, &answers);
+    lineage::suppress_answered(&mut plan, &answers, &mut suppressed);
     let mut report = gates::run(
         &mut plan,
         &GateInputs {
@@ -272,43 +357,43 @@ pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, Concept
             open_artifact: open_artifact.as_ref(),
             audit: inputs.audit,
             probe: inputs.probe,
+            answered: &answers,
         },
     );
+    report.notes.splice(0..0, suppressed.notes);
     if let Some(note) = &open_note {
         report.note(format!("open-questions artifact {note}"));
     }
     let consulted = open_artifact.as_ref().map_or("none", |a| a.name.as_str());
-
-    let stamp = inputs.now.format("%Y%m%d-%H%M%S").to_string();
-    let taken = |candidate: &str| {
-        store::artifact_exists(inputs.vault_dir, inputs.idea_slug, candidate).unwrap_or(false)
-    };
-    let file_slug = slug::disambiguate(&format!("{stamp}-build-plan"), taken);
+    let version = head.as_ref().map_or(1, |h| h.version + 1);
     let body = artifact_body(
-        &idea.frontmatter.title,
-        &inputs,
-        mode,
-        excluded,
-        consulted,
+        &RunLine {
+            title: &idea.frontmatter.title,
+            mode,
+            version,
+            model: &inputs.model,
+            now: inputs.now,
+            excluded,
+            consulted,
+            probe: inputs.probe,
+            audit: inputs.audit,
+        },
         &plan,
         &report,
     );
-    store::write_artifact(
-        inputs.vault_dir,
-        inputs.idea_slug,
-        &Artifact {
-            frontmatter: ArtifactFrontmatter {
-                slug: file_slug.clone(),
-                title: format!("Build plan — {}", idea.frontmatter.title),
-                kind: ArtifactKind::BuildPlan,
-                lens: Some(inputs.lens.to_string()),
-                created: inputs.now,
-                model: inputs.model.clone(),
-            },
-            body,
-        },
-    )?;
-    let pointer = pointer_turn(&inputs, mode, &file_slug, &plan, &report);
+    let file_slug = write_plan(NewPlan {
+        vault_dir: inputs.vault_dir,
+        idea_slug: inputs.idea_slug,
+        idea_title: &idea.frontmatter.title,
+        lens: Some(inputs.lens.to_string()),
+        model: inputs.model.clone(),
+        now: inputs.now,
+        revises: head.map(|h| h.stem),
+        version,
+        answered: Vec::new(),
+        body,
+    })?;
+    let pointer = pointer_turn(&inputs, mode, version, &file_slug, &plan, &report);
     store::append_turn(
         inputs.vault_dir,
         inputs.idea_slug,
@@ -353,7 +438,7 @@ mod tests {
             skipped: Some("audit off in Settings"),
         };
         assert_eq!(
-            mode_label(skipped, None),
+            mode_label(skipped, None, 1),
             "ready-to-build · audit skipped (audit off in Settings)"
         );
         let failed = AuditView {
@@ -361,7 +446,7 @@ mod tests {
             ..AuditView::default()
         };
         assert_eq!(
-            mode_label(skipped, Some(&failed)),
+            mode_label(skipped, Some(&failed), 1),
             "ready-to-build · audit failed"
         );
         let uniform = AuditView {
@@ -369,10 +454,10 @@ mod tests {
             ..AuditView::default()
         };
         assert_eq!(
-            mode_label(skipped, Some(&uniform)),
+            mode_label(skipped, Some(&uniform), 1),
             "audited · uniform pass (weak)"
         );
-        assert_eq!(mode_label(PlanMode::Quick, None), "quick · unaudited");
+        assert_eq!(mode_label(PlanMode::Quick, None, 1), "quick · unaudited");
     }
 
     #[test]
@@ -413,5 +498,60 @@ mod tests {
             "20260901-100000-open-questions-draft"
         ));
         assert!(!is_open_questions_stem("20260901-100000-build-plan"));
+    }
+
+    #[test]
+    fn capstone_run_links_to_head_and_suppresses_answered() {
+        use crate::concepts::build_plan::workbench::tests::{
+            at, seeded, submit, BASE, Q1_ANSWER, SLUG,
+        };
+        let dir = seeded();
+        let v2 = submit(dir.path(), BASE, &[("Q1", Q1_ANSWER)], 1).unwrap();
+        // The model renumbers, re-asks the answered question and drops the owner's answer.
+        let replan = "## Goal\nShip the zone snapshot tool.\n\n## Settled\n\
+- S1: Disproof comes before any code.\n  quote: \"the cheapest disproof before any Rust exists\"\n\n\
+## Open questions\n- Q1: Which exchange feeds the backtest data?\n\
+- Q2: Should the zone snapshot freeze at entry or dwell on the live label?\n\n\
+## Plan\n- [ ] T1: Build the snapshot freezer\n  depends: Q2 (which rule)\n  touches: `src/snap.rs`\n  accept: `cargo test snap` → exit 0\n\n\
+## Kill criteria\n- K1: The freezer loses fills → stop\n  checked by: T1\n  gates: T1\n";
+        let probe = SourceProbe::default();
+        let done = finish(PlanInputs {
+            vault_dir: dir.path(),
+            idea_slug: SLUG,
+            answer: replan,
+            turn_role: "assistant (skill: build-prompt)",
+            lens: "build-prompt",
+            model: "llama3.2".into(),
+            audit: None,
+            probe: &probe,
+            now: at(2),
+        })
+        .unwrap();
+        let fm = store::read_artifact(dir.path(), SLUG, &done.artifact_slug)
+            .unwrap()
+            .frontmatter;
+        assert_eq!(fm.revises.as_deref(), Some(v2.stem.as_str()));
+        assert_eq!(fm.version, Some(3));
+        assert!(fm.answered.is_empty());
+        let open: Vec<&str> = done.plan.open.iter().map(|q| q.text.as_str()).collect();
+        assert_eq!(open, ["Which exchange feeds the backtest data?"]);
+        assert_eq!(done.plan.tasks[0].field("depends"), None);
+        assert!(!done.plan.tasks[0].needs_owner, "{:?}", done.plan.tasks[0]);
+        let carried = done
+            .plan
+            .settled
+            .iter()
+            .find(|s| s.field("answers") == Some("Q1"))
+            .expect("the owner's answer is carried");
+        assert_eq!(carried.provenance, Some(Provenance::Owner));
+        assert_eq!(carried.field("quote"), Some(Q1_ANSWER));
+        assert!(
+            done.report.notes.contains(&format!(
+                "Q2 dropped: already answered in {} ({BASE})",
+                carried.id
+            )),
+            "{:?}",
+            done.report.notes
+        );
     }
 }

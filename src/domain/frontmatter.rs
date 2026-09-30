@@ -60,6 +60,16 @@ pub struct ArtifactFrontmatter {
     pub lens: Option<String>,
     pub created: DateTime<Utc>,
     pub model: String,
+    /// The build plan this one is a new version of (docs/adr/0032). Absent on every other kind
+    /// and on a plan written before plan lineage existed, which is then a version-1 root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revises: Option<String>,
+    /// The plan's version in its lineage; `None` reads as 1 (docs/adr/0032).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    /// The `Q#`/`T#` ids the owner answered to make this version (docs/adr/0032).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answered: Vec<String>,
 }
 
 /// The (lighter) structured header of a `memory/<fact-slug>.md` file.
@@ -364,6 +374,9 @@ body\n";
             lens: Some("extract-key-decisions".into()),
             created: dt("2026-07-08T19:30:45Z"),
             model: "qwen3-8b-local".into(),
+            revises: None,
+            version: None,
+            answered: Vec::new(),
         };
         let body = "- decided the sidecar stays\n";
         let emitted = emit_artifact(&fm, body).unwrap();
@@ -381,6 +394,9 @@ body\n";
             lens: None,
             created: dt("2026-07-08T19:30:45Z"),
             model: "claude-code".into(),
+            revises: None,
+            version: None,
+            answered: Vec::new(),
         };
         let emitted = emit_artifact(&fm, "Converged summary.\n").unwrap();
         let (fm2, body2) = parse_artifact(&emitted).unwrap();
@@ -406,6 +422,34 @@ model: claude-code\n\
         let (fm2, body2) = parse_artifact(&emit_artifact(&fm, &body).unwrap()).unwrap();
         assert_eq!(fm, fm2);
         assert_eq!(body, body2);
+    }
+
+    #[test]
+    fn artifact_without_lineage_fields_parses_and_skips_on_write() {
+        let input = "---\n\
+slug: 20260708-193045-build-plan\n\
+title: Build plan\n\
+kind: build_plan\n\
+lens: build-prompt\n\
+created: 2026-07-08T19:30:45Z\n\
+model: claude-code\n\
+---\n\
+## Goal\n";
+        let (fm, body) = parse_artifact(input).unwrap();
+        assert_eq!((fm.revises.as_deref(), fm.version), (None, None));
+        assert!(fm.answered.is_empty());
+        let emitted = emit_artifact(&fm, &body).unwrap();
+        for key in ["revises:", "version:", "answered:"] {
+            assert!(!emitted.contains(key), "{key} written: {emitted}");
+        }
+        let versioned = ArtifactFrontmatter {
+            revises: Some("20260708-193045-build-plan".into()),
+            version: Some(2),
+            answered: vec!["Q6".into(), "T4".into()],
+            ..fm
+        };
+        let (fm2, _) = parse_artifact(&emit_artifact(&versioned, &body).unwrap()).unwrap();
+        assert_eq!(fm2, versioned);
     }
 
     #[test]

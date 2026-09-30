@@ -729,6 +729,7 @@ mod tests {
             open_artifact: None,
             audit: None,
             probe,
+            answered: &[],
         };
         let mut report = GateReport::default();
         apply(plan, &inputs, &mut report);

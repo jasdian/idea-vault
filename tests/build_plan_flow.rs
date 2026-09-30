@@ -140,8 +140,8 @@ fn finish_writes_an_artifact_plus_a_pointer_turn() {
         "{last}"
     );
     assert!(
-        last.contains("**Open questions for you**")
-            && last.contains("- Q1: Freeze the zone snapshot"),
+        last.contains("**Open questions for you** — answer them on [the plan](/idea/trader/artifact/20260929-120000-build-plan.md#work)")
+            && last.contains("- [Q1](/idea/trader/artifact/20260929-120000-build-plan.md#q-Q1): Freeze the zone snapshot"),
         "{last}"
     );
 }
@@ -285,6 +285,9 @@ fn finish_consults_the_latest_open_questions_artifact() {
                     lens: Some("extract-open-questions".into()),
                     created: Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
                     model: "llama3.2".into(),
+                    revises: None,
+                    version: None,
+                    answered: Vec::new(),
                 },
                 body: body.into(),
             },

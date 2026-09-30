@@ -1,6 +1,6 @@
 //! G1 quote and provenance, G2 open collision, G3 audit carry-through.
 
-use super::{AuditView, AuditedFinding, GateInputs, GateReport};
+use super::{Answered, AuditView, AuditedFinding, GateInputs, GateReport};
 use crate::concepts::audit::{clip, Label};
 use crate::concepts::build_plan::plan::{BuildPlan, Item, Provenance};
 use crate::domain::evidence::{content_overlap, normalize_for_match, MIN_QUOTE_WORDS};
@@ -39,13 +39,20 @@ const OPEN_MARKERS: &[&str] = &[
 /// claim the audit refuted or doubted, or that collides with an open question; finally carry the
 /// audit's open findings into Open questions.
 pub fn apply(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateReport) {
-    let model_open: Vec<Item> = plan.open.clone();
+    // A re-gated plan (docs/adr/0032) also holds the questions the gates opened last time, each
+    // with its origin marker; only the model's own questions (unmarked) signal a collision.
+    let model_open: Vec<Item> = plan
+        .open
+        .iter()
+        .filter(|q| q.markers.is_empty())
+        .cloned()
+        .collect();
     let audit = inputs.audit;
     let grounded = quote_and_provenance(plan, inputs, report);
     let grounded = audit_verdicts(plan, audit.filter(|a| !a.failed), grounded, report);
     open_collision(plan, inputs, audit, &model_open, grounded, report);
     if let Some(view) = audit {
-        carry_open_findings(plan, view, report);
+        carry_open_findings(plan, view, inputs.answered, report);
         if view.failed {
             report.note("audit unavailable — verdicts are defaults, treat as unaudited");
         }
@@ -135,7 +142,9 @@ fn quote_and_provenance(
     kept
 }
 
-fn collides(a: &str, b: &str) -> bool {
+/// Whether `a` and `b` are about the same thing by content-word overlap — the one collision test
+/// G2, G3 and the plan lineage's re-ask suppression share (docs/adr/0032).
+pub(crate) fn collides(a: &str, b: &str) -> bool {
     content_overlap(a, b).at_least(COLLIDE_RATIO, COLLIDE_SHARED)
 }
 
@@ -160,7 +169,11 @@ fn audit_verdicts(
         if let Some(reason) = hit(&g.item, Label::Refuted) {
             plan.quarantine(g.item, format!("refuted by the audit: {reason}"));
             report.count("quarantined");
-        } else if let Some(reason) = hit(&g.item, Label::Uncertain) {
+        } else if let Some(reason) = hit(&g.item, Label::Uncertain).filter(|_| {
+            // An UNCERTAIN verdict is a doubt; the owner's own answer outranks it, where a
+            // REFUTED one still quarantines (docs/adr/0032).
+            !is_owner_answer(&g.item)
+        }) {
             plan.open_from(g.item, format!("audit: UNCERTAIN — {reason}"));
             report.count("opened");
         } else {
@@ -170,19 +183,21 @@ fn audit_verdicts(
     kept
 }
 
-fn whole_word_at(text: &str, at: usize, len: usize) -> bool {
+pub(super) fn whole_word_at(text: &str, at: usize, len: usize) -> bool {
     let before = text[..at].chars().next_back();
     let after = text[at + len..].chars().next();
     !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
 }
 
-fn find_phrase(text: &str, phrase: &str) -> Option<usize> {
+pub(super) fn find_phrase(text: &str, phrase: &str) -> Option<usize> {
     text.match_indices(phrase)
         .map(|(at, _)| at)
         .find(|&at| whole_word_at(text, at, phrase.len()))
 }
 
-fn hedge(text: &str) -> Option<&'static str> {
+/// The hedge phrase `text` uses, if any. `pub(crate)` for the workbench's inline warning on an
+/// owner answer that hedges (docs/adr/0032).
+pub(crate) fn hedge(text: &str) -> Option<&'static str> {
     let norm = normalize_for_match(text);
     if let Some(h) = HEDGES.iter().find(|h| find_phrase(&norm, h).is_some()) {
         return Some(h);
@@ -225,14 +240,16 @@ fn open_collision(
         })
         .unwrap_or_default();
     for Grounded { mut item, at } in grounded {
+        // The owner's own answer outranks a doubt raised about the question it answers: only
+        // hedging in the owner's words keeps it open (docs/adr/0032).
+        let answer = is_owner_answer(&item);
         let signal = model_open
             .iter()
+            .filter(|_| !answer)
             .find(|q| collides(&item.text, &q.text))
             .map(|q| format!("matches {}", q.id))
             .or_else(|| {
-                audit_open
-                    .iter()
-                    .any(|f| collides(&item.text, &f.text))
+                (!answer && audit_open.iter().any(|f| collides(&item.text, &f.text)))
                     .then(|| "matches an open question from the audit".to_string())
             })
             .or_else(|| hedge(&item.text).map(|h| format!("hedged (\"{h}\")")))
@@ -241,6 +258,7 @@ fn open_collision(
             });
         let listed = inputs
             .open_artifact
+            .filter(|_| !answer)
             .filter(|a| a.items.iter().any(|q| collides(&item.text, q)))
             .map(|a| a.name.clone());
         match (signal, listed) {
@@ -261,6 +279,12 @@ fn open_collision(
     }
 }
 
+/// A Settled item holding an owner answer from the plan workbench and grounded in the owner's
+/// own turn (docs/adr/0032).
+fn is_owner_answer(item: &Item) -> bool {
+    item.field("answers").is_some() && item.provenance == Some(Provenance::Owner)
+}
+
 // A failed audit's labels are defaults, but its harvested findings and their lenses are real.
 fn is_open_finding(f: &AuditedFinding, audit_failed: bool) -> bool {
     let open_lens = f.lenses.iter().any(|l| l == OPEN_QUESTIONS_LENS);
@@ -270,7 +294,14 @@ fn is_open_finding(f: &AuditedFinding, audit_failed: bool) -> bool {
     f.label == Label::Uncertain || (f.label != Label::Refuted && open_lens)
 }
 
-fn carry_open_findings(plan: &mut BuildPlan, audit: &AuditView, report: &mut GateReport) {
+// A finding the owner already answered — asked and answered in the lineage, or settled in the
+// owner's own words — is not re-asked (docs/adr/0032).
+fn carry_open_findings(
+    plan: &mut BuildPlan,
+    audit: &AuditView,
+    answered: &[Answered],
+    report: &mut GateReport,
+) {
     for f in audit
         .findings
         .iter()
@@ -281,7 +312,15 @@ fn carry_open_findings(plan: &mut BuildPlan, audit: &AuditView, report: &mut Gat
             let own = q.text.strip_prefix("proposed:").unwrap_or(&q.text);
             collides(own, &text)
         });
-        if already {
+        let answered = answered
+            .iter()
+            .any(|a| collides(&a.asked, &text) || collides(&a.answer, &text))
+            || plan
+                .settled
+                .iter()
+                .filter(|s| s.provenance == Some(Provenance::Owner))
+                .any(|s| collides(&s.text, &text));
+        if already || answered {
             continue;
         }
         let n = plan
@@ -302,7 +341,9 @@ mod tests {
     use super::*;
     use crate::ai::sources::SourceProbe;
     use crate::concepts::audit::Label;
-    use crate::concepts::build_plan::gates::{AuditView, AuditedFinding, Evidence, OpenArtifact};
+    use crate::concepts::build_plan::gates::{
+        Answered, AuditView, AuditedFinding, Evidence, OpenArtifact,
+    };
     use crate::concepts::build_plan::plan::{Item, Provenance};
 
     const CONVERSATION: &str =
@@ -330,6 +371,7 @@ mod tests {
             open_artifact: artifact,
             audit,
             probe: &probe,
+            answered: &[],
         };
         let mut report = GateReport::default();
         apply(plan, &inputs, &mut report);
@@ -825,5 +867,134 @@ Separately, the fork in the road is lunch.\n"
         );
         let report = gate(&mut BuildPlan::default(), &ev, None, None);
         assert!(report.notes.is_empty(), "quick mode adds no audit notes");
+    }
+
+    const ANSWER_TURN: &str = "## user\nRe Q1 (20260929-120000-build-plan): We freeze the zone snapshot at entry for every desk.\n";
+
+    fn owner_answer(text: &str) -> Item {
+        let mut item = settled(text, Some(text));
+        item.fields.insert("answers".into(), "Q1".into());
+        item.fields.insert(
+            "asked".into(),
+            "Freeze the zone snapshot at entry, or dwell?".into(),
+        );
+        item
+    }
+
+    #[test]
+    fn answered_owner_item_not_reopened_by_audit_or_model_open() {
+        let ev = Evidence::new("", ANSWER_TURN);
+        let artifact = OpenArtifact {
+            name: "2026-09-01-open-questions".into(),
+            items: vec!["Does the zone snapshot freeze at entry for every desk?".into()],
+        };
+        let audit = AuditView {
+            findings: vec![
+                finding(
+                    "Should the zone snapshot freeze at entry for every desk?",
+                    "premortem",
+                    Label::Uncertain,
+                    "never answered",
+                ),
+                finding(
+                    "Freeze the zone snapshot at entry for every desk, or dwell?",
+                    OPEN_QUESTIONS_LENS,
+                    Label::Confirmed,
+                    "open",
+                ),
+            ],
+            ..AuditView::default()
+        };
+        let mut plan = BuildPlan {
+            settled: vec![owner_answer(
+                "We freeze the zone snapshot at entry for every desk.",
+            )],
+            open: vec![Item::new(
+                "Q2",
+                "Should the zone snapshot freeze at entry for every desk?",
+            )],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, Some(&artifact), Some(&audit));
+        assert_eq!(plan.settled.len(), 1, "{plan:?}");
+        assert_eq!(plan.settled[0].provenance, Some(Provenance::Owner));
+        assert!(plan.settled[0].markers.is_empty(), "{plan:?}");
+        assert_eq!(
+            plan.open.len(),
+            1,
+            "the answered open-lens finding is not re-asked: {plan:?}"
+        );
+
+        let mut unanswered = settled(
+            "We freeze the zone snapshot at entry for every desk.",
+            Some("We freeze the zone snapshot at entry for every desk."),
+        );
+        unanswered.id = "S2".into();
+        let mut plan = BuildPlan {
+            settled: vec![unanswered],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, Some(&audit));
+        assert!(
+            plan.settled.is_empty(),
+            "without `answers` the audit still doubts it: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn carry_open_findings_skips_answered() {
+        let ev = Evidence::new("", ANSWER_TURN);
+        let audit = AuditView {
+            findings: vec![finding(
+                "Freeze the zone snapshot at entry, or dwell on the live label?",
+                OPEN_QUESTIONS_LENS,
+                Label::Confirmed,
+                "open",
+            )],
+            ..AuditView::default()
+        };
+        let answered = [Answered {
+            qid: "Q1".into(),
+            asked: "Freeze the zone snapshot at entry, or dwell on the live label?".into(),
+            answer: "We freeze the zone snapshot at entry for every desk.".into(),
+            in_stem: "20260929-120000-build-plan".into(),
+        }];
+        let probe = SourceProbe::default();
+        let run = |answered: &[Answered]| {
+            let mut plan = BuildPlan::default();
+            let inputs = GateInputs {
+                evidence: &ev,
+                open_artifact: None,
+                audit: Some(&audit),
+                probe: &probe,
+                answered,
+            };
+            apply(&mut plan, &inputs, &mut GateReport::default());
+            plan
+        };
+        assert_eq!(run(&[]).open.len(), 1, "unanswered, the finding is carried");
+        assert!(
+            run(&answered).open.is_empty(),
+            "answered, it is not re-asked"
+        );
+    }
+
+    #[test]
+    fn hedged_answer_still_opens() {
+        let conv = "## user\nRe Q1 (20260929-120000-build-plan): Either we freeze at entry or we dwell, not yet decided.\n";
+        let ev = Evidence::new("", conv);
+        let mut plan = BuildPlan {
+            settled: vec![owner_answer(
+                "Either we freeze at entry or we dwell, not yet decided.",
+            )],
+            ..BuildPlan::default()
+        };
+        gate(&mut plan, &ev, None, None);
+        assert!(plan.settled.is_empty(), "{plan:?}");
+        assert!(
+            plan.open[0].markers[0].starts_with("opened from Settled: hedged"),
+            "{plan:?}"
+        );
+        assert_eq!(plan.open[0].field("answers"), Some("Q1"));
     }
 }

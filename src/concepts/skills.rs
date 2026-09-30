@@ -392,6 +392,44 @@ pub(crate) fn hydrate_context(
     ))
 }
 
+/// The most bytes the prior-plan block adds to a capstone prompt (docs/adr/0032).
+pub(crate) const PRIOR_PLAN_BYTES: usize = 1500;
+
+/// For a capstone (build-plan) prompt only: the lineage head's open question ids and texts and
+/// every owner answer on its chain, so a re-plan keeps the ids and never re-asks an answered
+/// question (docs/adr/0032). Prompt context, never evidence — the gates ground only in the
+/// idea and the discussion, where each answer already is an owner turn. Empty when the idea has
+/// no plan or it cannot be read: a missing hint must never fail the planner. Capped at
+/// [`PRIOR_PLAN_BYTES`].
+pub(crate) fn prior_plan_block(vault_dir: &Path, idea_slug: &str) -> String {
+    let Ok(plans) = build_plan::lineage::list_plans(vault_dir, idea_slug) else {
+        return String::new();
+    };
+    let Some(head) = build_plan::lineage::head(&plans) else {
+        return String::new();
+    };
+    let open = store::read_artifact(vault_dir, idea_slug, &head.stem)
+        .ok()
+        .and_then(|a| build_plan::plan::parse_artifact(&a.body).ok())
+        .map(|p| p.open)
+        .unwrap_or_default();
+    let answered = build_plan::lineage::answered_in_lineage(vault_dir, idea_slug, &head.stem)
+        .unwrap_or_default();
+    let mut out = format!(
+        "## Prior plan (ids only — not evidence)\n{} · v{} — keep these ids; do not re-ask answered questions.\n",
+        head.stem, head.version
+    );
+    for q in &open {
+        out.push_str(&format!("- open {}: {}\n", q.id, q.text));
+    }
+    for a in &answered {
+        out.push_str(&format!("- answered {} → {}\n", a.qid, a.answer));
+    }
+    out = crate::concepts::audit::clip(&out, PRIOR_PLAN_BYTES);
+    out.push_str("\n\n");
+    out
+}
+
 /// How usable a build-plan answer is, judged by the parser that later reads it, on three levels:
 /// `None` when it does not parse, `(0, settled)` when it parses with no task, else
 /// `(tasks, settled)`. Higher is more usable; a plan is usable only with at least one task.
@@ -480,27 +518,35 @@ pub(crate) async fn persist_plan(
     audit: Option<AuditView>,
     mode: PlanMode<'_>,
 ) -> Result<Finished, ConceptError> {
+    // The mode borrows; the blocking task needs it owned.
+    enum Owned {
+        Quick,
+        ReadyToBuild(Option<String>),
+        Answered(String),
+    }
     let vault_dir = vault_dir.to_path_buf();
     let idea_slug = idea_slug.to_string();
-    let turn_role = match mode {
-        PlanMode::Quick => format!("assistant (skill: {lens})"),
-        PlanMode::ReadyToBuild { .. } => format!("assistant (workflow: {lens})"),
+    let (turn_role, owned) = match mode {
+        PlanMode::Quick => (format!("assistant (skill: {lens})"), Owned::Quick),
+        PlanMode::ReadyToBuild { skipped } => (
+            format!("assistant (workflow: {lens})"),
+            Owned::ReadyToBuild(skipped.map(str::to_string)),
+        ),
+        PlanMode::Answered { base } => (
+            format!("assistant (skill: {lens})"),
+            Owned::Answered(base.to_string()),
+        ),
     };
     let lens = lens.to_string();
-    let skipped = match mode {
-        PlanMode::ReadyToBuild { skipped } => skipped.map(str::to_string),
-        PlanMode::Quick => None,
-    };
-    let quick = mode == PlanMode::Quick;
     let model = llm.model();
     let probe = llm.source_probe();
     let joined = tokio::task::spawn_blocking(move || {
-        let mode = if quick {
-            PlanMode::Quick
-        } else {
-            PlanMode::ReadyToBuild {
+        let mode = match &owned {
+            Owned::Quick => PlanMode::Quick,
+            Owned::ReadyToBuild(skipped) => PlanMode::ReadyToBuild {
                 skipped: skipped.as_deref(),
-            }
+            },
+            Owned::Answered(base) => PlanMode::Answered { base },
         };
         finish_as(
             PlanInputs {
@@ -553,10 +599,18 @@ pub async fn invoke(
 ) -> Result<String, ConceptError> {
     progress(&format!("running {}", skill.name));
     let context = hydrate_context(vault_dir, idea_slug, slot.budget)?;
-    let block = (slot.related)(related_allowance(slot.budget, context.text.len()));
+    let prior = if skill.contract == OutputContract::BuildPlan {
+        prior_plan_block(vault_dir, idea_slug)
+    } else {
+        String::new()
+    };
+    let block = (slot.related)(related_allowance(
+        slot.budget,
+        context.text.len() + prior.len(),
+    ));
     let prompt = skill
         .prompt
-        .replace("{context}", &format!("{block}{}", context.text));
+        .replace("{context}", &format!("{block}{prior}{}", context.text));
     let llm = ollama.for_role(AgentRole::from(skill.role).as_str());
     let output = ask_on_contract(
         &llm,
@@ -788,5 +842,23 @@ mod tests {
             "an in-flight snapshot must not change"
         );
         assert_eq!(live.issues().len(), 1);
+    }
+
+    #[test]
+    fn prior_plan_block_names_the_head_open_ids_and_answers() {
+        use crate::concepts::build_plan::workbench::tests::{
+            seeded, submit, BASE, Q1_ANSWER, SLUG,
+        };
+        let dir = seeded();
+        let v2 = submit(dir.path(), BASE, &[("Q1", Q1_ANSWER)], 1).unwrap();
+        let block = prior_plan_block(dir.path(), SLUG);
+        assert!(block.starts_with("## Prior plan (ids only — not evidence)\n"));
+        assert!(block.contains(&format!("{} · v2", v2.stem)), "{block}");
+        assert!(block.contains("do not re-ask answered questions"));
+        assert!(block.contains("- open Q2: Which exchange feeds the backtest data?"));
+        assert!(block.contains(&format!("- answered Q1 → {Q1_ANSWER}")));
+        assert!(block.len() <= PRIOR_PLAN_BYTES + 2);
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(prior_plan_block(empty.path(), SLUG), "");
     }
 }

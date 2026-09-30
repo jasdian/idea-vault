@@ -241,6 +241,10 @@ pub struct BuildPlan {
 }
 
 /// The next free id for `letter` among `items` (one past the highest number in use).
+pub fn next_free_id(items: &[Item], letter: char) -> String {
+    next_id(items, letter)
+}
+
 fn next_id(items: &[Item], letter: char) -> String {
     let max = items
         .iter()
@@ -251,6 +255,18 @@ fn next_id(items: &[Item], letter: char) -> String {
 }
 
 impl BuildPlan {
+    /// Every item of every section, Quarantined included.
+    fn items_mut(&mut self) -> impl Iterator<Item = &mut Item> {
+        self.settled
+            .iter_mut()
+            .chain(&mut self.verify)
+            .chain(&mut self.open)
+            .chain(&mut self.tasks)
+            .chain(&mut self.kills)
+            .chain(&mut self.fence)
+            .chain(&mut self.quarantined)
+    }
+
     /// Move `item` to Open questions as a proposal, with a marker saying why it was opened.
     pub fn open_from(&mut self, mut item: Item, marker: impl Into<String>) {
         item.id = next_id(&self.open, 'Q');
@@ -362,10 +378,27 @@ const FIELD_KEYS: &[&str] = &[
     "wave",
     "leaf",
     "was",
+    "owner",
+    "answers",
+    "asked",
+    "in",
+    "unblocks",
+    "unblocked",
 ];
 
-/// Fields the gates derive; a model answer cannot author them.
-const DERIVED_KEYS: &[&str] = &["score", "model", "wave", "leaf", "was"];
+/// Fields the gates derive; a model answer cannot author them. `owner` records that the model
+/// itself wrote a task's `[?]` box, so a re-gate can tell it from a gate-derived one
+/// (docs/adr/0032).
+const DERIVED_KEYS: &[&str] = &["score", "model", "wave", "leaf", "was", "owner"];
+
+/// Fields only the plan workbench writes: an owner answer's `answers`/`asked`/`in` on a Settled
+/// item, `unblocks` on the Settled item of a task answer and `unblocked` on the task itself
+/// (docs/adr/0032). [`parse`] drops them so a model answer cannot forge an owner answer;
+/// [`parse_artifact`] keeps them.
+pub const OWNER_KEYS: &[&str] = &["answers", "asked", "in", "unblocks", "unblocked"];
+
+/// The `owner` field's value on an item whose `[?]` the model wrote (docs/adr/0032).
+pub const OWNER_MODEL: &str = "model";
 
 fn is_none(v: &str) -> bool {
     matches!(
@@ -488,9 +521,10 @@ fn as_field(part: &str, section: Section) -> Option<(String, String)> {
     })
 }
 
-/// Store a field, except a derived one read from a model answer.
+/// Store a field, except a derived or owner-only one read from a model answer.
 fn put_field(item: &mut Item, key: String, value: String, trusted: bool) {
-    if trusted || !DERIVED_KEYS.contains(&key.as_str()) {
+    let code_owned = DERIVED_KEYS.contains(&key.as_str()) || OWNER_KEYS.contains(&key.as_str());
+    if trusted || !code_owned {
         item.fields.insert(key, value);
     }
 }
@@ -733,6 +767,10 @@ fn parse_items(lines: &[&str], section: Section, keep_markers: bool) -> Vec<Item
 pub fn parse(answer: &str) -> Result<BuildPlan, Unusable> {
     let mut plan = parse_inner(answer, false)?;
     reserve_bootstrap_id(&mut plan);
+    for item in plan.items_mut().filter(|i| i.needs_owner) {
+        item.fields
+            .insert("owner".to_string(), OWNER_MODEL.to_string());
+    }
     Ok(plan)
 }
 
@@ -791,6 +829,119 @@ fn reserve_bootstrap_id(plan: &mut BuildPlan) {
                 kill.fields.insert(key.to_string(), ids.join(", "));
             }
         }
+    }
+}
+
+/// The markers that record why an Open question was opened — by G1/G2 (`opened…`), G3 or G10.
+/// No gate re-derives them from the question itself, so [`reset_derived`] keeps them.
+const OPEN_ORIGIN_MARKERS: &[&str] = &[
+    "gate language without a kill row",
+    "from the audit",
+    "audit: UNCERTAIN",
+    "opened",
+];
+
+/// The task markers that record a repair already written into the task's fields (G8 added a
+/// dependency, repaired an accept or dropped a dangling one; G14 dropped a self edge or wired a
+/// premise). A re-gate finds nothing left to repair, so [`reset_derived`] keeps the record.
+const TASK_REPAIR_MARKERS: &[&str] = &[
+    "added: ",
+    "accept repaired",
+    "unknown dependency ",
+    "self dependency dropped",
+    "premise ",
+];
+
+/// The Verify-first markers G4 (anchor and symbol) and G9 (check safety) re-derive on every run.
+/// Any other marker on a premise is the reason G5, G6 or G12 moved it out of Settled, which no
+/// gate re-derives, so [`reset_derived`] keeps it.
+const VERIFY_RECHECKED_MARKERS: &[&str] = &[
+    "name the symbol at ",
+    "✓ ",
+    "moved: ",
+    "symbol missing: ",
+    "no such file: ",
+    "ambiguous path: ",
+    "unverified: ",
+    "destructive command",
+    "check is not read-only",
+];
+
+fn starts_with_any(marker: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| marker.starts_with(p))
+}
+
+/// Clear what the gates derived on one item: its `[?]` unless the model wrote it (`owner:
+/// model`, or on an artifact from before `owner` existed a `[?]` no marker explains) and never
+/// once the owner answered it (`unblocked`); the markers `keep` rejects; the derived fields
+/// except `owner` and, when `keep_was`, `was`.
+fn reset_item(item: &mut Item, keep: impl Fn(&str) -> bool, keep_was: bool) {
+    let model_owned = item.field("owner") == Some(OWNER_MODEL);
+    let legacy_model_owned = item.needs_owner && item.markers.is_empty();
+    item.needs_owner =
+        !item.fields.contains_key("unblocked") && (model_owned || legacy_model_owned);
+    if item.needs_owner && !model_owned {
+        item.fields
+            .insert("owner".to_string(), OWNER_MODEL.to_string());
+    }
+    item.markers.retain(|m| keep(m));
+    item.fields.retain(|k, _| {
+        !DERIVED_KEYS.contains(&k.as_str()) || k == "owner" || (keep_was && k == "was")
+    });
+    if item.fields.contains_key("unblocked") {
+        item.fields.remove("owner");
+    }
+}
+
+/// Put the markers a re-gate keeps after the ones it re-derives, each group in its own order: a
+/// task's repair records last, a premise's move reason after its anchor checks. [`gates::run`]
+/// ends with it, so a first gating and a re-gating of the same plan render the same bytes
+/// (docs/adr/0032).
+///
+/// [`gates::run`]: super::gates::run
+pub fn order_kept_markers(plan: &mut BuildPlan) {
+    let last = |item: &mut Item, kept: &dyn Fn(&str) -> bool| {
+        let (keep, derived): (Vec<String>, Vec<String>) = std::mem::take(&mut item.markers)
+            .into_iter()
+            .partition(|m| kept(m));
+        item.markers = derived.into_iter().chain(keep).collect();
+    };
+    for task in &mut plan.tasks {
+        last(task, &|m| starts_with_any(m, TASK_REPAIR_MARKERS));
+    }
+    for premise in &mut plan.verify {
+        last(premise, &|m| !starts_with_any(m, VERIFY_RECHECKED_MARKERS));
+    }
+}
+
+/// Undo what the gates derived on a stored plan so [`run`](super::gates::run) can gate it again
+/// against fresh evidence (docs/adr/0032). Markers go except the ones no gate can re-derive (an
+/// Open question's origin, a task's repair record, a premise's move reason, every Quarantined
+/// reason); Settled provenance goes, since G1 re-grounds it; the derived fields go except `was`
+/// on a quarantined item; `[?]` survives only where the model wrote it ([`reset_item`]).
+pub fn reset_derived(plan: &mut BuildPlan) {
+    for item in &mut plan.settled {
+        reset_item(item, |_| false, false);
+        item.provenance = None;
+    }
+    for item in &mut plan.verify {
+        reset_item(
+            item,
+            |m| !starts_with_any(m, VERIFY_RECHECKED_MARKERS),
+            false,
+        );
+    }
+    for item in &mut plan.open {
+        reset_item(item, |m| starts_with_any(m, OPEN_ORIGIN_MARKERS), false);
+    }
+    for item in &mut plan.tasks {
+        reset_item(item, |m| starts_with_any(m, TASK_REPAIR_MARKERS), false);
+    }
+    for item in plan.kills.iter_mut().chain(&mut plan.fence) {
+        reset_item(item, |_| false, false);
+    }
+    for item in &mut plan.quarantined {
+        reset_item(item, |_| true, true);
     }
 }
 
@@ -1047,7 +1198,8 @@ fn what_ran_line(h: &RunHeader) -> String {
 }
 
 /// No audit stood behind the foil's conclusions: a quick plan, an unaudited, failed or skipped
-/// audit, or a header that does not say.
+/// audit, an answered version whose audit was not re-run (docs/adr/0032), or a header that does
+/// not say.
 fn foil_unverified(h: &RunHeader) -> bool {
     h.mode.is_empty()
         || h.mode.starts_with("quick")
@@ -1057,6 +1209,7 @@ fn foil_unverified(h: &RunHeader) -> bool {
             "audit failed",
             "audit skipped",
             "audit unavailable",
+            "audit not re-run",
         ]
         .iter()
         .any(|m| h.mode.contains(m))
@@ -2732,6 +2885,7 @@ Run the cheapest disproof before any Rust exists.
             "audited · audit unavailable",
             "ready-to-build · audit failed",
             "ready-to-build · audit skipped (audit off in Settings)",
+            "v2 · answers on 20260929-120000-build-plan · audit not re-run",
             "",
         ] {
             let prompt = render_prompt(&projected(), &run(mode), "T", "s");
@@ -2751,6 +2905,201 @@ Run the cheapest disproof before any Rust exists.
                 "{mode:?}\n{prompt}"
             );
             assert!(!prompt.contains(UNVERIFIED_FOIL), "{mode:?}");
+        }
+    }
+
+    mod regate {
+        use super::super::*;
+        use crate::ai::sources::SourceProbe;
+        use crate::concepts::build_plan::gates::{self, Evidence, GateInputs};
+
+        const CONVERSATION: &str = "## user\nWe run the cheapest disproof before any Rust exists. \
+Leave `vendor/lib.rs` unchanged, it is upstream code. Turns parse in the store.\n\n\
+## assistant\nThe scaler is `calc_factor` in `risk/calc.rs`, and the spec comes first.\n";
+
+        const PLAN: &str = "## Goal
+Ship the zone snapshot tool.
+
+## Settled
+- S1: Disproof comes before any code.
+  quote: \"the cheapest disproof before any Rust exists\"
+- S2: Turns parse at `src/store.rs:3-4` in `parse_turn`.
+  quote: \"Turns parse in the store\"
+- S3: Leave `vendor/lib.rs` unchanged.
+  quote: \"Leave `vendor/lib.rs` unchanged\"
+- S4: The team ships weekly.
+  quote: \"we ship every single week without fail\"
+
+## Verify first
+- P1: The scaler is `calc_factor` at `risk/calc.rs:385`
+  check: `sed -n 385p risk/calc.rs | grep -nF calc_factor`
+
+## Open questions
+- Q1: Freeze the zone snapshot at entry, or dwell on the live label?
+
+## Plan
+- [ ] T1: Write the spec
+  touches: `SPEC.md`
+  accept: `test -s SPEC.md` → exit 0
+- [ ] T2: Build the snapshot freezer
+  depends: T1, Q1
+  touches: `src/snap.rs`
+  accept: `cargo test snap` → exit 0
+- [ ] T3: Wire the freezer into the runner
+  depends: T2
+  touches: `src/run.rs`, `vendor/lib.rs`
+  accept: cargo test run → exit 0
+- [?] T4: Pick the broker account
+  touches: `config.toml`
+  accept: `test -s config.toml` → exit 0
+- [ ] T5: Rescale `risk/calc.rs`
+  touches: `risk/calc.rs`, `SPEC.md`
+  accept: `cargo test calc` → exit 0
+
+## Kill criteria
+- K1: The spec cannot name a dated kill → stop
+  checked by: T1
+  gates: T4";
+
+        fn gate(plan: &mut BuildPlan, conversation: &str) {
+            let evidence = Evidence::new("A zone snapshot tool.", conversation);
+            let probe = SourceProbe::default();
+            gates::run(
+                plan,
+                &GateInputs {
+                    evidence: &evidence,
+                    open_artifact: None,
+                    audit: None,
+                    probe: &probe,
+                    answered: &[],
+                },
+            );
+        }
+
+        fn regated(first: &str, conversation: &str) -> String {
+            let mut again = parse_artifact(first).unwrap();
+            reset_derived(&mut again);
+            gate(&mut again, conversation);
+            render(&again)
+        }
+
+        fn all(plan: &BuildPlan) -> Vec<&Item> {
+            plan.settled
+                .iter()
+                .chain(&plan.verify)
+                .chain(&plan.open)
+                .chain(&plan.tasks)
+                .chain(&plan.kills)
+                .chain(&plan.fence)
+                .chain(&plan.quarantined)
+                .collect()
+        }
+
+        #[test]
+        fn regate_is_idempotent() {
+            let mut plan = parse(PLAN).unwrap();
+            gate(&mut plan, CONVERSATION);
+            let first = render(&plan);
+            for marker in [
+                "added: ",
+                "touches fenced",
+                "premise P1 wired",
+                "unverified: ",
+            ] {
+                assert!(first.contains(marker), "fixture lacks {marker:?}:\n{first}");
+            }
+            let second = regated(&first, CONVERSATION);
+            assert_eq!(second, first);
+            assert_eq!(regated(&second, CONVERSATION), first);
+            let parsed = parse_artifact(&second).unwrap();
+            for item in all(&parsed) {
+                let unique: std::collections::BTreeSet<&String> = item.markers.iter().collect();
+                assert_eq!(unique.len(), item.markers.len(), "{item:?}");
+            }
+
+            let no_kills = PLAN.split("\n## Kill criteria").next().unwrap();
+            let gated_talk =
+                format!("{CONVERSATION}\n## user\nWe ship only if the parser passes review.\n");
+            let mut plan = parse(no_kills).unwrap();
+            gate(&mut plan, &gated_talk);
+            let first = render(&plan);
+            let second = regated(&first, &gated_talk);
+            assert_eq!(second, first);
+            assert_eq!(
+                second.matches("gate language without a kill row").count(),
+                2,
+                "one G10 question, its text and marker:\n{second}"
+            );
+        }
+
+        #[test]
+        fn untrusted_parse_drops_owner_keys() {
+            let text = "## Goal\nx\n\n## Settled\n- S1: We freeze at entry.\n  quote: \"we freeze at entry always\"\n\
+  answers: Q1\n  asked: Freeze or dwell?\n  in: 20260929-120000-build-plan\n  unblocks: T1\n\n\
+## Plan\n- [ ] T1: Build it\n  unblocked: the owner said so\n  owner: you\n";
+            let model = parse(text).unwrap();
+            for key in OWNER_KEYS.iter().chain(&["owner"]) {
+                assert!(
+                    all(&model).iter().all(|i| !i.fields.contains_key(*key)),
+                    "{key} survived: {model:?}"
+                );
+            }
+            let stored = parse_artifact(text).unwrap();
+            assert_eq!(stored.settled[0].field("answers"), Some("Q1"));
+            assert_eq!(
+                stored.settled[0].field("in"),
+                Some("20260929-120000-build-plan")
+            );
+            assert_eq!(
+                stored.tasks[0].field("unblocked"),
+                Some("the owner said so")
+            );
+        }
+
+        #[test]
+        fn model_needs_owner_survives_reset() {
+            let mut plan = parse(PLAN).unwrap();
+            let t4 = plan.tasks.iter().find(|t| t.id == "T4").unwrap();
+            assert_eq!(t4.field("owner"), Some(OWNER_MODEL));
+            gate(&mut plan, CONVERSATION);
+            let mut again = parse_artifact(&render(&plan)).unwrap();
+            reset_derived(&mut again);
+            let by_id = |id: &str| again.tasks.iter().find(|t| t.id == id).unwrap();
+            assert!(by_id("T4").needs_owner, "the model's [?] survives");
+            assert!(!by_id("T2").needs_owner, "a gate's [?] is re-derived");
+            assert!(by_id("T2").markers.is_empty());
+            assert!(by_id("T2").field("wave").is_none() && by_id("T2").field("score").is_none());
+
+            let mut answered = parse_artifact(&render(&plan)).unwrap();
+            answered.tasks[3]
+                .fields
+                .insert("unblocked".into(), "use the paper account".into());
+            reset_derived(&mut answered);
+            assert!(
+                !answered.tasks[3].needs_owner,
+                "an answered task is released"
+            );
+            assert_eq!(answered.tasks[3].field("owner"), None);
+        }
+
+        #[test]
+        fn legacy_marked_needs_owner_is_rederived() {
+            let legacy = "## Goal\nx\n\n## Plan\n\
+- [?] T1: Build it ⟨no runnable accept⟩\n\
+- [?] T2: Pick the broker account\n";
+            let mut plan = parse_artifact(legacy).unwrap();
+            assert!(plan.tasks.iter().all(|t| t.needs_owner));
+            reset_derived(&mut plan);
+            assert!(
+                !plan.tasks[0].needs_owner,
+                "a marked legacy [?] is the gates'"
+            );
+            assert!(plan.tasks[0].markers.is_empty());
+            assert!(
+                plan.tasks[1].needs_owner,
+                "an unmarked legacy [?] is the model's"
+            );
+            assert_eq!(plan.tasks[1].field("owner"), Some(OWNER_MODEL));
         }
     }
 }

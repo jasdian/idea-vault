@@ -70,6 +70,7 @@ fn gate_answer(conversation: &str, answer: &str, extra: Extra) -> (BuildPlan, Ga
             open_artifact: extra.open_artifact,
             audit: extra.audit,
             probe: extra.probe,
+            answered: &[],
         },
     );
     (plan, report)
