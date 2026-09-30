@@ -36,10 +36,11 @@ post-mortem. …
 | `description` | yes | free text |
 | `stage` | yes | `steelman` · `attack` · `consequence` · `converge` · `capstone` · `extract` |
 | `role` | no, default `critic` | `critic` · `researcher` · `advocate` · `harvester` · `synthesizer` |
-| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` · `build_plan` (ADR-0030) · `ground_claims` · `proposal` · `scorecard` (the last three are the workflow engine's, ADR-0034) |
+| `contract` | no, default `free` | `free` · `bullets_or_empty` · `ranked_list` · `fenced_markdown` · `build_plan` (ADR-0030) · `ground_claims` · `proposal` · `scorecard` (the last three are the workflow engine's, ADR-0034) · `skill_draft` (the make-skill distiller's, ADR-0042) |
 | `use_when` | no | free text |
 | `avoid_when` | no | free text |
 | `hidden` | no, default `false` | `true` keeps the skill registered but off the move chips |
+| `origin` | no | the idea slug a skill was distilled from by the make-skill button (ADR-0042); set by code, shown on the skill book as "distilled from" |
 
 Unknown keys are rejected, so a typo is reported rather than silently defaulted.
 

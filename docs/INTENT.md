@@ -1,52 +1,38 @@
-# Intent — Rust handbook Tier 1: compiler-enforced lints, truth-write fix, graceful shutdown, SQLite busy_timeout, new invariants (ADR-0041)
+# Intent — make-skill button: distil an owner skill from a discussion (ADR-0042, D42)
 
-The owner's Engineering Standards Handbook, mapped to idea-vault, found rules the gate held only by
-review: a bare `unwrap()` or a `println!` in shipping code, unsafe code without a stated reason, a
-lint exception without a reason, SQL built with `format!`, `anyhow` leaking into library modules.
-It also found one truth write whose `Result` was discarded (the chat route's Draft→InDiscussion
-frontmatter write, against ARCH-4 and ADR-0007), a server that drops every job when it is stopped,
-and an index opened without an explicit busy timeout. Owner decision of 2026-09-30 ("Tier 1"), with
-the owner's correction that unsafe is denied, not forbidden: a justified site opts in locally.
-Amends the ADR-0041 catalog; no new ADR.
+The owner distils reusable ideation moves by hand today: a move that worked in one discussion
+(often one improvised in chat, never a named skill) stays buried in that idea. The make-skill
+button runs one background job that reads the discussion and drafts a skill file for the skill
+book, which the owner reviews, edits and saves. Design: ADR-0042 (D42, R51, R52; amends ADR-0022
+and ADR-0023). Owner decisions of 2026-09-30 are binding: D1 stored ideas can be distilled without
+reopening, with a visible thinking indicator; D2 an optional `origin:` field on skill files; D3
+evidence grounding is a warning only, never a Save gate; D4 the draft is editable before Save; D5
+MCP gets a draft-only `make_skill` tool; D6 built-in and internal names force a rename, an owner
+skill is updated with a diff and a stale check; D7 make-workflow is a later phase; D8 the job runs
+under the harvester role.
 
 ## Acceptance criteria
 
-- `Cargo.toml` `[lints]` denies `unsafe_code`, `clippy::unwrap_used`, `todo`, `unimplemented`,
-  `print_stdout`, `print_stderr`, `undocumented_unsafe_blocks` and `missing_safety_doc`;
-  `clippy.toml` exempts test code from unwrap and print and sets `upper-case-acronyms-aggressive`;
-  `src/main.rs` prints CLI output only under a reasoned `#[expect(clippy::print_stdout)]`.
-- A failed Draft→InDiscussion frontmatter write fails the chat send (503 for a read-only idea dir),
-  releases the job slot and starts no model call; no truth write's `Result` is discarded in `src/`.
-- SIGINT or SIGTERM stops accepting connections, drains in-flight requests and aborts running jobs
-  (each run journal ends `Cancelled`), bounded by `SHUTDOWN_GRACE`.
-- The index connection sets `busy_timeout` to the named `BUSY_TIMEOUT` (5s).
-- `scripts/check-invariants.sh` gains `discard-truth-write`, `graceful-shutdown`, `sql-literal`,
-  `anyhow-edge`, `no-deep-super`, `busy-timeout` and `allow-reason`, each with a seeded violation
-  per detection arm in `tests/gate_invariants.rs`; every clippy lint attribute in `src/` is a
-  reasoned `#[expect]`.
-- docs/14, docs/10 and an ADR-0041 amendment name the new rules.
-- Every behaviour change is observed failing first, and `bash scripts/gate.sh` is green.
+- An idea page has a "make skill" button; pressing it runs a background job with a visible thinking
+  indicator and ends with a skill draft under Artifacts, never a transcript turn (ADR-0042).
+- The draft is a skill file the skill book's own loader accepts; every evidence quote is marked
+  grounded or not against the discussion (an ungrounded one is warned about, never a Save block,
+  D3), and the run journal is never read.
+- Nothing reaches vault/.skills/ until the owner presses Save; Save revalidates the (editable) text,
+  never overwrites a built-in or internal skill, shows a diff and refuses a stale base when updating
+  an owner skill, and the new skill appears on /skills with a "distilled from" link without a
+  restart.
+- A distil run costs at most 2 model calls; a stored idea can be distilled without reopening it,
+  with a visible thinking indicator on the stored view (D1).
+- MCP clients can draft with `make_skill` (long-running, idempotent replay) but cannot save (D5).
+- Every change is observed failing first, and `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
-- CLIPPY_ALLOW_FLOOR: 5 → 7. The ratchet now counts every clippy lint attribute (`allow` or
-  `expect`); the five `too_many_arguments` allows became reasoned `#[expect]`s and `src/main.rs`
-  adds two reasoned `#[expect(clippy::print_stdout)]` for the `import` and `regrade --export` CLI
-  output, which HTC-8 allows in main.rs only.
-- ratchet: the zero-state text reads "clippy lint attributes (allow or expect)"; the rule is neither
-  removed nor downgraded.
-- check-invariants catalog: seven new error rules, `discard-truth-write`, `graceful-shutdown`,
-  `sql-literal`, `anyhow-edge`, `no-deep-super`, `busy-timeout` and `allow-reason`; nothing removed
-  or downgraded.
-- tests/gate_invariants.rs: `SEEDS` gains thirteen rows, one per detection arm of the new rules
-  (store write; serve without it, main.rs missing; literal on the format! line, on the next line;
-  library module; super::super, #[path]; no busy_timeout call, schema.rs missing; allow instead of
-  expect, multi-line allow, expect without reason).
-- tests/support/gate.rs: the clean tree gains `src/main.rs` (with `with_graceful_shutdown`) and
-  `src/index/schema.rs` (with `busy_timeout`), and `allows_rs` writes reasoned `#[expect]`s instead
-  of bare `#[allow]`s so the clean tree passes `allow-reason`.
-- tests/*.rs and examples/*.rs: each crate root gains a reasoned crate-level
-  `#![allow(clippy::unwrap_used)]` (examples also print) because clippy's test exemption does not
-  reach helpers outside `#[test]` functions; no assertion changes.
-- index::queries: `turn_fact_hits` binds the snippet token count as `?3` and `refresh_lexical_fts`
-  spells the eligible kinds in its literal, so no SQL is built with `format!`; results unchanged.
+- src/domain/skill.rs OutputContract::ALL: 8 → 9 (`skill_draft`); the docs/06-concepts/skills.md
+  contract row gains `skill_draft` (tests/doc_examples.rs `skill_field_table_matches_enums`).
+- src/concepts/skills.rs INTERNAL_SKILLS: 2 → 3 and BUILTIN +1 (`distill-skill`); tests keyed on
+  `BUILTIN.len()` follow without edits.
+- src/web/routes/ideas.rs stored_outcome: the Running arm becomes a visible thinking indicator (was
+  an aria-hidden poll); the "Only the store job can finish on a Stored idea" statement is withdrawn
+  (D1).

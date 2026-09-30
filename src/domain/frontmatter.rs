@@ -134,14 +134,18 @@ pub struct SkillFrontmatter {
     #[serde(default)]
     pub contract: OutputContract,
     /// When to reach for this move — shown on the chip and in the skill book.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub use_when: String,
     /// When not to — the skill book's "wrong turn" column.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub avoid_when: String,
     /// Registered and resolvable, but never offered as a move chip (the `extract-*` lenses).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// The idea slug this skill was distilled from (docs/adr/0042). Absent on hand-written
+    /// skills; set by code on a make-skill draft, never taken from the distiller's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// Split a `---\n<yaml>\n---\n<body>` fenced document into its raw YAML block and body text.
@@ -260,6 +264,14 @@ pub fn parse_skill(input: &str) -> Result<(SkillFrontmatter, String), DomainErro
     let (yaml, body) = split_fence(input)?;
     let fm: SkillFrontmatter = serde_norway::from_str(yaml)?;
     Ok((fm, body.trim_end().to_string()))
+}
+
+/// Render a skill file from frontmatter and prompt template — how a make-skill draft gets its
+/// code-set `origin` (docs/adr/0042). Default-valued optional keys are left out, so the file
+/// reads like a hand-written one.
+pub fn emit_skill(fm: &SkillFrontmatter, body: &str) -> Result<String, DomainError> {
+    let yaml = serde_norway::to_string(fm)?;
+    Ok(emit_fence(&yaml, body))
 }
 
 /// Parse a workflow file (ADR-0035) into its frontmatter, its stages dispatched on `kind:`, and
@@ -688,5 +700,26 @@ Argue for it.\n\
         assert!(matches!(parse_skill(typo), Err(DomainError::Yaml(_))));
         let stage = "---\nname: x\ndescription: d\nstage: dance\n---\n{context}";
         assert!(matches!(parse_skill(stage), Err(DomainError::Yaml(_))));
+    }
+
+    #[test]
+    fn parse_skill_accepts_origin_and_still_rejects_unknown() {
+        let input = "---\nname: x\ndescription: d\nstage: attack\norigin: my-idea\n---\n{context}";
+        let (fm, _) = parse_skill(input).unwrap();
+        assert_eq!(fm.origin.as_deref(), Some("my-idea"));
+        let plain = "---\nname: x\ndescription: d\nstage: attack\n---\n{context}";
+        assert_eq!(parse_skill(plain).unwrap().0.origin, None);
+        let typo = "---\nname: x\ndescription: d\nstage: attack\norigins: my-idea\n---\n{context}";
+        assert!(matches!(parse_skill(typo), Err(DomainError::Yaml(_))));
+    }
+
+    #[test]
+    fn emit_skill_round_trips_and_omits_defaults() {
+        let input = "---\nname: x\ndescription: d\nstage: attack\ncontract: ranked_list\norigin: my-idea\n---\n\nDo it.\n{context}";
+        let (fm, body) = parse_skill(input).unwrap();
+        let emitted = emit_skill(&fm, &body).unwrap();
+        assert_eq!(parse_skill(&emitted).unwrap(), (fm, body));
+        assert!(!emitted.contains("hidden") && !emitted.contains("use_when"));
+        assert!(emitted.contains("origin: my-idea"), "{emitted}");
     }
 }

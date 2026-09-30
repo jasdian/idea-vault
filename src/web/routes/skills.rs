@@ -66,6 +66,7 @@ fn contract_str(contract: OutputContract) -> &'static str {
         OutputContract::GroundClaims => "anchored claims",
         OutputContract::Proposal => "one proposal",
         OutputContract::Scorecard => "rubric scores",
+        OutputContract::SkillDraft => "skill draft + evidence",
     }
 }
 

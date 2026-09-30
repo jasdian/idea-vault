@@ -167,6 +167,7 @@ fn artifact_meta(fm: &crate::domain::ArtifactFrontmatter) -> String {
         (ArtifactKind::GroundMap, _) => format!("grounded map · anchors verified · {when}"),
         (ArtifactKind::Scorecard, _) => format!("panel scorecard · {when}"),
         (ArtifactKind::WorkflowRun, _) => format!("workflow run record · {when}"),
+        (ArtifactKind::SkillDraft, _) => format!("skill draft · review before saving · {when}"),
     }
 }
 
