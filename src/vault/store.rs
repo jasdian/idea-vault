@@ -229,6 +229,12 @@ pub fn append_turn(
     role: &str,
     content: &str,
 ) -> Result<(), VaultError> {
+    append_conversation(vault_dir, slug, &format_turn(role, content))
+}
+
+/// The exact bytes [`append_turn`] writes for one turn, so a caller can append several turns in
+/// one write or tell whether a batch it wrote earlier is already the transcript's tail.
+pub fn format_turn(role: &str, content: &str) -> String {
     let mut turn = format!("## {role}\n");
     for line in content.trim_end().lines() {
         if forges_turn_heading(line) {
@@ -237,7 +243,7 @@ pub fn append_turn(
         turn.push_str(line);
         turn.push('\n');
     }
-    append_conversation(vault_dir, slug, &turn)
+    turn
 }
 
 /// Who produced a transcript turn, read back from its `## <role>` heading — the one parse of the

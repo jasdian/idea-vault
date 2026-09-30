@@ -94,7 +94,8 @@ pub struct Versioned {
     pub still_open: Vec<String>,
     pub plan: BuildPlan,
     pub report: GateReport,
-    /// An identical earlier submission already made this version; nothing was written.
+    /// An identical earlier submission already made this version; nothing was written but its
+    /// pointer turn, when that earlier submission failed before writing it.
     pub reused: bool,
 }
 
@@ -118,6 +119,8 @@ pub enum WorkbenchError {
     NotOwnWords(String),
     #[error("no answer given")]
     NothingToAnswer,
+    #[error("{0} is answered twice — give one answer per id")]
+    DuplicateId(String),
     #[error(transparent)]
     Concept(#[from] ConceptError),
 }
@@ -359,14 +362,16 @@ fn validate(id: &str, answer: &str, asked: &str) -> Result<(), WorkbenchError> {
     Ok(())
 }
 
-/// Any item of `plan` recording the owner's answer to `id`, wherever the gates left it.
+/// Any item of `plan` recording the owner's answer to `id`, wherever the gates left it. The
+/// newest such item wins: an answer is appended after any older item that carried one to the
+/// same id, so a plan written before ids were kept unique still reports its latest answer.
 fn answer_holder<'a>(plan: &'a BuildPlan, id: &str) -> Option<&'a Item> {
     plan.settled
         .iter()
         .chain(&plan.verify)
         .chain(&plan.open)
         .chain(&plan.quarantined)
-        .find(|i| i.field("answers") == Some(id) || i.field("unblocks") == Some(id))
+        .rfind(|i| i.field("answers") == Some(id) || i.field("unblocks") == Some(id))
 }
 
 /// The successor of the base an identical earlier submission made, if there is one.
@@ -489,6 +494,12 @@ pub fn answer(req: AnswerRequest) -> Result<Versioned, WorkbenchError> {
     if answers.is_empty() {
         return Err(WorkbenchError::NothingToAnswer);
     }
+    // `q6` and `Q6` normalize to one id: two answers to it would write two owner turns and two
+    // Settled items, and no later identical submission could be recognised as a repeat.
+    let mut ids_seen: BTreeSet<&str> = BTreeSet::new();
+    if let Some((dup, _)) = answers.iter().find(|(id, _)| !ids_seen.insert(id.as_str())) {
+        return Err(WorkbenchError::DuplicateId(dup.clone()));
+    }
     let base = read_plan(req.vault_dir, req.idea_slug, req.base)?;
     let plans = lineage::list_plans(req.vault_dir, req.idea_slug)?;
     let flat: Vec<(String, String)> = answers
@@ -496,6 +507,13 @@ pub fn answer(req: AnswerRequest) -> Result<Versioned, WorkbenchError> {
         .map(|(id, text)| (id.clone(), one_line(text)))
         .collect();
     if let Some(found) = reused(&req, &plans, &flat)? {
+        // The earlier submission may have written its version and then failed on the pointer
+        // turn; the retry lands the pointer so the transcript still links the version.
+        let conversation = store::read_conversation(req.vault_dir, req.idea_slug)?;
+        if !conversation.contains(&format!("{POINTER_PREFIX}{}]", found.stem)) {
+            let pointer = answer_pointer(&req, &found.stem, found.version, &found);
+            store::append_turn(req.vault_dir, req.idea_slug, pointer_role(&base), &pointer)?;
+        }
         return Ok(found);
     }
     let head = lineage::head(&plans).map_or(req.base, |h| h.stem.as_str());
@@ -512,13 +530,22 @@ pub fn answer(req: AnswerRequest) -> Result<Versioned, WorkbenchError> {
         asked.push(question);
     }
 
-    for (id, text) in &answers {
-        store::append_turn(
-            req.vault_dir,
-            req.idea_slug,
-            "user",
-            &format!("Re {id} ({}): {text}", req.base),
-        )?;
+    // Every read that can fail runs before the first turn is written, so an I/O error leaves
+    // the transcript untouched rather than holding answers no version records.
+    let idea = store::read_idea(req.vault_dir, req.idea_slug)?;
+    let (open_artifact, open_note) = latest_open_questions(req.vault_dir, req.idea_slug)?;
+    let mut answered = lineage::answered_in_lineage(req.vault_dir, req.idea_slug, req.base)?;
+    let mut conversation = store::read_conversation(req.vault_dir, req.idea_slug)?;
+    // One write for the whole batch. A retry after the artifact write failed finds the batch
+    // already at the transcript's tail (the base is still the head and nothing else may append
+    // while the workbench lock is held and no job runs) and does not write the answers twice.
+    let turns: String = answers
+        .iter()
+        .map(|(id, text)| store::format_turn("user", &format!("Re {id} ({}): {text}", req.base)))
+        .collect();
+    if !conversation.ends_with(&turns) {
+        store::append_conversation(req.vault_dir, req.idea_slug, &turns)?;
+        conversation.push_str(&turns);
     }
     let this: Vec<Answered> = flat
         .iter()
@@ -540,11 +567,7 @@ pub fn answer(req: AnswerRequest) -> Result<Versioned, WorkbenchError> {
     reset_derived(&mut plan);
     apply_answers(&mut plan, &this);
 
-    let idea = store::read_idea(req.vault_dir, req.idea_slug)?;
-    let conversation = store::read_conversation(req.vault_dir, req.idea_slug)?;
     let evidence = Evidence::new(&idea.body, &conversation);
-    let (open_artifact, open_note) = latest_open_questions(req.vault_dir, req.idea_slug)?;
-    let mut answered = lineage::answered_in_lineage(req.vault_dir, req.idea_slug, req.base)?;
     answered.retain(|a| !this.iter().any(|t| t.qid == a.qid));
     answered.extend(this.iter().cloned());
     let mut report = gates::run(
@@ -604,15 +627,18 @@ pub fn answer(req: AnswerRequest) -> Result<Versioned, WorkbenchError> {
         report,
         reused: false,
     };
-    // The pointer sits under the base's own capstone heading, so it stays out of evidence
-    // (ADR-0030) and counts toward the same skill or workflow (ADR-0022).
-    let role = match base.frontmatter.lens.as_deref() {
+    let pointer = answer_pointer(&req, &versioned.stem, version, &versioned);
+    store::append_turn(req.vault_dir, req.idea_slug, pointer_role(&base), &pointer)?;
+    Ok(versioned)
+}
+
+/// The pointer sits under the base's own capstone heading, so it stays out of evidence
+/// (ADR-0030) and counts toward the same skill or workflow (ADR-0022).
+fn pointer_role(base: &Artifact) -> &'static str {
+    match base.frontmatter.lens.as_deref() {
         Some("ready-to-build") => "assistant (workflow: ready-to-build)",
         _ => "assistant (skill: build-prompt)",
-    };
-    let pointer = answer_pointer(&req, &versioned.stem, version, &versioned);
-    store::append_turn(req.vault_dir, req.idea_slug, role, &pointer)?;
-    Ok(versioned)
+    }
 }
 
 #[cfg(test)]
@@ -863,6 +889,13 @@ Ship the zone snapshot tool.
             ),
             (vec![("Q9", "Binance spot, daily candles.")], "UnknownId"),
             (vec![("Q1", "   ")], "NothingToAnswer"),
+            (
+                vec![
+                    ("Q1", Q1_ANSWER),
+                    ("q1", "Dwell on the label, then measure fills."),
+                ],
+                "DuplicateId",
+            ),
         ] {
             let err = submit(dir.path(), BASE, &answers, 1).unwrap_err();
             assert!(format!("{err:?}").starts_with(want), "{err:?}");
@@ -906,6 +939,53 @@ Ship the zone snapshot tool.
         let again = submit(dir.path(), BASE, &[("q1", &format!("  {Q1_ANSWER}\n"))], 2).unwrap();
         assert!(again.reused);
         assert_eq!(again.stem, first.stem);
+        assert_eq!(snapshot(dir.path()), before);
+    }
+
+    #[test]
+    fn retry_after_a_partial_write_does_not_duplicate_answer_turns() {
+        let dir = seeded();
+        // A first attempt wrote its answer turn, then failed before the artifact landed.
+        let turn = store::format_turn("user", &format!("Re Q1 ({BASE}): {Q1_ANSWER}"));
+        store::append_conversation(dir.path(), SLUG, &turn).unwrap();
+        let v = submit(dir.path(), BASE, &[("Q1", Q1_ANSWER)], 1).unwrap();
+        assert!(!v.reused);
+        let conversation = store::read_conversation(dir.path(), SLUG).unwrap();
+        assert_eq!(conversation.matches(&format!("Re Q1 ({BASE})")).count(), 1);
+        assert_eq!(
+            conversation
+                .matches(&format!("{POINTER_PREFIX}{}]", v.stem))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn retry_after_a_lost_pointer_lands_it_once() {
+        let dir = seeded();
+        let first = submit(dir.path(), BASE, &[("Q1", Q1_ANSWER)], 1).unwrap();
+        // The version landed, but the pointer turn failed to append.
+        let conversation = store::read_conversation(dir.path(), SLUG).unwrap();
+        let mut turns = store::split_turns(&conversation);
+        let pointer = turns.pop().unwrap();
+        assert!(pointer.contains(&first.stem), "{pointer}");
+        let path = dir.path().join(SLUG).join("conversation.md");
+        std::fs::write(&path, turns.concat()).unwrap();
+
+        let again = submit(dir.path(), BASE, &[("Q1", Q1_ANSWER)], 2).unwrap();
+        assert!(again.reused);
+        assert_eq!(again.stem, first.stem);
+        let conversation = store::read_conversation(dir.path(), SLUG).unwrap();
+        let link = format!("{POINTER_PREFIX}{}]", first.stem);
+        assert_eq!(conversation.matches(&link).count(), 1, "{conversation}");
+        assert_eq!(conversation.matches(&format!("Re Q1 ({BASE})")).count(), 1);
+        // A third identical submission writes nothing more.
+        let before = snapshot(dir.path());
+        assert!(
+            submit(dir.path(), BASE, &[("Q1", Q1_ANSWER)], 3)
+                .unwrap()
+                .reused
+        );
         assert_eq!(snapshot(dir.path()), before);
     }
 

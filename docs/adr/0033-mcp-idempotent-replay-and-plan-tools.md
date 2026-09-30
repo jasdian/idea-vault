@@ -29,8 +29,10 @@ We will **render a result once, record it when served, and replay it** to an ide
 1. **Render once.** A task's result is rendered when it first reaches a terminal state and stored
    on the entry (`TaskEntry::rendered`). `tasks/result` and the plain path both serve that value.
 2. **Replay.** After a result was served, a plain or task call replays it when either (a) it
-   carries the same explicit `idempotency_key`, or (b) its arguments hash matches and the idea's
-   turn count has not changed since the run finished. The replayed text is prefixed
+   carries the same explicit `idempotency_key`, or (b) its arguments hash matches and neither the
+   idea's turn count nor its `(state, updated)` stamp has changed since the run finished (store
+   and reopen append no turn, so the count alone would replay "stored" after a reopen, or a chat
+   reply after a store). The replayed text is prefixed
    `(replayed result of task N) `. In task mode a hit mints a task that is already terminal, so
    `tasks/get` then `tasks/result` work unchanged. An in-flight task keeps ADR-0028's reattach.
 3. **Keys.** The same key with different arguments is `invalid_params`. A key never seen is a miss
@@ -42,8 +44,10 @@ We will **render a result once, record it when served, and replay it** to an ide
    Stored (Store). Failed and Cancelled are never cached, so a retry after a failure runs again.
    A served entry is recorded under the args hash and, when a key was sent, also under the key.
 5. **False-success guard.** A job that ends `Idle` but landed no turn (the web `/pending` poll
-   consumed its Failed/Notice first) is rendered as an error, `finished but its result was
-   consumed elsewhere — check get_idea`, and not cached.
+   consumed its Failed/Notice first), or a store that ends `Idle` with the idea not Stored, is
+   rendered as an error, `finished but its result was consumed elsewhere — check get_idea`, and
+   not cached. The result is the task's own turn — the first after its claim baseline — not the
+   newest, so a task first observed after another job has run still serves its own reply.
 6. **`op_key` for store** is `"store"`, so every kind reattaches on the same `Some` shape.
 7. **Entries live 24 h, in memory only.** They are lost on restart; a lost entry degrades to a
    fresh run, never to a wrong result.

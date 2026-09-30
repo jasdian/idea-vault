@@ -57,7 +57,7 @@ use crate::web::routes::memory::{
 use crate::web::state::AppState;
 
 use super::idempotency::{
-    args_hash, Replay, ReplayCache, ReplayId, ReplayKey, IDEMPOTENCY_KEY, REPLAY_TTL,
+    args_hash, IdeaStamp, Replay, ReplayCache, ReplayId, ReplayKey, IDEMPOTENCY_KEY, REPLAY_TTL,
 };
 use super::tools::required_str;
 
@@ -176,6 +176,8 @@ struct TaskEntry {
     /// landed its turn.
     turns_at_claim: usize,
     turns_at_finish: Option<usize>,
+    /// The idea's stamp at render time, recorded with a replay entry (docs/adr/0033).
+    idea_at_finish: Option<IdeaStamp>,
     /// Whether `rendered` may be recorded for replay: set at render time, only for a
     /// Completed/Notice outcome whose effect really reached the vault (docs/adr/0033).
     is_replayable: bool,
@@ -233,6 +235,7 @@ impl TaskRegistry {
                 rendered: None,
                 turns_at_claim: claimed.turns_at_claim,
                 turns_at_finish: None,
+                idea_at_finish: None,
                 is_replayable: false,
             },
         );
@@ -259,6 +262,7 @@ impl TaskRegistry {
                 rendered: Some(result),
                 turns_at_claim: 0,
                 turns_at_finish: None,
+                idea_at_finish: None,
                 is_replayable: false,
             },
         );
@@ -361,9 +365,10 @@ impl TaskRegistry {
     /// The replay lookup (docs/adr/0033, D34). An explicit key replays whenever its arguments
     /// match and is an `invalid_params` error when they don't; a key never seen is a miss even
     /// if an unkeyed entry matches, because a fresh key is how a client asks for a deliberate
-    /// re-run. Without a key, the args hash replays only while the idea's turn count is still
-    /// what it was when the run finished — an identical message after an intervening turn is a
-    /// new question, not a retry.
+    /// re-run. Without a key, the args hash replays only while the idea's turn count and its
+    /// `(state, updated)` stamp are still what they were when the run finished — an identical
+    /// message after an intervening turn is a new question, and store/reopen change the idea
+    /// without appending a turn, so a stale replay would otherwise skip the state guards.
     fn replay_hit(
         &self,
         state: &AppState,
@@ -389,7 +394,10 @@ impl TaskRegistry {
             ),
             ReplayId::Explicit(_) => Ok(Some(replayed(&hit))),
             ReplayId::Hash(_) => {
-                Ok((turn_count(state, slug) == hit.turns_at_finish).then(|| replayed(&hit)))
+                let unchanged = turn_count(state, slug) == hit.turns_at_finish
+                    && hit.idea_at_finish.is_some()
+                    && idea_stamp(state, slug) == hit.idea_at_finish;
+                Ok(unchanged.then(|| replayed(&hit)))
             }
         }
     }
@@ -412,6 +420,7 @@ impl TaskRegistry {
                     args_hash: entry.call.args_hash.clone(),
                     result: result.clone(),
                     turns_at_finish,
+                    idea_at_finish: entry.idea_at_finish,
                     expires: Instant::now() + REPLAY_TTL,
                 },
             )),
@@ -572,6 +581,7 @@ impl TaskRegistry {
 fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Terminal {
     let turns = turn_count(state, &entry.slug);
     entry.turns_at_finish = Some(turns);
+    entry.idea_at_finish = idea_stamp(state, &entry.slug);
     let turn_landed = turns > entry.turns_at_claim;
     let terminal = match (terminal, entry.kind) {
         // `Idle` reads as success, but the job appended nothing: its real outcome went to another
@@ -580,6 +590,11 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
             Terminal::Completed,
             TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm | TaskKind::Plan,
         ) if !turn_landed => Terminal::Failed(CONSUMED_ELSEWHERE.to_string()),
+        // A store appends no turn; its effect is the Stored state. `Idle` without it means the
+        // job failed and another reader took its `Failed` slot — never report "stored".
+        (Terminal::Completed, TaskKind::Store) if !is_stored(state, &entry.slug) => {
+            Terminal::Failed(CONSUMED_ELSEWHERE.to_string())
+        }
         (terminal, _) => terminal,
     };
     entry.is_replayable = match (&terminal, entry.kind) {
@@ -596,6 +611,7 @@ fn render(state: &AppState, entry: &mut TaskEntry, terminal: Terminal) -> Termin
         state,
         &entry.slug,
         entry.kind,
+        entry.turns_at_claim,
         terminal.clone(),
     ));
     terminal
@@ -608,6 +624,12 @@ fn turn_count(state: &AppState, slug: &str) -> usize {
     store::read_conversation(&state.config.vault_dir, slug)
         .map(|c| store::split_turns(&c).len())
         .unwrap_or(0)
+}
+
+fn idea_stamp(state: &AppState, slug: &str) -> Option<IdeaStamp> {
+    store::read_idea(&state.config.vault_dir, slug)
+        .ok()
+        .map(|idea| (idea.frontmatter.state, idea.frontmatter.updated))
 }
 
 fn is_stored(state: &AppState, slug: &str) -> bool {
@@ -833,14 +855,29 @@ fn terminal_result(
     state: &AppState,
     slug: &str,
     kind: TaskKind,
+    own_turn: usize,
     terminal: Terminal,
 ) -> CallToolResult {
     match terminal {
         Terminal::Failed(msg) => CallToolResult::error(vec![Content::text(msg)]),
         Terminal::Cancelled => CallToolResult::error(vec![Content::text("task was cancelled")]),
-        Terminal::Notice(msg) => finish_result(state, slug, kind, Some(msg)),
-        Terminal::Completed => finish_result(state, slug, kind, None),
+        Terminal::Notice(msg) => finish_result(state, slug, kind, own_turn, Some(msg)),
+        Terminal::Completed => finish_result(state, slug, kind, own_turn, None),
     }
+}
+
+/// The task's own turn: the first one after its claim baseline (`own_turn` = `turns_at_claim`).
+/// Not the newest turn — a task first observed after another job has since run on the idea
+/// would otherwise serve (and cache for replay) that job's reply. Nothing else can append in
+/// between: the claimed slot refuses other jobs and the workbench, and a web chat sent while it
+/// runs waits in the in-memory queue until the slot frees.
+fn own_turn_text(state: &AppState, slug: &str, own_turn: usize) -> Result<String, String> {
+    let conversation =
+        store::read_conversation(&state.config.vault_dir, slug).map_err(|e| e.to_string())?;
+    Ok(store::split_turns(&conversation)
+        .into_iter()
+        .nth(own_turn)
+        .unwrap_or_default())
 }
 
 /// Derive the tool's `CallToolResult` from vault state at render time — see the module doc for
@@ -849,21 +886,16 @@ fn finish_result(
     state: &AppState,
     slug: &str,
     kind: TaskKind,
+    own_turn: usize,
     notice: Option<String>,
 ) -> CallToolResult {
     match kind {
         // Each of these appends exactly one assistant turn — the reply, the skill's move, or the
-        // swarm's converged synthesis — so the newest turn is the result.
+        // swarm's converged synthesis — so the task's own turn is the result.
         TaskKind::Chat | TaskKind::Skill | TaskKind::Swarm => {
-            match store::read_conversation(&state.config.vault_dir, slug) {
-                Ok(conversation) => {
-                    let reply = store::split_turns(&conversation)
-                        .into_iter()
-                        .last()
-                        .unwrap_or_default();
-                    CallToolResult::success(vec![Content::text(reply)])
-                }
-                Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
+            match own_turn_text(state, slug, own_turn) {
+                Ok(reply) => CallToolResult::success(vec![Content::text(reply)]),
+                Err(e) => CallToolResult::error(vec![Content::text(e)]),
             }
         }
         TaskKind::Store => match store::read_idea(&state.config.vault_dir, slug) {
@@ -876,35 +908,46 @@ fn finish_result(
             }
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
         },
-        TaskKind::Plan => plan_result(state, slug),
+        TaskKind::Plan => plan_result(state, slug, own_turn),
     }
 }
 
 /// A finished `build_plan`: the lineage head the run just wrote, as the same view `get_plan`
 /// returns, so the client can relay its open questions to the owner and answer them with
-/// `answer_plan` (docs/adr/0033). The head is served only when the run's own turn — the newest,
-/// its pointer — links to it: a run whose plan was unusable wrote an explanation but no plan, and
-/// an older head must not pass for this run's output, so that turn is served instead.
-fn plan_result(state: &AppState, slug: &str) -> CallToolResult {
+/// `answer_plan` (docs/adr/0033). The plan served is the one the run's own turn — its pointer —
+/// links to: a run whose plan was unusable wrote an explanation but no plan, and an older head
+/// must not pass for this run's output, so that turn is served instead. A later re-plan by
+/// someone else does not replace it either: the version is read by the pointer's stem, not as
+/// whatever the head is now.
+fn plan_result(state: &AppState, slug: &str, own_turn: usize) -> CallToolResult {
     let vault_dir = &state.config.vault_dir;
-    let newest = match store::read_conversation(vault_dir, slug) {
-        Ok(conversation) => store::split_turns(&conversation)
-            .into_iter()
-            .last()
-            .unwrap_or_default(),
-        Err(e) => return CallToolResult::error(vec![Content::text(e.to_string())]),
+    let own = match own_turn_text(state, slug, own_turn) {
+        Ok(own) => own,
+        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
     };
-    match workbench::plan_view(vault_dir, slug, None) {
-        Ok(view) if newest.contains(&view.stem) => {
-            CallToolResult::success(vec![Content::text(format!(
-                "plan {}\n\n{}\n\nrelay the open questions and owner-blocked tasks to the owner; \
+    let Some(stem) = pointer_stem(&own) else {
+        return CallToolResult::success(vec![Content::text(own)]);
+    };
+    match workbench::plan_view(vault_dir, slug, Some(stem)) {
+        Ok(view) if view.stem == stem => CallToolResult::success(vec![Content::text(format!(
+            "plan {}\n\n{}\n\nrelay the open questions and owner-blocked tasks to the owner; \
                  answer with answer_plan in the owner's own words",
-                view.stem,
-                view.to_json()
-            ))])
-        }
-        Ok(_) | Err(_) => CallToolResult::success(vec![Content::text(newest)]),
+            view.stem,
+            view.to_json()
+        ))]),
+        Ok(_) | Err(_) => CallToolResult::success(vec![Content::text(own)]),
     }
+}
+
+/// The plan stem a build-plan pointer turn links to (`**Build plan** → [<stem>](…)`).
+fn pointer_stem(turn: &str) -> Option<&str> {
+    let body = turn.split_once('\n').map_or(turn, |(_, rest)| rest);
+    let rest = body
+        .trim_start()
+        .strip_prefix(crate::domain::evidence::POINTER_PREFIX)?;
+    rest.split_once(']')
+        .map(|(stem, _)| stem)
+        .filter(|s| !s.is_empty())
 }
 
 /// A process-local, monotonically increasing task id — never persisted or compared across a

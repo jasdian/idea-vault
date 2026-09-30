@@ -50,6 +50,7 @@ pub(crate) fn workbench_error(e: WorkbenchError) -> WebError {
         | WorkbenchError::TooShort(_)
         | WorkbenchError::TooLong(_)
         | WorkbenchError::NotOwnWords(_)
+        | WorkbenchError::DuplicateId(_)
         | WorkbenchError::NothingToAnswer => WebError::BadRequest(e.to_string()),
         WorkbenchError::Concept(c) => WebError::Concept(c),
     }
@@ -63,7 +64,8 @@ fn refused_field(e: &WorkbenchError) -> Option<&str> {
         | WorkbenchError::NotAnswerable(id)
         | WorkbenchError::TooShort(id)
         | WorkbenchError::TooLong(id)
-        | WorkbenchError::NotOwnWords(id) => Some(id),
+        | WorkbenchError::NotOwnWords(id)
+        | WorkbenchError::DuplicateId(id) => Some(id),
         WorkbenchError::NothingToAnswer
         | WorkbenchError::NotAPlan(_)
         | WorkbenchError::NotFound(_)

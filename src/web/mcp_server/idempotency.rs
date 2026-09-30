@@ -8,8 +8,9 @@
 //!
 //! The two keys have different staleness rules: an explicit key is the client saying "this is
 //! the same operation", so it replays for as long as the entry lives; an args hash is only a
-//! guess, so it replays only while the idea's turn count is unchanged since the run finished —
-//! an identical `chat` message after an intervening turn is a new question, not a retry.
+//! guess, so it replays only while the idea's turn count and its `(state, updated)` stamp are
+//! unchanged since the run finished — an identical `chat` message after an intervening turn is a
+//! new question, not a retry, and a `store_idea` after a reopen is a new store.
 //!
 //! In memory only, like the task registry itself: a replay entry is meaningless across a
 //! restart, and a lost entry degrades to today's behaviour (a fresh run), never to a wrong one.
@@ -17,9 +18,12 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use rmcp::model::CallToolResult;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+use crate::domain::IdeaState;
 
 /// How long a served result stays replayable — long enough to cover an agent session that
 /// resumes the next morning, short enough that the in-memory map cannot grow without bound.
@@ -48,8 +52,16 @@ pub(super) struct Replay {
     pub args_hash: String,
     pub result: CallToolResult,
     pub turns_at_finish: usize,
+    /// The idea's `(state, updated)` when the result was rendered. An args-hash replay also
+    /// requires it unchanged: store and reopen append no turn, so the turn count alone cannot
+    /// tell that the idea moved on (a `store_idea` replayed after a reopen would claim a store
+    /// that never ran). `None` (unreadable idea) never matches.
+    pub idea_at_finish: Option<IdeaStamp>,
     pub expires: Instant,
 }
+
+/// What of an idea's frontmatter a replay is checked against — see [`Replay::idea_at_finish`].
+pub(super) type IdeaStamp = (IdeaState, DateTime<Utc>);
 
 #[derive(Default)]
 pub(super) struct ReplayCache {
@@ -112,6 +124,7 @@ mod tests {
             args_hash: "h".into(),
             result: CallToolResult::success(vec![Content::text("r")]),
             turns_at_finish: 1,
+            idea_at_finish: None,
             expires,
         }
     }

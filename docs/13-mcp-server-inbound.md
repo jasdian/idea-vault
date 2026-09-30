@@ -153,14 +153,15 @@ onto a different app with its own "background job, polled by the client" system:
    *status* but never stores a *return value* (the web UI doesn't need one — it just re-renders
    the transcript from disk once a job finishes). So when the job first goes idle, `observe`
    **derives the tool's result from the vault once and stores it** on the task entry
-   (`TaskEntry::rendered`, ADR-0033) — the newest conversation turn for
-   `chat`/`run_skill`/`run_swarm` (each appends exactly one assistant turn), the fresh
-   frontmatter for `store_idea`, the lineage head's `get_plan` JSON for `build_plan`. Deriving
-   at read time instead would hand a late `tasks/result` whatever turn is newest *then*, not this
-   task's own reply. This isn't a workaround; the vault is the source of truth (ADR-0002)
+   (`TaskEntry::rendered`, ADR-0033) — the task's own turn, the first after its claim baseline,
+   for `chat`/`run_skill`/`run_swarm` (each appends exactly one assistant turn), the fresh
+   frontmatter for `store_idea`, the `get_plan` JSON of the plan its pointer turn links for
+   `build_plan`. Taking the newest turn instead would hand a task first observed late, after
+   another job ran on the idea, that job's reply rather than its own. This isn't a workaround; the vault is the source of truth (ADR-0002)
    regardless of which surface asks. A job that ends `Idle` but landed no turn (the web `/pending`
-   poll consumed its `Failed`/`Notice` first) is rendered as an error, `finished but its result
-   was consumed elsewhere — check get_idea`, and never cached.
+   poll consumed its `Failed`/`Notice` first), or a `store_idea` that ends `Idle` with the idea
+   not `Stored`, is rendered as an error, `finished but its result was consumed elsewhere — check
+   get_idea`, and never cached.
 4. **`cancel_task`** (`tasks/cancel`) forwards straight to the job system's own `cancel`.
 5. **`call_sync_bounded`** (the plain-call fallback, ADR-0028) is not a fifth kind of reader: it
    calls the same `claim_and_spawn` as step 1, registers a real task id (plus a `slug → task_id`
@@ -187,8 +188,9 @@ A retry after a dropped response or a lost "still running" note must not start a
   live 24 h, in memory only: a restart loses them and the retry re-runs.
 - Explicit key: same key and same arguments replays whenever; the same key with different
   arguments is `invalid_params`; a key never seen is a miss (a fresh key is how a client forces a
-  new run). Hash key: replays only while the idea's turn count still equals the count when the run
-  finished, so an identical `chat` message after an intervening turn is a new question.
+  new run). Hash key: replays only while the idea's turn count and its `(state, updated)` stamp
+  still equal what they were when the run finished, so an identical `chat` message after an
+  intervening turn is a new question, and a `store_idea` after a reopen is a new store.
 - A replay is prefixed `(replayed result of task N) `; in task mode it mints an already-terminal
   task so `tasks/get` then `tasks/result` work unchanged.
 
@@ -204,7 +206,7 @@ flowchart TD
     KH -- yes --> HIT[replay the stored result]
     K -- no --> HL{entry for the args hash?}
     HL -- no --> RUN
-    HL -- yes --> TC{turn count unchanged<br/>since the run finished?}
+    HL -- yes --> TC{turn count and idea state/updated<br/>unchanged since the run finished?}
     TC -- yes --> HIT
     TC -- no --> RUN
     RUN --> OUT{terminal outcome}

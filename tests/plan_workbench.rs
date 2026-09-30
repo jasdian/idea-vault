@@ -308,8 +308,22 @@ async fn short_answer_is_422_and_writes_nothing() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert!(
-        body.contains(r#"<section class="planwork" id="work">"#),
+        body.contains(r#"<section class="planwork" id="work""#),
         "{body}"
+    );
+    // htmx 2 fires htmx:beforeSwap on the swap target (#work), not on the requesting form, so
+    // the 422 opt-in must sit on the section's own tag or the re-render is never swapped in.
+    let section_tag = &body[body.find(r#"<section class="planwork""#).unwrap()..];
+    let section_tag = &section_tag[..section_tag.find('>').unwrap()];
+    assert!(
+        section_tag.contains("hx-on::before-swap") && section_tag.contains("422"),
+        "the 422 opt-in is on the swap target: {section_tag}"
+    );
+    let form_tag = &body[body.find(r#"<form class="planwork__form""#).unwrap()..];
+    let form_tag = &form_tag[..form_tag.find('>').unwrap()];
+    assert!(
+        !form_tag.contains("before-swap"),
+        "a before-swap on the form never fires: {form_tag}"
     );
     assert!(body.contains("Q1: answer in at least"), "{body}");
     assert!(

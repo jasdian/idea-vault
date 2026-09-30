@@ -52,7 +52,10 @@ plan **version** deterministically. Six rules:
 4. **Every plan run joins the lineage.** `finish_as` (quick, audited, web or MCP) sets `revises`
    to the current head, carries every owner answer on the head's chain into the new plan
    (`carry_answers`) and drops an Open question that re-asks one (`suppress_answered`, each drop
-   noted in the gate report). There is no "fresh thread" option. For the capstones only, the
+   noted in the gate report). A question still standing under an answered id is a different
+   question and gets a fresh `Q#` (`renumber_reused_questions`, its `depends` rewritten), and a
+   gate-opened question never takes an answered id (`BuildPlan::next_question_id`), so a `Q#` is
+   answered at most once per lineage. There is no "fresh thread" option. For the capstones only, the
    prompt gains a `## Prior plan (ids only — not evidence)` block (the head's open ids and
    texts, each `answered Qn → words`), capped at 1500 bytes: it keeps ids stable and is never
    evidence.
@@ -107,7 +110,10 @@ Routes: R46 `POST /idea/{slug}/plan/{stem}/answer`, R47 `GET /idea/{slug}/plan/l
   `answers` items that `answered_in_lineage` reads; a `T#` answer lives on its version (the task's
   `unblocked` field) and as an owner turn.
 - **Invariants:** a base artifact's bytes never change; an identical resubmission returns the
-  existing successor (`reused`) and writes nothing; re-gating is idempotent (`reset_derived` then
+  existing successor (`reused`) and writes nothing but a pointer turn a failed earlier attempt
+  never wrote; every fallible read runs before the answer turns are written, and the turns go in
+  one write that a retry finds at the transcript's tail instead of writing again; one id answered
+  twice in a submission (`q6` and `Q6`) is refused (`DuplicateId`); re-gating is idempotent (`reset_derived` then
   `gates::run` renders the same bytes).
 
 ## Alternatives considered

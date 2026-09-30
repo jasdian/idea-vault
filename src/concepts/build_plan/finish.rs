@@ -350,6 +350,7 @@ pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, Concept
     let mut suppressed = GateReport::default();
     lineage::carry_answers(&mut plan, &answers);
     lineage::suppress_answered(&mut plan, &answers, &mut suppressed);
+    lineage::renumber_reused_questions(&mut plan, &answers);
     let mut report = gates::run(
         &mut plan,
         &GateInputs {

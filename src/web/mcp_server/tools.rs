@@ -491,6 +491,15 @@ fn plan_answers(args: &Value) -> Result<Vec<(String, String)>, McpError> {
                 .ok_or_else(bad)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // JSON keys are distinct only before normalizing: `q6` and `Q6` would answer one question
+    // twice, so the pair is refused rather than silently kept or merged.
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some((dup, _)) = answers.iter().find(|(id, _)| !seen.insert(id.clone())) {
+        return Err(McpError::invalid_params(
+            format!("'answers' names {dup} more than once — give one answer per id"),
+            None,
+        ));
+    }
     answers.sort_by_key(|(id, _)| {
         let mut chars = id.chars();
         let letter = chars.next();
@@ -687,6 +696,9 @@ mod tests {
         assert_eq!(ids, ["Q2", "Q10", "T4"]);
         assert!(plan_answers(&json!({"answers": {"Q1": 3}})).is_err());
         assert!(plan_answers(&json!({"answers": ["Q1"]})).is_err());
+        let dup = plan_answers(&json!({"answers": {"Q6": "one two three", "q6": "four five six"}}))
+            .unwrap_err();
+        assert!(dup.message.contains("Q6 more than once"), "{dup:?}");
     }
 
     #[test]

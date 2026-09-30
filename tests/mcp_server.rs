@@ -1621,6 +1621,154 @@ async fn store_idea_retry_after_served_replays() {
     assert_eq!(mock.chat_bodies().len(), calls, "no second store run");
 }
 
+/// Store and reopen append no turn, so the turn count alone cannot see them: a served
+/// `store_idea` must not replay "stored" once the idea was reopened, and a served `chat` must not
+/// replay its reply once the idea was stored (the state guard answers instead).
+#[tokio::test]
+async fn args_hash_replay_is_refused_after_a_state_change() {
+    let mock = spawn_store_ready_mock().await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let args = json!({ "slug": slug });
+
+    let stored = call_until_done(&app, &session, "store_idea", args.clone()).await;
+    assert!(text_of(&stored).starts_with("stored"), "{stored}");
+    let reopened = call_tool(&app, &session, "reopen_idea", json!({ "slug": slug })).await;
+    assert_ne!(reopened["isError"], true, "{reopened}");
+
+    let again = call_until_done(&app, &session, "store_idea", args).await;
+    let again_text = text_of(&again);
+    assert!(
+        !again_text.starts_with(REPLAY_PREFIX),
+        "a store after a reopen is a new store, not a replay: {again}"
+    );
+    let idea = idea_vault::vault::store::read_idea(&vault_dir, &slug).unwrap();
+    assert!(
+        idea.frontmatter.state == idea_vault::domain::IdeaState::Stored || again["isError"] == true,
+        "a 'stored' result must mean the idea is stored: {again}"
+    );
+}
+
+#[tokio::test]
+async fn chat_replay_is_refused_once_the_idea_is_stored() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["the reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+    let args = json!({ "slug": slug, "message": "x" });
+
+    let first = call_until_done(&app, &session, "chat", args.clone()).await;
+    assert!(text_of(&first).contains("the reply"), "{first}");
+    set_state(&vault_dir, &slug, idea_vault::domain::IdeaState::Stored);
+
+    let req = json!({
+        "jsonrpc": "2.0", "id": 120, "method": "tools/call",
+        "params": { "name": "chat", "arguments": args }
+    });
+    let (_, _, body) = send(&app, mcp_request(req, Some(&session), Some(TOKEN))).await;
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("idea is stored")),
+        "the Stored guard answers, not a replay: {body}"
+    );
+}
+
+/// A store whose `Failed` slot another reader consumed ends `Idle`; with the idea not Stored,
+/// that is not a success.
+#[tokio::test]
+async fn store_task_whose_failure_was_consumed_elsewhere_is_not_a_success() {
+    // A refused Ollama port: the store job fails fast.
+    let (state, vault_dir) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let jobs = state.jobs.clone();
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 121, "method": "tools/call",
+        "params": { "name": "store_idea", "arguments": { "slug": slug }, "task": {} }
+    });
+    let (_, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The web `/pending` poll's read: it takes the `Failed` slot before the MCP client looks.
+    let mut consumed = false;
+    for _ in 0..500 {
+        match idea_vault::web::jobs::peek(&jobs, &slug) {
+            idea_vault::web::jobs::Pending::Running { .. } => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            idea_vault::web::jobs::Pending::Failed(_) => {
+                consumed = true;
+                break;
+            }
+            idea_vault::web::jobs::Pending::Idle | idea_vault::web::jobs::Pending::Notice(_) => {
+                panic!("expected the store to fail against a refused Ollama port")
+            }
+        }
+    }
+    assert!(consumed, "the store job never failed");
+
+    assert_eq!(wait_task(&app, &session, &task_id).await, "failed");
+    let result = task_result(&app, &session, &task_id).await;
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(!text_of(&result).starts_with("stored"), "{result}");
+}
+
+/// The result is the task's own turn even when it is first observed after another actor has
+/// since added turns to the idea — the newest turn is theirs, not this task's reply.
+#[tokio::test]
+async fn late_first_observation_serves_own_reply_not_the_newest_turn() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["own reply".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let jobs = state.jobs.clone();
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    let enqueue = json!({
+        "jsonrpc": "2.0", "id": 122, "method": "tools/call",
+        "params": { "name": "chat", "arguments": { "slug": slug, "message": "A" }, "task": {} }
+    });
+    let (_, _, body) = send(&app, mcp_request(enqueue, Some(&session), Some(TOKEN))).await;
+    let task_id = body["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Wait for the job without observing the task: `Idle` is not a consuming read.
+    for _ in 0..500 {
+        if matches!(
+            idea_vault::web::jobs::peek(&jobs, &slug),
+            idea_vault::web::jobs::Pending::Idle
+        ) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // Another actor's exchange lands before anyone asks about the task.
+    idea_vault::vault::store::append_turn(&vault_dir, &slug, "user", "B").unwrap();
+    idea_vault::vault::store::append_turn(&vault_dir, &slug, "assistant", "someone else's reply")
+        .unwrap();
+
+    assert_eq!(wait_task(&app, &session, &task_id).await, "completed");
+    let text = text_of(&task_result(&app, &session, &task_id).await);
+    assert!(
+        text.contains("own reply") && !text.contains("someone else's reply"),
+        "{text}"
+    );
+}
+
 // ---- Plan tools (docs/adr/0033 over the docs/adr/0032 workbench) ----
 
 /// A plan with a question that holds a task back: T2 depends on Q1, T3 inherits through T2.

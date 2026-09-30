@@ -2,8 +2,12 @@
    forward — answer in your own words (a deterministic new version, no model call) or re-plan
    with the model. Forms render only on the lineage head of an idea in discussion. The answer
    form swaps this section on a 422 (the field errors, with the owner's words kept); a 409 or
-   400 lands its text in the flash line instead, since htmx swaps no error response by default. #}
-<section class="planwork" id="work">
+   400 lands its text in the flash line instead, since htmx swaps no error response by default.
+   The 422 opt-in sits on the section, not the form: htmx 2 fires htmx:beforeSwap on the swap
+   target (#work), and events bubble up from it, never down into the form. The
+   `event.target === this` guard keeps the re-plan forms (which target themselves) out of it. #}
+<section class="planwork" id="work"
+         hx-on::before-swap="if (event.target === this && event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }">
   <h2 class="planwork__title">Work this plan</h2>
   <p class="planwork__lineage">
     <span class="planwork__v">v{{ version }}</span>
@@ -41,7 +45,6 @@
   {% if is_answerable() %}
   <form class="planwork__form" hx-post="/idea/{{ slug }}/plan/{{ stem }}/answer"
         hx-target="#work" hx-swap="outerHTML" hx-disabled-elt="find .planwork__save"
-        hx-on::before-swap="if (event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }"
         hx-on::response-error="this.querySelector('.planwork__flash').textContent = event.detail.xhr.responseText">
   {% endif %}
 

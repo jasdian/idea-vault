@@ -102,7 +102,9 @@ pub fn successors(plans: &[PlanRef], stem: &str) -> Vec<String> {
 }
 
 /// Every owner answer recorded on `stem`'s chain: each Settled item carrying `answers`. When a
-/// question id was answered more than once, the newest answer wins. Oldest answer first.
+/// question id was answered more than once, the newest answer wins: the chain is walked newest
+/// plan first and, within a plan, last item first, since an answer is appended after any item
+/// an older version carried under the same id. Oldest answer first.
 pub fn answered_in_lineage(
     vault_dir: &Path,
     slug: &str,
@@ -118,7 +120,7 @@ pub fn answered_in_lineage(
         else {
             continue;
         };
-        for item in &parsed.settled {
+        for item in parsed.settled.iter().rev() {
             let Some(qid) = item.field("answers") else {
                 continue;
             };
@@ -184,6 +186,44 @@ pub fn carry_answers(plan: &mut BuildPlan, answers: &[Answered]) {
             }
         }
     }
+}
+
+/// Give a fresh `Q#` to every open question of a fresh model plan whose id an owner answer in
+/// the lineage already holds, and follow the rename in the tasks' `depends`. Runs after
+/// [`carry_answers`] and [`suppress_answered`]: a question still standing then is a different
+/// question, and the model's reuse of the number (the prompt asks it to keep ids, nothing
+/// enforces it) would otherwise make its answer collide with the carried one.
+pub fn renumber_reused_questions(plan: &mut BuildPlan, answers: &[Answered]) {
+    let taken: BTreeSet<&str> = answers
+        .iter()
+        .map(|a| a.qid.as_str())
+        .chain(plan.settled.iter().filter_map(|s| s.field("answers")))
+        .collect();
+    let answered_max = taken
+        .iter()
+        .filter_map(|q| q.strip_prefix('Q')?.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    let clashing: Vec<usize> = (0..plan.open.len())
+        .filter(|&i| taken.contains(plan.open[i].id.as_str()))
+        .collect();
+    if clashing.is_empty() {
+        return;
+    }
+    let mut next = plan
+        .open
+        .iter()
+        .filter_map(|q| q.id.strip_prefix('Q')?.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0)
+        .max(answered_max);
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    for i in clashing {
+        next += 1;
+        let old = std::mem::replace(&mut plan.open[i].id, format!("Q{next}"));
+        renamed.push((old, format!("Q{next}")));
+    }
+    plan.rename_question_refs(&renamed);
 }
 
 /// Remove `ids` from `task`'s `depends`: an entry whose question ids are all in `ids` goes whole,
@@ -373,6 +413,107 @@ mod tests {
             report.notes,
             ["Q1 dropped: already answered in S2 (20260929-120000-build-plan)"]
         );
+    }
+
+    /// An answer to Q2, as a re-plan carries it into the model's fresh plan.
+    fn answered_q2() -> Answered {
+        Answered {
+            qid: "Q2".into(),
+            asked: "Which exchange feeds the backtest data?".into(),
+            answer: "Binance spot data, the free daily candles only.".into(),
+            in_stem: "20260929-120000-build-plan".into(),
+        }
+    }
+
+    #[test]
+    fn replan_reusing_an_answered_id_gets_a_fresh_one() {
+        // The model re-numbered: its Q2 is a new question, not the answered exchange one.
+        let mut plan = plan::parse(
+            "## Goal\nShip it.\n\n## Open questions\n- Q1: Freeze at entry or dwell on the label?\n\
+- Q2: How many markets does the first release cover?\n\n\
+## Plan\n- [ ] T1: Build the scanner\n  depends: Q2 (market count), Q1\n- [ ] T2: Wire it\n  depends: T1\n",
+        )
+        .unwrap();
+        let answers = [answered_q2()];
+        carry_answers(&mut plan, &answers);
+        let mut report = GateReport::default();
+        suppress_answered(&mut plan, &answers, &mut report);
+        renumber_reused_questions(&mut plan, &answers);
+        let open: Vec<&str> = plan.open.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(open, ["Q1", "Q3"]);
+        assert_eq!(
+            plan.open[1].text,
+            "How many markets does the first release cover?"
+        );
+        assert_eq!(
+            plan.tasks[0].field("depends"),
+            Some("Q3 (market count), Q1")
+        );
+        assert_eq!(plan.tasks[1].field("depends"), Some("T1"));
+        let holders: Vec<&str> = plan
+            .settled
+            .iter()
+            .filter_map(|s| s.field("answers"))
+            .collect();
+        assert_eq!(holders, ["Q2"], "the carried answer keeps its id alone");
+
+        // A gate-opened question never takes an answered id either.
+        let mut gated = BuildPlan::default();
+        gated.settled.push(answer_item("S1", &answered_q2()));
+        gated.open_from(Item::new("S2", "Is the feed licensed?"), "opened: test");
+        assert_eq!(gated.open[0].id, "Q3");
+    }
+
+    #[test]
+    fn newest_answer_to_a_reused_id_wins_within_a_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        store::write_idea(
+            dir.path(),
+            &Idea {
+                frontmatter: IdeaFrontmatter {
+                    title: "Reused".into(),
+                    slug: "reused".into(),
+                    state: IdeaState::InDiscussion,
+                    tags: vec![],
+                    sources: vec![],
+                    created: at(0),
+                    updated: at(0),
+                },
+                body: "An idea.\n".into(),
+            },
+        )
+        .unwrap();
+        // Written before ids were kept unique: a carried Q2 answer, then a newer one under Q2.
+        let body = "## Goal\nShip it.\n\n## Settled\n\
+- S1: Binance spot data.\n  quote: Binance spot data, the free daily candles only.\n  answers: Q2\n  asked: Which exchange?\n  in: a\n\
+- S2: Three markets.\n  quote: Three markets in the first release, no more.\n  answers: Q2\n  asked: How many markets?\n  in: b\n\n\
+## Plan\n- [ ] T1: Build it\n  touches: `a.rs`\n  accept: `true` → exit 0\n";
+        store::write_artifact(
+            dir.path(),
+            "reused",
+            &Artifact {
+                frontmatter: ArtifactFrontmatter {
+                    slug: "b".into(),
+                    title: "x".into(),
+                    kind: ArtifactKind::BuildPlan,
+                    lens: None,
+                    created: at(1),
+                    model: "m".into(),
+                    revises: None,
+                    version: None,
+                    answered: Vec::new(),
+                },
+                body: body.into(),
+            },
+        )
+        .unwrap();
+        let got = answered_in_lineage(dir.path(), "reused", "b").unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            got[0].answer,
+            "Three markets in the first release, no more."
+        );
+        assert_eq!(got[0].in_stem, "b");
     }
 
     #[test]

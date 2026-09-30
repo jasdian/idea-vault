@@ -267,9 +267,68 @@ impl BuildPlan {
             .chain(&mut self.quarantined)
     }
 
+    /// The next `Q#` free of every open question and of every question id an owner answer in
+    /// Settled records (`answers`). Answer identity is the bare `Q#` across a lineage
+    /// (docs/adr/0032), so a freed answered id handed to a new question would read as answered.
+    pub fn next_question_id(&self) -> String {
+        let answered = self
+            .settled
+            .iter()
+            .filter_map(|s| s.field("answers"))
+            .filter_map(|q| q.strip_prefix('Q')?.parse::<usize>().ok());
+        let open = self
+            .open
+            .iter()
+            .filter_map(|q| q.id.strip_prefix('Q')?.parse::<usize>().ok());
+        format!("Q{}", answered.chain(open).max().unwrap_or(0) + 1)
+    }
+
+    /// Rename open-question ids per `renamed` (`(old, new)`) in every task's `depends`, keeping
+    /// each entry's annotation. Entries naming none of the old ids are left byte for byte.
+    pub(crate) fn rename_question_refs(&mut self, renamed: &[(String, String)]) {
+        if renamed.is_empty() {
+            return;
+        }
+        let rename = |word: &str| {
+            let upper = word.to_ascii_uppercase();
+            renamed
+                .iter()
+                .find(|(old, _)| *old == upper)
+                .map_or_else(|| word.to_string(), |(_, new)| new.clone())
+        };
+        for task in &mut self.tasks {
+            let Some(value) = task.field("depends") else {
+                continue;
+            };
+            let entries: Vec<String> = value
+                .split(',')
+                .map(|entry| {
+                    let (head, annotation) = split_annotation(entry);
+                    let hit = is_id_head(head)
+                        && scan_ids(head, 'Q')
+                            .iter()
+                            .any(|q| renamed.iter().any(|(o, _)| o == q));
+                    if !hit {
+                        return entry.trim().to_string();
+                    }
+                    let head: Vec<String> = head.split_whitespace().map(rename).collect();
+                    let head = head.join(" ");
+                    if annotation.trim().is_empty() {
+                        head
+                    } else {
+                        format!("{head} {}", annotation.trim())
+                    }
+                })
+                .filter(|e| !e.is_empty())
+                .collect();
+            task.fields
+                .insert("depends".to_string(), entries.join(", "));
+        }
+    }
+
     /// Move `item` to Open questions as a proposal, with a marker saying why it was opened.
     pub fn open_from(&mut self, mut item: Item, marker: impl Into<String>) {
-        item.id = next_id(&self.open, 'Q');
+        item.id = self.next_question_id();
         if !item.text.starts_with("proposed:") {
             item.text = format!("proposed: {}", item.text);
         }

@@ -61,7 +61,7 @@
 | **D19** | DAG (activity) | The interrogate workflow (fan-out → judge → audit → synthesize) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D32** | Flowchart | Workflow stage model: FanOut / Chain (carried forward) / Audit / Synthesize, failure paths, persistence, the build-plan persist branch (ADR-0022, ADR-0023, ADR-0030) | [06-concepts/workflows](./06-concepts/workflows.md) |
 | **D33** | Flowchart | Plan workbench: answer → validate → owner turns → reset/apply/re-gate → new linked version (+ superseded, busy and re-plan branches) (ADR-0032) | [06-concepts/skills](./06-concepts/skills.md) |
-| **D34** | Flowchart | MCP replay decision: in-flight reattach → explicit key / args hash + turn count → replay or fresh run; what is cached (ADR-0033) | [13-mcp-server-inbound](./13-mcp-server-inbound.md) |
+| **D34** | Flowchart | MCP replay decision: in-flight reattach → explicit key / args hash + turn count + idea stamp → replay or fresh run; what is cached (ADR-0033) | [13-mcp-server-inbound](./13-mcp-server-inbound.md) |
 | **D20** | State machine | Ollama-unavailable degradation | [05-ai-integration](./05-ai-integration.md) |
 | **D21** | Sequence | Concurrency & context-budget model | [06-concepts/swarm](./06-concepts/swarm.md) |
 | **D22** | Activity | Slug lifecycle & collision handling | [03-data-model](./03-data-model.md) |
