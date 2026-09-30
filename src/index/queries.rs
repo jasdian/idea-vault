@@ -1090,6 +1090,7 @@ mod tests {
                     sources: vec![],
                     created: Utc.with_ymd_and_hms(2026, 7, 7, hour, 0, 0).unwrap(),
                     updated: Utc.with_ymd_and_hms(2026, 7, 7, hour, 0, 0).unwrap(),
+                    extra: Default::default(),
                 },
                 body: body.into(),
             },

@@ -37,6 +37,7 @@ flowchart TB
         subgraph vault["vault/ (disk = truth)"]
             V_STORE["store.rs — read/write idea.md, conversation.md, memory/*.md, MEMORY.md, artifacts/*.{md,html}"]
             V_WALK["walk.rs — scan vault/** for reindex"]
+            V_VALID["validate.rs — read-only vault check: frontmatter, MEMORY.md coverage, duplicate memories"]
         end
 
         subgraph index["index/ (SQLite = derived)"]

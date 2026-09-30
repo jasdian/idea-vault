@@ -15,7 +15,7 @@ no `--skip`, `--from` or environment seam; the only flags are `--list` (print th
 | 1 | intent | The top `# Intent` block of `docs/INTENT.md` has `## Acceptance criteria` with a `- ` bullet and names an `ADR-NNNN` or `D<n>`; on a branch, `docs/INTENT.md` changed since `merge-base(HEAD, main)` (no `main` ref is red, never a silent pass) |
 | 2 | invariants | `scripts/check-invariants.sh --strict` |
 | 3 | build | `cargo build` |
-| 4 | tests | `cargo test`; red first if `PARSER_CORPUS_BLESS` is set at all, because blessing inside the gate is a bypass |
+| 4 | tests | `cargo test`, then `idea-vault validate` on a scratch copy of the golden vault (any finding is red); red first if `PARSER_CORPUS_BLESS` is set at all, because blessing inside the gate is a bypass |
 | 5 | fmt | `cargo fmt --check` |
 | 6 | clippy | `cargo clippy --all-targets -- -D warnings` |
 | 7 | honesty | On a branch, every changed fixture or snapshot, rising `*_FLOOR`, and removed or downgraded catalog id since the merge-base is listed as `- <path or id>: <why>` under `## Expectation changes` in the top intent block (an item ending in `/` covers a directory) |

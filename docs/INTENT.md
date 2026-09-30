@@ -1,43 +1,29 @@
-# Intent — make-skill button: distil an owner skill from a discussion (ADR-0042, D42)
+# Intent — hardening: a Rust `validate` command, frontmatter round-trip and version, conversation fsync, validate in the gate (ADR-0002, ADR-0041)
 
-The owner distils reusable ideation moves by hand today: a move that worked in one discussion
-(often one improvised in chat, never a named skill) stays buried in that idea. The make-skill
-button runs one background job that reads the discussion and drafts a skill file for the skill
-book, which the owner reviews, edits and saves. Design: ADR-0042 (D42, R51, R52; amends ADR-0022
-and ADR-0023). Owner decisions of 2026-09-30 are binding: D1 stored ideas can be distilled without
-reopening, with a visible thinking indicator; D2 an optional `origin:` field on skill files; D3
-evidence grounding is a warning only, never a Save gate; D4 the draft is editable before Save; D5
-MCP gets a draft-only `make_skill` tool; D6 built-in and internal names force a rename, an owner
-skill is updated with a diff and a stale check; D7 make-workflow is a later phase; D8 the job runs
-under the harvester role.
+The owner's hardening plan (build plan 20260930-141215, a small ticket set, not an architecture
+idea). Markdown is the source of truth (ADR-0002), so the files must be trustworthy on their own:
+nothing checks a vault's frontmatter, MEMORY.md coverage or duplicate memories; a rewrite of
+`idea.md` drops any frontmatter key the app does not know; `idea.md` carries no format version;
+and `conversation.md` is appended without an fsync. The chat route's swallowed Draft→InDiscussion
+write (the plan's T4) is already fixed on main (BE-007). Turn ordering is deliberately not
+validated: consecutive user turns are legitimate (ADR-0032).
 
 ## Acceptance criteria
 
-- An idea page has a "make skill" button; pressing it runs a background job with a visible thinking
-  indicator and ends with a skill draft under Artifacts, never a transcript turn (ADR-0042).
-- The draft is a skill file the skill book's own loader accepts; every evidence quote is marked
-  grounded or not against the discussion (an ungrounded one is warned about, never a Save block,
-  D3), and the run journal is never read.
-- Nothing reaches vault/.skills/ until the owner presses Save; Save revalidates the (editable) text,
-  never overwrites a built-in or internal skill, shows a diff and refuses a stale base when updating
-  an owner skill, and the new skill appears on /skills with a "distilled from" link without a
-  restart.
-- A distil run costs at most 2 model calls; a stored idea can be distilled without reopening it,
-  with a visible thinking indicator on the stored view (D1).
-- MCP clients can draft with `make_skill` (long-running, idempotent replay) but cannot save (D5).
-- Every change is observed failing first, and `bash scripts/gate.sh` is green.
+- `idea-vault validate` (vault from `IDEA_VAULT_VAULT_DIR`) reports every unparseable `idea.md` or
+  `memory/*.md` and every slug that does not match its folder or file name, every memory fact
+  missing from `MEMORY.md` and every `MEMORY.md` line pointing at a missing fact, and every pair of
+  facts in one idea sharing a title or a body (case and whitespace folded). One line per finding,
+  exit 1 on any finding, exit 0 when clean; read-only. `cargo test validate` covers each check.
+- Rewriting an `idea.md` keeps every frontmatter key the app does not know: known keys first in
+  struct order, then unknown keys sorted (`cargo test frontmatter_roundtrip`).
+- A newly written `idea.md` carries a frontmatter format version; an `idea.md` without one still
+  loads (`cargo test frontmatter_version`).
+- Every append to an existing `conversation.md` is fsynced before it returns (`cargo test
+  chat_fsync`).
+- `scripts/gate.sh` runs `validate` on a temporary copy of the golden vault fixture and fails on any
+  finding, and `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
-- src/domain/skill.rs OutputContract::ALL: 8 → 9 (`skill_draft`); the docs/06-concepts/skills.md
-  contract row gains `skill_draft` (tests/doc_examples.rs `skill_field_table_matches_enums`).
-- src/concepts/skills.rs INTERNAL_SKILLS: 2 → 3 and BUILTIN +1 (`distill-skill`); tests keyed on
-  `BUILTIN.len()` follow without edits.
-- src/web/routes/ideas.rs stored_outcome: the Running arm becomes a visible thinking indicator (was
-  an aria-hidden poll); the "Only the store job can finish on a Stored idea" statement is withdrawn
-  (D1).
-- web::mcp_server::tools::tests::catalog_is_stable_and_marks_long_running_tools_as_task_optional:
-  the catalog count 16 → 17 and `make_skill` joins the task-optional list (ADR-0042 D5).
-- src/domain/frontmatter.rs SkillFrontmatter: `use_when`, `avoid_when` and `hidden` skip their
-  defaults when serialized, for the new `emit_skill`; parsing is unchanged.
-- web::templates::Stored gains `busy`; the stored panel carries the make-skill button (D1).
+None: this change touches no fixture, snapshot, floor or invariant rule.

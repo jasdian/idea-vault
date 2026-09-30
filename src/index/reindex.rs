@@ -681,6 +681,7 @@ mod tests {
                 sources: vec![],
                 created: dt(10),
                 updated: dt(11),
+                extra: Default::default(),
             },
             body: body.into(),
         }
@@ -2198,6 +2199,27 @@ mod tests {
 
         // And the skip is stable: drift check ignores it the same way.
         assert!(!check_drift(&conn, tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn reindex_skips_an_idea_from_a_newer_format_and_keeps_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        std::fs::create_dir_all(tmp.path().join("future")).unwrap();
+        std::fs::write(
+            tmp.path().join("future/idea.md"),
+            "---\nformat_version: 2\ntitle: Future\nslug: future\nstate: draft\n\
+created: 2026-07-07T10:00:00Z\nupdated: 2026-07-07T10:00:00Z\n---\n\nFrom a newer build.\n",
+        )
+        .unwrap();
+
+        let mut conn = mem_conn();
+        let counts = reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(counts.ideas, 3); // the too-new idea is skipped, never rewritten or half-indexed
+        assert!(!check_drift(&conn, tmp.path()).unwrap());
+        assert!(std::fs::read_to_string(tmp.path().join("future/idea.md"))
+            .unwrap()
+            .starts_with("---\nformat_version: 2\n"));
     }
 
     fn lexical_edge_rows(conn: &Connection) -> Vec<(String, String, f64, String)> {

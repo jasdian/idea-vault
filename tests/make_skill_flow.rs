@@ -42,6 +42,7 @@ fn seed(vault: &Path) {
                 sources: vec![],
                 created: Utc.with_ymd_and_hms(2026, 9, 30, 10, 0, 0).unwrap(),
                 updated: Utc.with_ymd_and_hms(2026, 9, 30, 10, 0, 0).unwrap(),
+                extra: Default::default(),
             },
             body: "A peer-tutoring marketplace.\n".into(),
         },

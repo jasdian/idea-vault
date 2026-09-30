@@ -6,6 +6,7 @@
 //! on `index`, `ai`, `memory`, `concepts`, or `web`.
 
 pub mod store;
+pub mod validate;
 pub mod walk;
 
 pub use store::{ensure_vault_dir, probe_vault, VaultHealth, VaultInit, VAULT_MARKER};

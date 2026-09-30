@@ -117,15 +117,42 @@ fn checked_idea_dir(vault_dir: &Path, slug: &str) -> Result<PathBuf, VaultError>
 
 /// Write `contents` to `path` via a unique sibling `*.tmp-*` file + rename, so truth files are
 /// never left half-written and concurrent writers to the same target cannot consume each
-/// other's temp file. The suffix keeps temp files out of every `.md`-extension scan.
+/// other's temp file. The suffix keeps temp files out of every `.md`-extension scan. The temp
+/// file is fsynced before the rename and the directory after it, so a power loss right after a
+/// successful write leaves either the old file or the new one, never an empty one. A failure
+/// before the rename removes the temp file (best effort), so retries never pile up orphans. An
+/// error from the directory fsync means the new content is already in place but not yet known to
+/// be durable; every caller rewrites the whole file, so a retry cannot apply a change twice.
 fn write_atomic(path: &Path, contents: &str) -> Result<(), VaultError> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".tmp-{}-{}", std::process::id(), n));
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)?;
+    let placed = fs::File::create(&tmp)
+        .map_err(VaultError::from)
+        .and_then(|mut file| write_synced(&mut file, contents.as_bytes()))
+        .and_then(|()| fs::rename(&tmp, path).map_err(VaultError::from));
+    if let Err(e) = placed {
+        if let Err(cleanup) = fs::remove_file(&tmp) {
+            if cleanup.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(tmp = %tmp.display(), error = %cleanup, "could not remove temp file");
+            }
+        }
+        return Err(e);
+    }
+    sync_parent_dir(path)
+}
+
+/// Make a rename in `path`'s directory durable. Unix only: a directory cannot be opened for
+/// fsync elsewhere, and the rename itself is still atomic there.
+fn sync_parent_dir(path: &Path) -> Result<(), VaultError> {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -206,7 +233,27 @@ pub fn append_conversation(
         .create(true)
         .append(true)
         .open(dir.join("conversation.md"))?;
-    file.write_all(turn_markdown.as_bytes())?;
+    write_synced(&mut file, turn_markdown.as_bytes())
+}
+
+/// The durability seam of an append: a `File` fsyncs, a test double records the call.
+trait SyncAll {
+    fn sync_all(&self) -> std::io::Result<()>;
+}
+
+impl SyncAll for fs::File {
+    fn sync_all(&self) -> std::io::Result<()> {
+        fs::File::sync_all(self)
+    }
+}
+
+/// Write `bytes` and fsync before returning, so an appended turn survives a crash or power loss
+/// right after the request that wrote it reports success. A failed fsync is the write's error.
+/// This covers appends to an existing `conversation.md` (`create_idea` writes it with the idea);
+/// the directory entry of a file created here is not fsynced.
+fn write_synced<F: Write + SyncAll>(file: &mut F, bytes: &[u8]) -> Result<(), VaultError> {
+    file.write_all(bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -558,7 +605,13 @@ pub fn read_memory_index(vault_dir: &Path, idea_slug: &str) -> Result<MemoryInde
         }
         Err(e) => return Err(e.into()),
     };
+    Ok(parse_memory_index(&raw))
+}
 
+/// Parse the text of a `MEMORY.md`: one entry per `- [Title](memory/<slug>.md) — <summary>` line,
+/// other lines skipped. Split from [`read_memory_index`] so `validate` can read the file itself
+/// and report an unreadable one as a finding.
+pub fn parse_memory_index(raw: &str) -> MemoryIndex {
     let mut entries = Vec::new();
     for line in raw.lines() {
         let Some(rest) = line.strip_prefix("- [") else {
@@ -580,7 +633,7 @@ pub fn read_memory_index(vault_dir: &Path, idea_slug: &str) -> Result<MemoryInde
             summary: summary.to_string(),
         });
     }
-    Ok(MemoryIndex { entries })
+    MemoryIndex { entries }
 }
 
 /// Rebuild `vault/<idea_slug>/MEMORY.md` (the one-line-per-fact pointer index) by scanning
@@ -969,6 +1022,7 @@ mod tests {
                 sources: vec![],
                 created: Utc.with_ymd_and_hms(2026, 7, 7, 10, 15, 0).unwrap(),
                 updated: Utc.with_ymd_and_hms(2026, 7, 7, 11, 40, 0).unwrap(),
+                extra: Default::default(),
             },
             body: "The current best statement.\n".into(),
         }
@@ -1090,6 +1144,92 @@ mod tests {
         assert!(convo.contains("\\## assistant"), "forged heading escaped");
         // The whole submission stays ONE turn — the forged boundary does not split it.
         assert_eq!(split_turns(&convo).len(), 1);
+    }
+
+    /// Records the order of writes and syncs; `fail_sync` makes the fsync fail.
+    #[derive(Default)]
+    struct SyncRecorder {
+        events: std::cell::RefCell<Vec<&'static str>>,
+        written: Vec<u8>,
+        fail_sync: bool,
+    }
+
+    impl Write for SyncRecorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.events.borrow_mut().push("write");
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SyncAll for SyncRecorder {
+        fn sync_all(&self) -> std::io::Result<()> {
+            self.events.borrow_mut().push("sync_all");
+            if self.fail_sync {
+                return Err(std::io::Error::other("disk gone"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn chat_fsync_append_writes_then_calls_sync_all() {
+        let mut file = SyncRecorder::default();
+        write_synced(&mut file, b"## user\nhi\n").unwrap();
+        assert_eq!(file.written, b"## user\nhi\n");
+        assert_eq!(file.events.into_inner(), vec!["write", "sync_all"]);
+    }
+
+    #[test]
+    fn chat_fsync_failure_is_the_writes_error() {
+        let mut file = SyncRecorder {
+            fail_sync: true,
+            ..SyncRecorder::default()
+        };
+        let err = write_synced(&mut file, b"## user\nhi\n").unwrap_err();
+        assert!(matches!(err, VaultError::Io(_)), "{err:?}");
+    }
+
+    #[test]
+    fn atomic_fsync_write_lands_whole_and_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        let names: Vec<String> = fs::read_dir(tmp.path().join("i"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["idea.md".to_string()]);
+        assert_eq!(read_idea(tmp.path(), "i").unwrap(), sample_idea("i"));
+    }
+
+    #[test]
+    fn atomic_fsync_failed_write_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory where the file belongs: the rename onto it fails, even as root.
+        let target = tmp.path().join("idea.md");
+        fs::create_dir(&target).unwrap();
+
+        assert!(write_atomic(&target, "new").is_err());
+        let names: Vec<String> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["idea.md".to_string()], "no *.tmp-* left behind");
+    }
+
+    #[test]
+    fn chat_fsync_append_turn_still_lands_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_idea(tmp.path(), &sample_idea("i")).unwrap();
+        append_turn(tmp.path(), "i", "user", "durable").unwrap();
+        assert_eq!(
+            read_conversation(tmp.path(), "i").unwrap(),
+            "## user\ndurable\n"
+        );
     }
 
     #[test]

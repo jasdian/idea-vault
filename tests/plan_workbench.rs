@@ -78,6 +78,7 @@ fn write_idea(vault: &Path, state: IdeaState) {
                 sources: vec![],
                 created: at(0),
                 updated: at(0),
+                extra: Default::default(),
             },
             body: "A zone snapshot trading tool.\n".into(),
         },

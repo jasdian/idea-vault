@@ -42,6 +42,7 @@ fn seed_idea(vault: &Path) {
                 sources: vec![],
                 created: Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
                 updated: Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
+                extra: Default::default(),
             },
             body: "Make chat.rs stream its replies instead of buffering them.\n".into(),
         },

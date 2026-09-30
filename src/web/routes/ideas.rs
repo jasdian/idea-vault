@@ -768,6 +768,7 @@ pub async fn fork_idea(
             sources: src.frontmatter.sources.clone(),
             created: now,
             updated: now,
+            extra: src.frontmatter.extra.clone(),
         },
         body: src.body.clone(),
     };
@@ -1400,6 +1401,7 @@ pub(crate) fn create_idea_core(
             sources: Vec::new(),
             created: now,
             updated: now,
+            extra: Default::default(),
         },
         body: if body.trim().is_empty() {
             String::new()
