@@ -161,6 +161,9 @@ fn artifact_meta(fm: &crate::domain::ArtifactFrontmatter) -> String {
             format!("build plan · v{} · {when}", fm.version.unwrap_or(1))
         }
         (ArtifactKind::Quarantine, _) => format!("quarantined facts · unverified · {when}"),
+        (ArtifactKind::GroundMap, _) => format!("grounded map · anchors verified · {when}"),
+        (ArtifactKind::Scorecard, _) => format!("panel scorecard · {when}"),
+        (ArtifactKind::WorkflowRun, _) => format!("workflow run record · {when}"),
     }
 }
 

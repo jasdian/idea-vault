@@ -6,7 +6,8 @@ use crate::domain::frontmatter::ArtifactFrontmatter;
 
 /// What an artifact file holds: one lens's findings, the converged synthesis of a run, or the
 /// facts a store's evidence gate held back from memory (docs/adr/0023), or a gated build plan
-/// (docs/adr/0030).
+/// (docs/adr/0030), or one of a workflow run's stage artifacts (docs/adr/0034): a Ground stage's
+/// verified code map, a Panel stage's scorecard, and the run record listing every stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -14,6 +15,9 @@ pub enum ArtifactKind {
     Synthesis,
     Quarantine,
     BuildPlan,
+    GroundMap,
+    Scorecard,
+    WorkflowRun,
 }
 
 impl ArtifactKind {
@@ -23,6 +27,9 @@ impl ArtifactKind {
             ArtifactKind::Synthesis => "synthesis",
             ArtifactKind::Quarantine => "quarantine",
             ArtifactKind::BuildPlan => "build_plan",
+            ArtifactKind::GroundMap => "ground_map",
+            ArtifactKind::Scorecard => "scorecard",
+            ArtifactKind::WorkflowRun => "workflow_run",
         }
     }
 }

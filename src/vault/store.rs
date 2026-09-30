@@ -1262,7 +1262,10 @@ mod tests {
                     }
                     crate::domain::ArtifactKind::Synthesis
                     | crate::domain::ArtifactKind::Quarantine
-                    | crate::domain::ArtifactKind::BuildPlan => None,
+                    | crate::domain::ArtifactKind::BuildPlan
+                    | crate::domain::ArtifactKind::GroundMap
+                    | crate::domain::ArtifactKind::Scorecard
+                    | crate::domain::ArtifactKind::WorkflowRun => None,
                 },
                 created: Utc.with_ymd_and_hms(2026, 7, 8, 19, 30, 45).unwrap(),
                 model: "qwen3-8b-local".into(),

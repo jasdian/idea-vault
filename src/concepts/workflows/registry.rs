@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::concepts::agents::AgentRole;
-use crate::concepts::skills::{LiveSkills, SkillRegistry};
+use crate::concepts::skills::{LiveSkills, SkillRegistry, INTERNAL_SKILLS};
 use crate::concepts::swarm::MAX_ANGLES;
 use crate::concepts::workflows::{
     LoopStage, PanelStage, RefineStage, Stage, Workflow, WorkflowIssue, WorkflowSource,
@@ -25,10 +25,6 @@ pub const MAX_WORKFLOW_FILE_BYTES: usize = 32 * 1024;
 /// Most stages one workflow may chain (ADR-0034).
 pub const MAX_STAGES: usize = 8;
 
-/// Skills the engine runs itself — Ground's readers and Panel's scorers (ADR-0034). An owner step
-/// naming one would run it outside the stage whose code parses and checks its output.
-pub const INTERNAL_SKILLS: [&str; 2] = ["ground-read", "panel-score"];
-
 /// Longest free-text angle a step or Ground reader may carry, in characters.
 const MAX_ANGLE_CHARS: usize = 120;
 
@@ -39,6 +35,8 @@ const BUILTIN: &[(&str, &str)] = &[
         "steelman-then-attack",
         include_str!("steelman-then-attack.md"),
     ),
+    ("design-panel", include_str!("design-panel.md")),
+    ("exhaust", include_str!("exhaust.md")),
     (READY_TO_BUILD, include_str!("ready-to-build.md")),
 ];
 
@@ -532,7 +530,13 @@ mod tests {
         let names: Vec<&str> = registry.list().iter().map(|w| w.name.as_str()).collect();
         assert_eq!(
             names,
-            ["interrogate", "steelman-then-attack", READY_TO_BUILD]
+            [
+                "interrogate",
+                "steelman-then-attack",
+                "design-panel",
+                "exhaust",
+                READY_TO_BUILD
+            ]
         );
         for w in registry.list() {
             assert_eq!(w.source, WorkflowSource::BuiltIn);
@@ -542,14 +546,40 @@ mod tests {
                 assert!(skills.get(s).is_some(), "{}: {s}", w.name);
             }
             assert_eq!(w.capstone, w.name == READY_TO_BUILD, "{}", w.name);
-            assert!(!w.needs_sources(), "no Ground stage yet: {}", w.name);
+            assert_eq!(
+                w.needs_sources(),
+                matches!(w.name.as_str(), "design-panel" | READY_TO_BUILD),
+                "{}",
+                w.name
+            );
         }
-        let ceilings: Vec<u32> = registry.list().iter().map(Workflow::call_ceiling).collect();
+    }
+
+    #[test]
+    fn call_ceilings_of_builtins() {
+        let registry = WorkflowRegistry::builtin(&builtin_skills());
+        let ceiling = |name: &str| registry.get(name).expect(name).call_ceiling();
         assert_eq!(
-            ceilings,
-            [6, 7, 8],
-            "fan-out n, audit 1, synthesize 1, chain 2"
+            ceiling("interrogate"),
+            6,
+            "fan-out 4, audit 1, synthesize 1"
         );
+        assert_eq!(
+            ceiling("steelman-then-attack"),
+            7,
+            "chain 2, fan-out 3, audit, synthesize"
+        );
+        assert_eq!(
+            ceiling("design-panel"),
+            4 + 3 + 3 + 1 + 1,
+            "ground 2×2, 3 proposals, 3 scores, audit, synthesize"
+        );
+        assert_eq!(
+            ceiling("exhaust"),
+            9 + 1 + 2 + 1,
+            "loop min(12 calls, 3 rounds × 3 steps), audit, refine 1×2, synthesize"
+        );
+        assert_eq!(ceiling(READY_TO_BUILD), 4 + 5 + 1 + 2, "ground adds 4");
     }
 
     type Steps<'a> = Vec<(AgentRole, Option<&'a str>)>;
@@ -619,15 +649,16 @@ mod tests {
              steelman, audit what they find, and synthesize"
         );
         let rtb = registry.get(READY_TO_BUILD).expect("built-in");
-        let harvest: Vec<&str> = rtb.stages[0]
+        assert_eq!(rtb.stages[0].kind(), StageKind::Ground);
+        let harvest: Vec<&str> = rtb.stages[1]
             .steps()
             .iter()
             .filter_map(|s| s.skill.as_deref())
             .collect();
         assert_eq!(harvest, crate::concepts::knowledge::LENSES);
-        assert!(rtb.stages[0].steps().iter().all(|s| s.role == Harvester));
+        assert!(rtb.stages[1].steps().iter().all(|s| s.role == Harvester));
         assert_eq!(
-            shape(rtb)[1..],
+            shape(rtb)[2..],
             [
                 (StageKind::Audit, vec![]),
                 (StageKind::Chain, vec![(Synthesizer, Some("build-prompt"))]),
@@ -636,6 +667,7 @@ mod tests {
         assert!(registry
             .list()
             .iter()
+            .filter(|w| w.name != "design-panel")
             .flat_map(|w| w.stages.iter().flat_map(Stage::steps))
             .all(|s| s.angle.is_none()));
     }
@@ -672,6 +704,8 @@ mod tests {
             [
                 ("interrogate", WorkflowSource::BuiltIn),
                 ("steelman-then-attack", WorkflowSource::VaultOverride),
+                ("design-panel", WorkflowSource::BuiltIn),
+                ("exhaust", WorkflowSource::BuiltIn),
                 (READY_TO_BUILD, WorkflowSource::BuiltIn),
                 ("zz-mine", WorkflowSource::Vault),
             ]

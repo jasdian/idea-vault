@@ -1,9 +1,18 @@
-//! The workflow engine (D19/D32): runs one workflow's stages in order against an idea and
-//! persists only the final output. Control flow is fixed by the definition; only stage content is
-//! generated.
+//! The workflow engine (D19/D32, docs/adr/0034): runs one workflow's stages in order against an
+//! idea. Control flow is fixed by the definition; only stage content is generated.
+//!
+//! Every model call goes through a stage's own `run_agent`/`ask_on_contract` and takes one permit
+//! (ADR-0006); the engine holds none. A [`CallBudget`] counts the calls against the workflow's
+//! worst-case ceiling and keeps the ceiling of every later stage in reserve, so an elastic stage
+//! (a Loop) can never starve the final one. Each stage leaves a [`StageLog`] row and at most one
+//! staged artifact; nothing reaches the vault until the final stage has succeeded, and then the
+//! turn (or the capstone's plan), the stage artifacts and the run record are written together in
+//! one await-free tail — a cancel or a failed final stage persists nothing.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use chrono::Utc;
 use tokio::sync::Semaphore;
 
 use crate::ai::budget::{related_allowance, ContextBudget};
@@ -13,12 +22,16 @@ use crate::concepts::audit::{self, AuditReport, Finding};
 use crate::concepts::build_plan::finish::PlanMode;
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::skills::{
-    ask_on_contract, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
+    ask_on_contract_counted, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
 };
-use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize};
-use crate::concepts::workflows::{Book, Stage};
+use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize_brief, Brief};
+use crate::concepts::workflows::ground::{self, GroundMap, GROUND_DIVISOR};
+use crate::concepts::workflows::panel::{self, PanelVerdict};
+use crate::concepts::workflows::rounds;
+use crate::concepts::workflows::{Book, Stage, Workflow};
 use crate::concepts::ConceptError;
-use crate::domain::OutputContract;
+use crate::domain::workflow::StageKind;
+use crate::domain::{slug, Artifact, ArtifactFrontmatter, ArtifactKind, OutputContract};
 use crate::vault::store;
 
 /// Everything one workflow run reads, borrowed for the run's lifetime. `book` is the job's one
@@ -37,9 +50,9 @@ pub struct RunCtx<'a> {
 }
 
 /// What a workflow run produced: the final stage's output (for a workflow ending in a build-plan
-/// step, the pointer turn it appended) plus every fan-out agent's raw result
+/// step, the pointer turn it appended) plus every fan-out agent's and panel proposer's raw result
 /// (`None` = failed agent, skipped by the judge), the audit, if one ran, and the slugs of the stage
-/// artifacts it wrote (ADR-0034).
+/// artifacts and run record it wrote (ADR-0034) — empty when no stage staged an artifact.
 #[derive(Debug)]
 pub struct WorkflowOutcome {
     pub workflow: String,
@@ -47,6 +60,118 @@ pub struct WorkflowOutcome {
     pub step_results: Vec<Option<AgentResult>>,
     pub audit: Option<AuditReport>,
     pub artifacts: Vec<String>,
+}
+
+/// The run's model-call account (docs/adr/0034): calls used so far against the workflow's
+/// worst-case ceiling, with the ceilings of the stages after the current one held in reserve.
+/// Atomic, so a fan-out's completion callbacks can charge it.
+pub(crate) struct CallBudget {
+    ceilings: Vec<u32>,
+    stage: AtomicUsize,
+    used: AtomicU32,
+}
+
+impl CallBudget {
+    /// An account over these per-stage ceilings, positioned at the first stage.
+    pub(crate) fn new(ceilings: &[u32]) -> Self {
+        CallBudget {
+            ceilings: ceilings.to_vec(),
+            stage: AtomicUsize::new(0),
+            used: AtomicU32::new(0),
+        }
+    }
+
+    /// The workflow's worst case: every stage's ceiling.
+    pub(crate) fn ceiling(&self) -> u32 {
+        self.ceilings.iter().fold(0, |a, c| a.saturating_add(*c))
+    }
+
+    pub(crate) fn used(&self) -> u32 {
+        self.used.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn charge(&self, calls: u32) {
+        self.used.fetch_add(calls, Ordering::SeqCst);
+    }
+
+    fn enter(&self, stage: usize) {
+        self.stage.store(stage, Ordering::SeqCst);
+    }
+
+    /// Whether `calls` more fit now while every later stage keeps its full ceiling.
+    pub(crate) fn can_fund(&self, calls: u32) -> bool {
+        let next = self.stage.load(Ordering::SeqCst) + 1;
+        let reserve = self
+            .ceilings
+            .get(next..)
+            .unwrap_or_default()
+            .iter()
+            .fold(0u32, |a, c| a.saturating_add(*c));
+        self.used().saturating_add(calls).saturating_add(reserve) <= self.ceiling()
+    }
+}
+
+/// How one stage went, for the run record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageStatus {
+    Ran,
+    /// Made no call and changed nothing, for this reason.
+    Skipped(String),
+    /// Ran, but with less than it needed (no contest, no verifiable claims, …).
+    Degraded(String),
+}
+
+impl StageStatus {
+    fn label(&self) -> String {
+        match self {
+            StageStatus::Ran => "ran".to_string(),
+            StageStatus::Skipped(why) => format!("skipped — {why}"),
+            StageStatus::Degraded(why) => format!("degraded — {why}"),
+        }
+    }
+}
+
+/// One row of the run record: which stage, how it went, what it cost and what it found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageLog {
+    pub kind: StageKind,
+    pub status: StageStatus,
+    pub calls: u32,
+    pub detail: String,
+}
+
+/// A stage artifact held back until the run's final persist succeeds (docs/adr/0034).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingArtifact {
+    pub kind: ArtifactKind,
+    pub title: String,
+    pub lens: Option<String>,
+    pub body: String,
+}
+
+/// What a stage reports back to the engine.
+pub(crate) struct StageOutcome {
+    pub status: StageStatus,
+    pub detail: String,
+    pub artifact: Option<PendingArtifact>,
+}
+
+impl StageOutcome {
+    pub(crate) fn skipped(why: &str) -> Self {
+        StageOutcome {
+            status: StageStatus::Skipped(why.to_string()),
+            detail: why.to_string(),
+            artifact: None,
+        }
+    }
+
+    fn ran(detail: String) -> Self {
+        StageOutcome {
+            status: StageStatus::Ran,
+            detail,
+            artifact: None,
+        }
+    }
 }
 
 /// How a build-plan planner routes audited findings into plan sections, keyed to the kind labels
@@ -92,26 +217,34 @@ fn kind_label(finding: &Finding) -> Option<&'static str> {
 }
 
 /// The blocks a chained step after a fan-out carries forward. The planner gets the preamble, and
-/// preamble, join and findings block together stay within a third of the budget unless that third
-/// cannot hold the preamble plus [`MIN_PLANNER_BLOCK`]; every other step gets the findings block
-/// alone, within half.
+/// preamble, join, any grounded map already in its share (`shared` bytes, docs/adr/0034) and
+/// findings block together stay within a third of the budget unless that third cannot hold them
+/// plus [`MIN_PLANNER_BLOCK`]; every other step gets the findings block alone, within half.
 fn findings_carry(
     findings: &[Finding],
     report: Option<&AuditReport>,
     budget: ContextBudget,
     planner: bool,
+    shared: usize,
 ) -> Vec<String> {
     if !planner {
         let cap = budget.max_bytes / DEFAULT_FINDINGS_DIVISOR;
         return vec![findings_block(findings, report, budget, cap)];
     }
+    let joins = if shared > 0 { 2 } else { 1 } * CARRY_JOIN.len();
     let cap = (budget.max_bytes / PLANNER_FINDINGS_DIVISOR)
-        .saturating_sub(BUILD_PLAN_PREAMBLE.len() + CARRY_JOIN.len())
+        .saturating_sub(BUILD_PLAN_PREAMBLE.len() + shared + joins)
         .max(MIN_PLANNER_BLOCK);
     vec![
         BUILD_PLAN_PREAMBLE.to_string(),
         findings_block(findings, report, budget, cap),
     ]
+}
+
+/// The planner's slice of the grounded map (docs/adr/0034): half of its third of the budget,
+/// never below [`MIN_PLANNER_BLOCK`].
+fn planner_ground_cap(budget: ContextBudget) -> usize {
+    (budget.max_bytes / PLANNER_FINDINGS_DIVISOR / 2).max(MIN_PLANNER_BLOCK)
 }
 
 /// The findings as a carried-forward block for a chained step, capped at `cap` bytes. Each line
@@ -178,7 +311,7 @@ fn gather(results: &[Option<AgentResult>]) -> Result<(Vec<Finding>, usize), Conc
 /// blocks, then the idea, memory and discussion hydrated under whatever budget the carried blocks
 /// leave. `related` is asked per stage, against what that stage's hydrated context leaves of its
 /// own `rest` budget, because carried blocks shrink `rest` from stage to stage.
-fn stage_context(
+pub(crate) fn stage_context(
     vault_dir: &Path,
     idea_slug: &str,
     budget: ContextBudget,
@@ -228,42 +361,84 @@ fn discussion_turns(vault_dir: &Path, idea_slug: &str) -> Result<usize, ConceptE
 /// Why the plan's mode label says the audit was skipped when the Settings toggle is off.
 const AUDIT_OFF_REASON: &str = "audit off in Settings";
 
-/// Run a named workflow against `idea_slug` (D19/D32): execute its stages in order, holding no
-/// semaphore permit of its own (every model call takes one), and append the final stage's output
-/// — plus the audit appendix, if an audit ran — as one assistant turn. Deterministic control
-/// flow: the same workflow takes the same path every run; only stage outputs vary.
+/// Everything a run accumulates between stages.
+#[derive(Default)]
+struct RunState {
+    carried: Vec<String>,
+    /// The Ground stage's map and where its block sits in `carried`, so a planner can re-carry it
+    /// within its own share.
+    ground: Option<(usize, GroundMap)>,
+    step_results: Vec<Option<AgentResult>>,
+    findings: Option<Vec<Finding>>,
+    dropped: usize,
+    fanned: (Vec<String>, Vec<Option<AgentResult>>),
+    report: Option<AuditReport>,
+    /// Set by a scored Panel; the next Synthesize runs in graft mode and consumes it.
+    panel: Option<PanelVerdict>,
+    output: String,
+    logs: Vec<StageLog>,
+    pending: Vec<(usize, PendingArtifact)>,
+}
+
+impl RunState {
+    /// The gathered findings, computed from every result so far when a stage has not already.
+    fn ensure_findings(&mut self) -> Result<&[Finding], ConceptError> {
+        if self.findings.is_none() {
+            let (f, d) = gather(&self.step_results)?;
+            (self.findings, self.dropped) = (Some(f), d);
+        }
+        Ok(self.findings.as_deref().unwrap_or_default())
+    }
+
+    /// Record the results of a stage that produces findings, so the next consumer re-gathers.
+    fn produced(&mut self, labels: Vec<String>, results: Vec<Option<AgentResult>>) {
+        self.fanned.0.extend(labels);
+        self.fanned.1.extend(results.iter().cloned());
+        self.step_results.extend(results);
+        self.findings = None;
+    }
+}
+
+/// The workflow's final chained step when it is a build-plan planner: its role.
+fn planner_role(workflow: &Workflow, book: &Book) -> Option<crate::concepts::agents::AgentRole> {
+    match workflow.stages.last() {
+        Some(Stage::Chain(step)) => step
+            .skill
+            .as_deref()
+            .and_then(|s| book.skills.get(s))
+            .filter(|s| s.contract == OutputContract::BuildPlan)
+            .map(|_| step.role),
+        _ => None,
+    }
+}
+
+/// Run a named workflow against `idea_slug` (D19/D32, docs/adr/0034): execute its stages in
+/// order, holding no semaphore permit of its own (every model call takes one), then persist the
+/// final stage's output — plus the audit appendix, if an audit ran — as one assistant turn, and
+/// any stage artifacts with the run record beside it. Deterministic control flow: the same
+/// workflow takes the same path every run; only stage outputs vary.
 ///
-/// Every fan-out and chained stage is prefixed with a related-ideas block, asked of `related` once
-/// per such stage against that stage's own leftover budget; audit and synthesis stages never see
-/// it.
+/// Every fan-out, chained, panel-proposal and loop stage is prefixed with a related-ideas block,
+/// asked of `related` once per such stage against that stage's own leftover budget; audit,
+/// scoring and synthesis stages never see it.
 ///
 /// A build-plan workflow whose every harvester failed errors with
-/// [`ConceptError::NothingHarvested`] and nothing persisted; the plan's mode label names an audit that was skipped or failed and an
-/// audit that confirmed everything.
+/// [`ConceptError::NothingHarvested`] and nothing persisted; the plan's mode label names an audit
+/// that was skipped or failed and an audit that confirmed everything.
 ///
 /// Degradation: failed fan-out agents are skipped; a failed middle chained step is skipped with
-/// nothing carried forward; a failed final stage, or a fan-out with no usable result before an
+/// nothing carried forward; a Ground with no sources is skipped with no call; a Panel with fewer
+/// than two proposals is no contest; a failed final stage, or no usable result before a
 /// synthesis, fails the run with nothing persisted; an empty harvest skips the audit without a
 /// model call, exactly as when the audit is off, unless the final stage is the build-plan planner,
 /// which errors with [`ConceptError::NothingHarvested`] instead.
 ///
 /// A workflow whose last stage chains a [`OutputContract::BuildPlan`] skill persists through the
 /// build-plan gates instead: the audited harvest (when the audit ran) is carried into them, the
-/// plan lands as an artifact and the turn is its pointer; an unusable plan fails the run with
-/// nothing persisted.
+/// plan lands as an artifact and the turn is its pointer, untouched; the run record names the
+/// plan. An unusable plan fails the run with nothing persisted.
 pub async fn run_workflow(ctx: &RunCtx<'_>, name: &str) -> Result<WorkflowOutcome, ConceptError> {
-    let RunCtx {
-        llm: ollama,
-        sem: ai_semaphore,
-        book,
-        vault_dir,
-        idea_slug,
-        budget,
-        audit_on: audit_findings,
-        related,
-        progress,
-    } = *ctx;
-    let registry = book.skills.as_ref();
+    let book = ctx.book;
     let workflow = book
         .workflows
         .get(name)
@@ -274,223 +449,497 @@ pub async fn run_workflow(ctx: &RunCtx<'_>, name: &str) -> Result<WorkflowOutcom
     if let Some(skill) = workflow
         .skills()
         .into_iter()
-        .find(|s| registry.get(s).is_none())
+        .find(|s| book.skills.get(s).is_none())
     {
         return Err(ConceptError::UnknownSkill(skill.to_string()));
     }
 
+    let ceilings: Vec<u32> = workflow.stages.iter().map(Stage::call_ceiling).collect();
+    let calls = CallBudget::new(&ceilings);
     let total = workflow.stages.len();
-    let mut carried: Vec<String> = Vec::new();
-    let mut step_results: Vec<Option<AgentResult>> = Vec::new();
-    let mut findings: Option<Vec<Finding>> = None;
-    let mut dropped = 0;
-    let mut fanned: (Vec<String>, Vec<Option<AgentResult>>) = (Vec::new(), Vec::new());
-    let mut report: Option<AuditReport> = None;
-    let mut output = String::new();
+    let mut state = RunState::default();
 
     for (i, stage) in workflow.stages.iter().enumerate() {
+        calls.enter(i);
+        let kind = stage.kind();
+        let note = |what: &str| {
+            (ctx.progress)(&format!(
+                "workflow · {name} · {}/{total} {}: {what} · calls {}/{}",
+                i + 1,
+                kind.as_str(),
+                calls.used(),
+                calls.ceiling()
+            ))
+        };
+        let before = calls.used();
         let last = i + 1 == total;
-        let note = |what: &str| progress(&format!("workflow · {name} · {}/{total}: {what}", i + 1));
-        match stage {
-            Stage::FanOut(steps) => {
-                note(&format!("fanning out {} angles", steps.len()));
-                let context = stage_context(vault_dir, idea_slug, budget, &carried, related)?;
-                let tasks = steps
-                    .iter()
-                    .map(|s| AgentTask {
-                        role: s.role,
-                        skill: s.skill.clone(),
-                        context: context.clone(),
-                    })
-                    .collect();
-                let on_done = |done: usize, of: usize, angle: &str| {
-                    note(&format!("fanned out {done}/{of} {angle}"));
-                };
-                let results = fan_out(ollama, ai_semaphore, registry, tasks, &on_done).await;
-                fanned.0.extend(steps.iter().map(|s| s.label().to_string()));
-                fanned.1.extend(results.iter().cloned());
-                step_results.extend(results);
-                findings = None;
-            }
-            Stage::Chain(step) => {
-                let label = step.label();
-                note(label);
-                let contract = step
-                    .skill
-                    .as_deref()
-                    .and_then(|s| registry.get(s))
-                    .map_or(OutputContract::Free, |s| s.contract);
-                let planner = contract == OutputContract::BuildPlan;
-                // A chained step after a fan-out reads its findings (with verdicts, if audited).
-                if !step_results.is_empty() {
-                    if findings.is_none() {
-                        (findings, dropped) = match gather(&step_results) {
-                            Ok((f, d)) => (Some(f), d),
-                            Err(_) => (None, 0),
-                        };
-                    }
-                    if planner && findings.is_none() {
-                        return Err(ConceptError::NothingHarvested);
-                    }
-                    if let Some(f) = &findings {
-                        carried.extend(findings_carry(f, report.as_ref(), budget, planner));
-                    }
+        let outcome = run_stage(ctx, workflow, stage, last, &mut state, &calls, &note).await?;
+        if let Some(artifact) = outcome.artifact {
+            state.pending.push((i, artifact));
+        }
+        state.logs.push(StageLog {
+            kind,
+            status: outcome.status,
+            calls: calls.used() - before,
+            detail: outcome.detail,
+        });
+    }
+
+    persist(ctx, workflow, state, &calls).await
+}
+
+/// Run one stage against the run so far.
+async fn run_stage(
+    ctx: &RunCtx<'_>,
+    workflow: &Workflow,
+    stage: &Stage,
+    last: bool,
+    state: &mut RunState,
+    calls: &CallBudget,
+    note: &(dyn Fn(&str) + Sync),
+) -> Result<StageOutcome, ConceptError> {
+    let registry = ctx.book.skills.as_ref();
+    match stage {
+        Stage::FanOut(steps) => {
+            note(&format!("fanning out {} angles", steps.len()));
+            let context = stage_context(
+                ctx.vault_dir,
+                ctx.idea_slug,
+                ctx.budget,
+                &state.carried,
+                ctx.related,
+            )?;
+            let tasks = steps
+                .iter()
+                .map(|s| AgentTask {
+                    role: s.role,
+                    skill: s.skill.clone(),
+                    context: context.clone(),
+                })
+                .collect();
+            let on_done = |done: usize, of: usize, angle: &str| {
+                calls.charge(1);
+                note(&format!("fanned out {done}/{of} {angle}"));
+            };
+            let results = fan_out(ctx.llm, ctx.sem, registry, tasks, &on_done).await;
+            let answered = results.iter().flatten().count();
+            state.produced(
+                steps.iter().map(|s| s.label().to_string()).collect(),
+                results,
+            );
+            Ok(StageOutcome::ran(format!(
+                "{answered} of {} answered",
+                steps.len()
+            )))
+        }
+        Stage::Chain(step) => {
+            let label = step.label();
+            note(label);
+            let contract = step
+                .skill
+                .as_deref()
+                .and_then(|s| registry.get(s))
+                .map_or(OutputContract::Free, |s| s.contract);
+            let planner = contract == OutputContract::BuildPlan;
+            // A chained step after a producing stage reads its findings (with verdicts, if
+            // audited).
+            if !state.step_results.is_empty() || state.findings.is_some() {
+                if state.findings.is_none() {
+                    (state.findings, state.dropped) = match gather(&state.step_results) {
+                        Ok((f, d)) => (Some(f), d),
+                        Err(_) => (None, 0),
+                    };
                 }
+                if planner && state.findings.is_none() {
+                    return Err(ConceptError::NothingHarvested);
+                }
+                // The planner re-carries the grounded map inside its own third (docs/adr/0034).
+                let mut shared = 0;
                 if planner {
-                    let prior = prior_plan_block(vault_dir, idea_slug);
-                    if !prior.is_empty() {
-                        carried.push(prior.trim_end().to_string());
+                    if let Some((at, map)) = &state.ground {
+                        let block = ground::carried_block(map, planner_ground_cap(ctx.budget));
+                        shared = block.len();
+                        state.carried[*at] = block;
                     }
                 }
-                let (mut context, clipped) = stage_context_flagged(
-                    vault_dir, idea_slug, budget, &carried, related, planner,
-                )?;
-                if let (true, Some((kept, total))) = (planner, clipped) {
-                    context = format!(
-                        "(discussion clipped: the latest {kept} of {total} turns are shown)\n\n{context}"
-                    );
+                if let Some(f) = &state.findings {
+                    state.carried.extend(findings_carry(
+                        f,
+                        state.report.as_ref(),
+                        ctx.budget,
+                        planner,
+                        shared,
+                    ));
                 }
-                let task = AgentTask {
-                    role: step.role,
-                    skill: step.skill.clone(),
-                    context,
-                };
-                let prompt = build_prompt(registry, &task)?;
-                let llm = ollama.for_role(step.role.as_str());
-                match ask_on_contract(&llm, ai_semaphore, prompt, contract, label, progress).await {
-                    Ok(answer) if last => output = answer,
-                    Ok(answer) => carried.push(format!("## Prior stage: {label}\n{answer}")),
-                    Err(e) if last => return Err(e),
-                    Err(ConceptError::SemaphoreClosed) => {
-                        return Err(ConceptError::SemaphoreClosed)
+            }
+            if planner {
+                let prior = prior_plan_block(ctx.vault_dir, ctx.idea_slug);
+                if !prior.is_empty() {
+                    state.carried.push(prior.trim_end().to_string());
+                }
+            }
+            let (mut context, clipped) = stage_context_flagged(
+                ctx.vault_dir,
+                ctx.idea_slug,
+                ctx.budget,
+                &state.carried,
+                ctx.related,
+                planner,
+            )?;
+            if let (true, Some((kept, total))) = (planner, clipped) {
+                context = format!(
+                    "(discussion clipped: the latest {kept} of {total} turns are shown)\n\n{context}"
+                );
+            }
+            let task = AgentTask {
+                role: step.role,
+                skill: step.skill.clone(),
+                context,
+            };
+            let prompt = build_prompt(registry, &task)?;
+            let llm = ctx.llm.for_role(step.role.as_str());
+            match ask_on_contract_counted(&llm, ctx.sem, prompt, contract, label, ctx.progress)
+                .await
+            {
+                Ok((answer, n)) => {
+                    calls.charge(n);
+                    if last {
+                        state.output = answer;
+                    } else {
+                        state
+                            .carried
+                            .push(format!("## Prior stage: {label}\n{answer}"));
                     }
-                    Err(e) => tracing::warn!(
-                        workflow = name,
+                    Ok(StageOutcome::ran(label.to_string()))
+                }
+                Err(e) if last => Err(e),
+                Err(ConceptError::SemaphoreClosed) => Err(ConceptError::SemaphoreClosed),
+                Err(e) => {
+                    calls.charge(1);
+                    tracing::warn!(
+                        workflow = %workflow.name,
                         step = label,
                         error = %e,
                         "chained step failed; continuing without it"
-                    ),
+                    );
+                    Ok(StageOutcome {
+                        status: StageStatus::Degraded("the step failed".into()),
+                        detail: label.to_string(),
+                        artifact: None,
+                    })
                 }
-            }
-            Stage::Audit => {
-                if !audit_findings {
-                    continue;
-                }
-                if findings.is_none() {
-                    match gather(&step_results) {
-                        Ok((f, d)) => (findings, dropped) = (Some(f), d),
-                        Err(ConceptError::NothingToSynthesize) => {
-                            note("nothing harvested — audit skipped");
-                            carried.push(
-                                "## Prior stage: audit\nnothing harvested — audit skipped".into(),
-                            );
-                            continue;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                let f = findings.as_deref().unwrap_or_default();
-                note(&format!("auditing {} findings", f.len()));
-                report = Some(
-                    audit::audit(
-                        ollama,
-                        ai_semaphore,
-                        registry,
-                        vault_dir,
-                        idea_slug,
-                        f,
-                        budget,
-                    )
-                    .await?,
-                );
-            }
-            Stage::Synthesize => {
-                if findings.is_none() {
-                    let (f, d) = gather(&step_results)?;
-                    (findings, dropped) = (Some(f), d);
-                }
-                let f = findings.as_deref().unwrap_or_default();
-                note(&format!("converging {} findings", f.len()));
-                let statement = store::read_idea(vault_dir, idea_slug)?.body;
-                let synthesis = synthesize(
-                    ollama,
-                    ai_semaphore,
-                    registry,
-                    &statement,
-                    f,
-                    report.as_ref(),
-                    budget,
-                )
-                .await?;
-                if last {
-                    output = synthesis;
-                } else {
-                    carried.push(format!("## Prior stage: synthesis\n{synthesis}"));
-                }
-            }
-            // ADR-0034's kinds load and validate, but this engine has no arm for them yet: refuse
-            // the run rather than skip a stage silently.
-            Stage::Ground(_) | Stage::Panel(_) | Stage::Loop(_) | Stage::Refine(_) => {
-                return Err(ConceptError::NotImplemented(stage.kind().as_str()))
             }
         }
+        Stage::Audit => {
+            if !ctx.audit_on {
+                return Ok(StageOutcome::skipped(AUDIT_OFF_REASON));
+            }
+            let findings = match state.ensure_findings() {
+                Ok(f) => f.to_vec(),
+                Err(ConceptError::NothingToSynthesize) => {
+                    note("nothing harvested — audit skipped");
+                    state
+                        .carried
+                        .push("## Prior stage: audit\nnothing harvested — audit skipped".into());
+                    return Ok(StageOutcome::skipped("nothing harvested"));
+                }
+                Err(e) => return Err(e),
+            };
+            note(&format!("auditing {} findings", findings.len()));
+            let report = audit::audit(
+                ctx.llm,
+                ctx.sem,
+                registry,
+                ctx.vault_dir,
+                ctx.idea_slug,
+                &findings,
+                ctx.budget,
+            )
+            .await?;
+            if !findings.is_empty() {
+                calls.charge(1);
+            }
+            let detail = format!(
+                "{} findings · {}",
+                findings.len(),
+                if report.failed {
+                    "audit unavailable"
+                } else {
+                    "audited"
+                }
+            );
+            state.report = Some(report);
+            Ok(StageOutcome::ran(detail))
+        }
+        Stage::Synthesize => {
+            let findings = state.ensure_findings()?.to_vec();
+            note(&format!("converging {} findings", findings.len()));
+            let statement = store::read_idea(ctx.vault_dir, ctx.idea_slug)?.body;
+            let verdict = state.panel.take();
+            let brief = Brief {
+                idea_statement: &statement,
+                findings: &findings,
+                report: state.report.as_ref(),
+                directive: verdict.as_ref().map_or("", |v| v.directive.as_str()),
+            };
+            let synthesis =
+                synthesize_brief(ctx.llm, ctx.sem, registry, &brief, ctx.budget).await?;
+            calls.charge(1);
+            let (synthesis, detail) = match &verdict {
+                Some(v) => {
+                    let (kept, dropped) =
+                        panel::strip_invalid_grafts(&synthesis, &v.labels, v.winner);
+                    let detail = if dropped.is_empty() {
+                        format!("graft mode · P{} as the spine", v.winner)
+                    } else {
+                        format!(
+                            "graft mode · P{} as the spine · {} invalid graft line(s) stripped",
+                            v.winner,
+                            dropped.len()
+                        )
+                    };
+                    (kept, detail)
+                }
+                None => (synthesis, format!("{} findings", findings.len())),
+            };
+            if last {
+                state.output = synthesis;
+            } else {
+                state
+                    .carried
+                    .push(format!("## Prior stage: synthesis\n{synthesis}"));
+            }
+            Ok(StageOutcome::ran(detail))
+        }
+        Stage::Ground(spec) => {
+            let (outcome, map) = ground::run_ground(ctx, spec, calls, note).await?;
+            if let Some(map) = map {
+                state.carried.push(ground::carried_block(
+                    &map,
+                    ctx.budget.max_bytes / GROUND_DIVISOR,
+                ));
+                state.ground = Some((state.carried.len() - 1, map));
+            }
+            Ok(outcome)
+        }
+        Stage::Panel(p) => {
+            let run = panel::run_panel(ctx, p, &state.carried, calls, note).await?;
+            let labels = (1..=p.proposers.len())
+                .map(|k| format!("panel-p{k}"))
+                .collect();
+            state.produced(labels, run.results);
+            if let Some(carry) = run.carry {
+                state.carried.push(carry);
+            }
+            state.panel = run.verdict;
+            Ok(run.outcome)
+        }
+        Stage::Loop(spec) => {
+            let run = rounds::run_loop(ctx, spec, &state.carried, calls, note).await?;
+            // Loop results are merged items, not angles: they join the findings without adding
+            // to the angles line.
+            state.step_results.extend(run.results);
+            state.findings = None;
+            Ok(run.outcome)
+        }
+        Stage::Refine(spec) => match state.findings.as_mut() {
+            Some(findings) => {
+                rounds::run_refine(ctx, spec, findings, &mut state.report, calls, note).await
+            }
+            None => {
+                note("nothing to refine — refine skipped");
+                Ok(StageOutcome::skipped("nothing to refine"))
+            }
+        },
     }
+}
 
-    // Persist boundary: only the final output becomes truth, as one labelled turn.
-    let planner = match workflow.stages.last() {
-        Some(Stage::Chain(step)) => step
-            .skill
-            .as_deref()
-            .and_then(|s| registry.get(s))
-            .filter(|s| s.contract == OutputContract::BuildPlan)
-            .map(|_| step.role),
-        _ => None,
+/// The run record (docs/adr/0034): one row per stage, the calls spent against the ceiling, where
+/// the final output went, and the stage artifacts.
+fn run_record(
+    workflow: &Workflow,
+    logs: &[StageLog],
+    calls: &CallBudget,
+    output: &str,
+    stage_slugs: &[String],
+) -> String {
+    let mut out = format!(
+        "# Workflow run — {}\n\n{} of {} model calls (worst case) · final output: {output}\n\n\
+         | # | Stage | Status | Calls | Detail |\n|---|---|---|---|---|\n",
+        workflow.name,
+        calls.used(),
+        calls.ceiling()
+    );
+    for (i, log) in logs.iter().enumerate() {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            i + 1,
+            log.kind.as_str(),
+            ground::cell(&log.status.label()),
+            log.calls,
+            ground::cell(&log.detail)
+        ));
+    }
+    if !stage_slugs.is_empty() {
+        let links: Vec<String> = stage_slugs.iter().map(|s| format!("[[{s}]]")).collect();
+        out.push_str(&format!("\nStage artifacts: {}\n", links.join(" · ")));
+    }
+    out
+}
+
+/// The stage artifacts and the run record, slugged and ready to write, and the trailing turn
+/// line that names them. Empty when no stage staged an artifact: a workflow of the classic kinds,
+/// or one whose Ground found no sources, leaves exactly the vault it always did. Pure over the
+/// vault's existing slugs.
+fn staged_artifacts(
+    ctx: &RunCtx<'_>,
+    workflow: &Workflow,
+    state: &RunState,
+    calls: &CallBudget,
+    final_output: &str,
+) -> Vec<Artifact> {
+    if state.pending.is_empty() {
+        return Vec::new();
+    }
+    let now = Utc::now();
+    let stamp = now.format("%Y%m%d-%H%M%S").to_string();
+    let model = ctx.llm.model();
+    let taken = |candidate: &str| {
+        store::artifact_exists(ctx.vault_dir, ctx.idea_slug, candidate).unwrap_or(false)
     };
-    if let Some(role) = planner {
-        let audit = match (&report, &findings) {
+    let artifact = |slug: String, kind, title: String, lens, body| Artifact {
+        frontmatter: ArtifactFrontmatter {
+            slug,
+            title,
+            kind,
+            lens,
+            created: now,
+            model: model.clone(),
+            revises: None,
+            version: None,
+            answered: vec![],
+        },
+        body,
+    };
+    let mut out: Vec<Artifact> = state
+        .pending
+        .iter()
+        .map(|(i, p)| {
+            let kind = workflow.stages[*i].kind().as_str().replace('_', "-");
+            let slug = slug::disambiguate(
+                &format!("{stamp}-{}-{}-{kind}", workflow.name, i + 1),
+                taken,
+            );
+            artifact(
+                slug,
+                p.kind,
+                format!("{} — {}", p.title, workflow.name),
+                p.lens.clone(),
+                p.body.clone(),
+            )
+        })
+        .collect();
+    let stage_slugs: Vec<String> = out.iter().map(|a| a.frontmatter.slug.clone()).collect();
+    let run_slug = slug::disambiguate(&format!("{stamp}-{}-run", workflow.name), taken);
+    out.push(artifact(
+        run_slug,
+        ArtifactKind::WorkflowRun,
+        format!("Workflow run — {}", workflow.name),
+        None,
+        run_record(workflow, &state.logs, calls, final_output, &stage_slugs),
+    ));
+    out
+}
+
+fn artifact_line(staged: &[Artifact]) -> String {
+    if staged.is_empty() {
+        return String::new();
+    }
+    let links: Vec<String> = staged
+        .iter()
+        .map(|a| format!("[[{}]]", a.frontmatter.slug))
+        .collect();
+    format!("\n\nStage artifacts: {}", links.join(" · "))
+}
+
+/// The persist boundary (docs/adr/0034): only the final output becomes a turn (or, for a
+/// capstone, a gated plan and its untouched pointer turn), and the stage artifacts and run record
+/// are written with it in the same await-free tail, never before.
+async fn persist(
+    ctx: &RunCtx<'_>,
+    workflow: &Workflow,
+    mut state: RunState,
+    calls: &CallBudget,
+) -> Result<WorkflowOutcome, ConceptError> {
+    let mut written: Vec<String> = Vec::new();
+    if let Some(role) = planner_role(workflow, ctx.book) {
+        let audit = match (&state.report, &state.findings) {
             (Some(r), Some(f)) => Some(AuditView::new(f, r)),
             _ => None,
         };
-        let skipped = (!audit_findings).then_some(AUDIT_OFF_REASON);
+        let skipped = (!ctx.audit_on).then_some(AUDIT_OFF_REASON);
         let finished = persist_plan(
-            &ollama.for_role(role.as_str()),
-            vault_dir,
-            idea_slug,
-            output,
+            &ctx.llm.for_role(role.as_str()),
+            ctx.vault_dir,
+            ctx.idea_slug,
+            std::mem::take(&mut state.output),
             &workflow.name,
             audit,
             PlanMode::ReadyToBuild { skipped },
         )
         .await?;
-        output = finished.pointer;
-    } else if output.trim().is_empty() {
+        // The pointer turn stays exactly as the gates wrote it (its prefix marks it a capstone
+        // turn); the run record names the plan instead.
+        let staged = staged_artifacts(
+            ctx,
+            workflow,
+            &state,
+            calls,
+            &format!("build plan [[{}]]", finished.artifact_slug),
+        );
+        for a in &staged {
+            store::write_artifact(ctx.vault_dir, ctx.idea_slug, a)?;
+            written.push(a.frontmatter.slug.clone());
+        }
+        state.output = finished.pointer;
+    } else if state.output.trim().is_empty() {
         tracing::warn!(
             workflow = %workflow.name,
-            idea_slug,
+            idea_slug = ctx.idea_slug,
             "workflow final stage returned empty output; nothing persisted"
         );
     } else {
-        let appendix = match (&report, &findings) {
-            (Some(r), Some(f)) => audit::appendix(f, r, dropped),
-            (None, Some(_)) => audit::unaudited_cap_note(dropped),
+        let appendix = match (&state.report, &state.findings) {
+            (Some(r), Some(f)) => audit::appendix(f, r, state.dropped),
+            (None, Some(_)) => audit::unaudited_cap_note(state.dropped),
             _ => String::new(),
         };
+        let staged = staged_artifacts(ctx, workflow, &state, calls, "the workflow turn");
         // append_turn owns the heading grammar and escapes embedded "## " lines (no forged
         // turn boundaries from model output).
         store::append_turn(
-            vault_dir,
-            idea_slug,
+            ctx.vault_dir,
+            ctx.idea_slug,
             &format!("assistant (workflow: {})", workflow.name),
-            &format!("{output}{}{appendix}", angles_line(&fanned.0, &fanned.1)),
+            &format!(
+                "{}{}{appendix}{}",
+                state.output,
+                angles_line(&state.fanned.0, &state.fanned.1),
+                artifact_line(&staged)
+            ),
         )?;
+        for a in &staged {
+            store::write_artifact(ctx.vault_dir, ctx.idea_slug, a)?;
+            written.push(a.frontmatter.slug.clone());
+        }
     }
 
     Ok(WorkflowOutcome {
         workflow: workflow.name.clone(),
-        synthesis: output,
-        step_results,
-        audit: report,
-        artifacts: Vec::new(),
+        synthesis: state.output,
+        step_results: state.step_results,
+        audit: state.report,
+        artifacts: written,
     })
 }
 
@@ -513,13 +962,13 @@ mod tests {
             .map(|_| finding("extract-key-decisions", &"d ".repeat(600)))
             .collect();
         let budget = ContextBudget::new(4096);
-        let other = findings_carry(&findings, None, budget, false);
+        let other = findings_carry(&findings, None, budget, false, 0);
         assert_eq!(other.len(), 1);
         assert!(!other[0].contains("## How to use the findings"));
         assert!(other[0].starts_with("## Prior stage: findings\n"));
         assert!(other[0].len() > budget.max_bytes / 3, "half-budget cap");
         assert!(other[0].len() <= budget.max_bytes / 2 + '…'.len_utf8());
-        let planner = findings_carry(&findings, None, budget, true);
+        let planner = findings_carry(&findings, None, budget, true, 0);
         assert_eq!(planner.len(), 2);
         assert_eq!(planner[0], BUILD_PLAN_PREAMBLE);
     }
@@ -567,15 +1016,49 @@ mod tests {
     #[test]
     fn ready_to_build_preamble_is_carried_whole_when_the_budget_cannot_hold_it() {
         let findings = [finding("extract-key-decisions", &"d ".repeat(600))];
-        let planner = findings_carry(&findings, None, ContextBudget::new(1500), true);
+        let planner = findings_carry(&findings, None, ContextBudget::new(1500), true, 0);
         assert_eq!(planner[0], BUILD_PLAN_PREAMBLE);
         assert!(planner[1].len() <= MIN_PLANNER_BLOCK);
         let roomy = ContextBudget::new(9000);
-        let planner = findings_carry(&findings, None, roomy, true);
+        let planner = findings_carry(&findings, None, roomy, true, 0);
         let total = planner.join(CARRY_JOIN).len();
         assert!(
             total <= roomy.max_bytes / PLANNER_FINDINGS_DIVISOR,
             "{total}"
         );
+    }
+
+    #[test]
+    fn a_grounded_map_shares_the_planner_third() {
+        let findings: Vec<Finding> = (0..6)
+            .map(|_| finding("extract-key-decisions", &"d ".repeat(600)))
+            .collect();
+        let budget = ContextBudget::new(12_000);
+        let ground = "g".repeat(planner_ground_cap(budget));
+        let planner = findings_carry(&findings, None, budget, true, ground.len());
+        let mut blocks = vec![ground];
+        blocks.extend(planner);
+        let total = blocks.join(CARRY_JOIN).len();
+        assert!(
+            total <= budget.max_bytes / PLANNER_FINDINGS_DIVISOR,
+            "{total}"
+        );
+        assert_eq!(
+            planner_ground_cap(ContextBudget::new(600)),
+            MIN_PLANNER_BLOCK
+        );
+    }
+
+    #[test]
+    fn call_budget_reserves_every_later_stage() {
+        let calls = CallBudget::new(&[4, 3, 1]);
+        assert_eq!(calls.ceiling(), 8);
+        calls.enter(1);
+        calls.charge(3);
+        assert!(calls.can_fund(3), "3 used + 3 + 1 reserved = 7 <= 8");
+        assert!(!calls.can_fund(5));
+        calls.enter(2);
+        calls.charge(4);
+        assert!(calls.can_fund(1) && !calls.can_fund(2));
     }
 }

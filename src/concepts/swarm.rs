@@ -126,6 +126,39 @@ pub(crate) async fn synthesize(
     report: Option<&AuditReport>,
     budget: ContextBudget,
 ) -> Result<String, ConceptError> {
+    let brief = Brief {
+        idea_statement,
+        findings,
+        report,
+        directive: "",
+    };
+    synthesize_brief(ollama, ai_semaphore, registry, &brief, budget).await
+}
+
+/// What one synthesis converges: the idea, the findings with their verdicts, and a code-owned
+/// `directive` placed ahead of the findings — how a workflow's Panel stage turns the synthesizer
+/// into a grafter (docs/adr/0034). An empty directive is plain [`synthesize`].
+pub(crate) struct Brief<'a> {
+    pub idea_statement: &'a str,
+    pub findings: &'a [Finding],
+    pub report: Option<&'a AuditReport>,
+    pub directive: &'a str,
+}
+
+/// [`synthesize`] over a [`Brief`].
+pub(crate) async fn synthesize_brief(
+    ollama: &LlmBackend,
+    ai_semaphore: &Semaphore,
+    registry: &SkillRegistry,
+    brief: &Brief<'_>,
+    budget: ContextBudget,
+) -> Result<String, ConceptError> {
+    let Brief {
+        idea_statement,
+        findings,
+        report,
+        directive,
+    } = *brief;
     let allowance = audit::finding_allowance(budget, findings.len());
     let listed = findings
         .iter()
@@ -152,8 +185,13 @@ pub(crate) async fn synthesize(
     } else {
         String::new()
     };
+    let directive = if directive.is_empty() {
+        String::new()
+    } else {
+        format!("{directive}\n\n")
+    };
     let context = format!(
-        "## The idea\n{}\n\n## Findings{guidance}\n\n{listed}",
+        "## The idea\n{}\n\n{directive}## Findings{guidance}\n\n{listed}",
         audit::clip(idea_statement.trim(), budget.max_bytes / 4)
     );
     Ok(run_agent(

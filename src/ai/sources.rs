@@ -499,6 +499,19 @@ pub enum AnchorCheck {
     Unverified,
 }
 
+/// Where a path-like token from the discussion lands in the attached sources (docs/adr/0034).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathResolution {
+    /// Exactly one file: the source name and the root-relative path.
+    Unique(String, String),
+    /// More than one file ends in the token; the candidates, as `source:path`.
+    Ambiguous(Vec<String>),
+    /// No attached file has this path or ends in it, and the walk was complete.
+    Absent,
+    /// Nothing could be settled: no source attached, a hidden component, or the walk hit its cap.
+    Unknown,
+}
+
 /// Which tokens a [`SourceProbe`] found; `complete` is false when the walk hit its cap or passed
 /// an oversized file it never reads, so a token outside `found` is unknown rather than absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -571,6 +584,13 @@ impl SourceProbe {
             max_files: MAX_GREP_FILES,
             walk: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The same probe with its walk capped at `max_files` — for tests of the capped paths.
+    #[cfg(test)]
+    pub(crate) fn with_max_files(mut self, max_files: usize) -> Self {
+        self.max_files = max_files;
+        self
     }
 
     /// True when no source is attached — every check then reports [`AnchorCheck::Unverified`].
@@ -770,6 +790,114 @@ impl SourceProbe {
             (true, _) => Some(true),
             (false, true) => None,
             (false, false) => Some(false),
+        }
+    }
+
+    /// True when the probe's one walk saw every file under every root: no cap was hit and no
+    /// oversized file was skipped, so an absent path or token really is absent.
+    pub fn is_complete(&self) -> bool {
+        let walk = self.walk();
+        !self.roots.is_empty() && !walk.truncated && !walk.oversized
+    }
+
+    /// The top of every attached tree for a Ground code map (docs/adr/0034): each directory down
+    /// to `depth` components (with a trailing `/`) and each file at most `depth` deep, sorted,
+    /// at most `max` lines. A path is prefixed `source:` when more than one source is attached.
+    /// Hidden names never appear; the walk's caps apply.
+    pub fn outline(&self, depth: usize, max: usize) -> Vec<String> {
+        let prefixed = self.roots.len() > 1;
+        let mut lines = BTreeSet::new();
+        for (source, rel, _) in &self.walk().files {
+            let parts: Vec<&str> = rel.split('/').collect();
+            let label = |p: String| {
+                if prefixed {
+                    format!("{source}:{p}")
+                } else {
+                    p
+                }
+            };
+            for d in 1..parts.len().min(depth + 1) {
+                lines.insert(label(format!("{}/", parts[..d].join("/"))));
+            }
+            if parts.len() <= depth {
+                lines.insert(label(rel.clone()));
+            }
+        }
+        lines.into_iter().take(max).collect()
+    }
+
+    /// A path a reader cited, as (source, root-relative path) when it lands on exactly one
+    /// attached file: an absolute path under a root (the claude-code backend sees sources by
+    /// their absolute roots), a root-relative path, or a unique suffix. `None` otherwise — the
+    /// caller keeps the path as written.
+    pub fn normalize(&self, path: &str) -> Option<(String, String)> {
+        match self.resolve_path(path) {
+            PathResolution::Unique(source, rel) => Some((source, rel)),
+            PathResolution::Ambiguous(_) | PathResolution::Absent | PathResolution::Unknown => None,
+        }
+    }
+
+    /// Resolve a path-like token to a file: exactly at a root-relative path first, then as a path
+    /// suffix over the probe's one walk. An absolute path is checked only in the root it sits
+    /// under and is [`PathResolution::Absent`] outside every root.
+    pub fn resolve_path(&self, token: &str) -> PathResolution {
+        let path = token.trim().trim_start_matches("./").trim_end_matches('/');
+        if self.roots.is_empty() || path.is_empty() {
+            return PathResolution::Unknown;
+        }
+        let hidden = |p: &str| {
+            Path::new(p)
+                .components()
+                .any(|c| matches!(c, Component::Normal(n) if is_hidden(n)))
+        };
+        if path.starts_with('/') {
+            return match self.under_root(path) {
+                Some((_, rel)) if rel.is_empty() || hidden(&rel) => PathResolution::Unknown,
+                Some((i, rel)) => match resolve_rel(&self.roots[i].1, &rel) {
+                    Ok(abs) if abs.is_file() => {
+                        PathResolution::Unique(self.roots[i].0.clone(), rel)
+                    }
+                    _ => PathResolution::Absent,
+                },
+                None => PathResolution::Absent,
+            };
+        }
+        if hidden(path) {
+            return PathResolution::Unknown;
+        }
+        let exact: Vec<(String, String)> = self
+            .roots
+            .iter()
+            .filter_map(|(name, root)| {
+                let abs = resolve_rel(root, path).ok()?;
+                let rel = abs.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+                abs.is_file().then(|| (name.clone(), rel))
+            })
+            .collect();
+        // Like `check_anchor`: a suffix search over a capped walk can neither rule a path out
+        // nor show one hit unique.
+        let (hits, truncated) = if exact.is_empty() {
+            let suffix = format!("/{path}");
+            let walk = self.walk();
+            let hits: Vec<(String, String)> = walk
+                .files
+                .iter()
+                .filter(|(_, rel, _)| rel.ends_with(&suffix))
+                .map(|(source, rel, _)| (source.clone(), rel.clone()))
+                .collect();
+            (hits, walk.truncated)
+        } else {
+            (exact, false)
+        };
+        match hits.as_slice() {
+            [] | [_] if truncated => PathResolution::Unknown,
+            [] => PathResolution::Absent,
+            [(source, rel)] => PathResolution::Unique(source.clone(), rel.clone()),
+            many => PathResolution::Ambiguous(
+                many.iter()
+                    .map(|(source, rel)| format!("{source}:{rel}"))
+                    .collect(),
+            ),
         }
     }
 
@@ -1357,6 +1485,53 @@ mod tests {
         let scan = probe.find_tokens(&["two".to_string()]);
         assert!(scan.found.is_empty());
         assert!(!scan.complete, "a capped walk leaves absent tokens unknown");
+    }
+
+    #[test]
+    fn probe_outline_lists_dirs_and_shallow_files_sorted_and_capped() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let outline = probe.outline(2, 80);
+        assert_eq!(
+            outline,
+            ["a/", "a/mod.rs", "b/", "b/mod.rs", "risk/", "risk/src/"],
+            "risk/src/calculator.rs is three deep"
+        );
+        assert_eq!(probe.outline(2, 2), ["a/", "a/mod.rs"]);
+        assert!(SourceProbe::default().outline(2, 80).is_empty());
+    }
+
+    #[test]
+    fn probe_resolves_and_normalizes_paths() {
+        let (_dir, root) = code_root();
+        let probe = SourceProbe::new(&[source(&root)]);
+        let unique = PathResolution::Unique("notes".into(), "risk/src/calculator.rs".into());
+        assert_eq!(probe.resolve_path("calculator.rs"), unique);
+        assert_eq!(probe.resolve_path("./risk/src/calculator.rs"), unique);
+        let abs = format!("{}/risk/src/calculator.rs", root.display());
+        assert_eq!(probe.resolve_path(&abs), unique);
+        assert_eq!(
+            probe.resolve_path("mod.rs"),
+            PathResolution::Ambiguous(vec!["notes:a/mod.rs".into(), "notes:b/mod.rs".into()])
+        );
+        assert_eq!(probe.resolve_path("src/budget.rs"), PathResolution::Absent);
+        assert_eq!(
+            probe.resolve_path("/elsewhere/x.rs"),
+            PathResolution::Absent
+        );
+        assert_eq!(probe.resolve_path(".git/config"), PathResolution::Unknown);
+        assert_eq!(
+            probe.normalize(&abs),
+            Some(("notes".into(), "risk/src/calculator.rs".into()))
+        );
+        assert_eq!(probe.normalize("mod.rs"), None);
+        assert_eq!(
+            SourceProbe::default().resolve_path("a.rs"),
+            PathResolution::Unknown
+        );
+        let mut capped = SourceProbe::new(&[source(&root)]);
+        capped.max_files = 1;
+        assert_eq!(capped.resolve_path("gone.rs"), PathResolution::Unknown);
     }
 
     #[test]

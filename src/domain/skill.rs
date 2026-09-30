@@ -76,4 +76,12 @@ pub enum OutputContract {
     /// `## Open questions`, `## Plan`, `## Kill criteria`. Checked for shape here; its claims are
     /// gated by `concepts::build_plan`.
     BuildPlan,
+    /// A Ground reader's anchored claims (ADR-0034): at most eight ``- `path:N[-M]` | `symbol` |
+    /// claim`` lines. Checked for shape here; every anchor is then verified in code.
+    GroundClaims,
+    /// A Panel proposal (ADR-0034): a `## Proposal` heading over at most eight bullets.
+    Proposal,
+    /// A Panel scorer's rubric answer (ADR-0034): one `C<i>: <0|1|2> — reason` line per
+    /// criterion.
+    Scorecard,
 }

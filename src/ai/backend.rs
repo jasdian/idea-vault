@@ -163,6 +163,10 @@ pub struct LlmBackend {
     /// shared instance, so role-less calls (free chat, compaction, extraction) read the global
     /// settings.
     call_role: Option<Arc<str>>,
+    /// This clone's Ollama tool-loop bound as (rounds, calls per round), at most
+    /// ([`MAX_TOOL_ROUNDS`], [`MAX_CALLS_PER_ROUND`]); narrowed per call site by
+    /// [`with_tool_budget`](Self::with_tool_budget).
+    tool_budget: (usize, usize),
 }
 
 /// Per-server cached tool list: fetch instant (TTL anchor) + the tools, keyed `name@url`.
@@ -182,6 +186,7 @@ impl LlmBackend {
             mcp_tools_cache: Arc::new(RwLock::new(HashMap::new())),
             turn_sources: Arc::new(Vec::new()),
             call_role: None,
+            tool_budget: (MAX_TOOL_ROUNDS, MAX_CALLS_PER_ROUND),
         }
     }
 
@@ -209,6 +214,24 @@ impl LlmBackend {
         let mut scoped = self.clone();
         scoped.call_role = Some(Arc::from(role));
         scoped
+    }
+
+    /// A scoped view whose Ollama tool loop runs at most `rounds` rounds of at most `calls`
+    /// executed tool calls each, both clamped to `1..=` the global bounds (AI-3). A Ground reader
+    /// runs on 2×2 (docs/adr/0034): a small model reading code past that mostly overflows its
+    /// context. The claude-code backend runs the CLI's own agent loop, which this cannot bound.
+    pub fn with_tool_budget(&self, rounds: usize, calls: usize) -> Self {
+        let mut scoped = self.clone();
+        scoped.tool_budget = (
+            rounds.clamp(1, MAX_TOOL_ROUNDS),
+            calls.clamp(1, MAX_CALLS_PER_ROUND),
+        );
+        scoped
+    }
+
+    /// This clone's tool-loop bound as (rounds, calls per round).
+    pub fn tool_budget(&self) -> (usize, usize) {
+        self.tool_budget
     }
 
     /// Attach the MCP server registry (main.rs; shares the `AppState` `Arc` so registry edits are
@@ -627,8 +650,9 @@ impl LlmBackend {
     /// (when this turn has attached sources) and every enabled MCP server's tools (mangled
     /// `mcp__<server>__<tool>`) on a non-streaming `/api/chat`, execute whatever the model
     /// calls, feed results back as
-    /// `role: "tool"` messages, and repeat — bounded by [`MAX_TOOL_ROUNDS`] rounds and
-    /// [`MAX_CALLS_PER_ROUND`] executions per round, then one forced tool-free call so the turn
+    /// `role: "tool"` messages, and repeat — bounded by this clone's
+    /// [`tool_budget`](Self::tool_budget) (at most [`MAX_TOOL_ROUNDS`] rounds and
+    /// [`MAX_CALLS_PER_ROUND`] executions per round), then one forced tool-free call so the turn
     /// always ends in prose.
     ///
     /// MCP wiring is one connect + `tools/list` per enabled server per turn, and the session is
@@ -716,7 +740,8 @@ impl LlmBackend {
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect();
 
-        for round in 0..MAX_TOOL_ROUNDS {
+        let (max_rounds, max_calls) = self.tool_budget;
+        for round in 0..max_rounds {
             let msg = match self.ollama.chat_tools(options, &convo, Some(&tools)).await {
                 Ok(msg) => msg,
                 // First round only: a model without tool support answers 400 — run the turn as
@@ -749,7 +774,7 @@ impl LlmBackend {
             }
 
             convo.push(msg.clone());
-            for call in calls.iter().take(MAX_CALLS_PER_ROUND) {
+            for call in calls.iter().take(max_calls) {
                 let name = call
                     .pointer("/function/name")
                     .and_then(|n| n.as_str())
@@ -1455,6 +1480,111 @@ mod tests {
             b.context_window_tokens(),
             1_000_000,
             "a blank-model profile inherits the global model, not the 200k default"
+        );
+    }
+
+    /// A minimal Ollama stand-in whose every `/api/chat` answer asks for three `source_list`
+    /// calls; returns its URL and the raw chat bodies it received. `/api/show` answers 404.
+    async fn tool_hungry_ollama() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let body_at = loop {
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                        if let Some(i) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&req[..body_at]).to_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    while req.len() < body_at + len {
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                    }
+                    if !head.starts_with("post /api/chat") {
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                    seen.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&req[body_at..]).into_owned());
+                    let call =
+                        serde_json::json!({"function": {"name": "source_list", "arguments": {}}});
+                    let payload = serde_json::json!({
+                        "message": {"role": "assistant", "content": "", "tool_calls": [call, call, call]},
+                        "done": true,
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (url, bodies)
+    }
+
+    #[tokio::test]
+    async fn with_tool_budget_clamps_and_limits_rounds() {
+        let shared = test_backend();
+        assert_eq!(shared.tool_budget(), (MAX_TOOL_ROUNDS, MAX_CALLS_PER_ROUND));
+        assert_eq!(shared.with_tool_budget(9, 9).tool_budget(), (4, 3));
+        assert_eq!(shared.with_tool_budget(0, 0).tool_budget(), (1, 1));
+        let narrowed = shared.with_tool_budget(2, 2);
+        assert_eq!(narrowed.for_role("researcher").tool_budget(), (2, 2));
+        assert_eq!(
+            shared.tool_budget(),
+            (4, 3),
+            "the shared instance is untouched"
+        );
+
+        // Each round the model asks for three calls; the loop runs `rounds` tool rounds, executes
+        // `calls` of them per round, then one forced tool-free call.
+        let (url, bodies) = tool_hungry_ollama().await;
+        let backend = LlmBackend::ollama_only(OllamaClient::new(&url, "llama3.2").unwrap())
+            .with_turn_sources(turn_sources_fixture());
+        let user = vec![ChatMessage {
+            role: "user".into(),
+            content: "map it".into(),
+        }];
+        backend
+            .with_tool_budget(2, 2)
+            .chat(user.clone())
+            .await
+            .unwrap();
+        let sent = bodies.lock().unwrap().clone();
+        assert_eq!(sent.len(), 3, "2 tool rounds + 1 forced answer");
+        let executed = sent[2].matches("\"role\":\"tool\"").count();
+        assert_eq!(executed, 4, "2 calls in each of 2 rounds");
+        bodies.lock().unwrap().clear();
+        backend.chat(user).await.unwrap();
+        assert_eq!(
+            bodies.lock().unwrap().len(),
+            MAX_TOOL_ROUNDS + 1,
+            "the default is the global bound"
         );
     }
 }

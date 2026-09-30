@@ -128,8 +128,9 @@ impl AuditReport {
     }
 }
 
-/// Lowercased alphanumeric words — the key near-duplicate detection compares.
-fn words(text: &str) -> Vec<String> {
+/// Lowercased alphanumeric words — the key near-duplicate detection compares. Shared with the
+/// workflow Loop stage's novelty test (docs/adr/0034).
+pub(crate) fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
@@ -137,7 +138,7 @@ fn words(text: &str) -> Vec<String> {
 }
 
 /// Two findings say the same thing when their word sets overlap by at least 80% (Jaccard).
-fn near_duplicate(a: &[String], b: &[String]) -> bool {
+pub(crate) fn near_duplicate(a: &[String], b: &[String]) -> bool {
     if a.is_empty() || b.is_empty() {
         return a.is_empty() && b.is_empty();
     }

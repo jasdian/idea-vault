@@ -257,6 +257,8 @@ pub(crate) fn guard_skill(
         .skills
         .snapshot()
         .get(name)
+        // Engine-only skills (docs/adr/0034) answer in a shape only their stage's code reads.
+        .filter(|s| !s.internal)
         .cloned()
         .ok_or_else(|| WebError::NotFound(format!("skill: {name}")))
 }
@@ -365,7 +367,7 @@ pub(crate) fn guard_swarm(
     // One snapshot for the whole job, so a skill-book reload can't change the angles mid-run.
     let skills = state.skills.snapshot();
     for angle in &angles {
-        match skills.get(angle) {
+        match skills.get(angle).filter(|s| !s.internal) {
             None => return Err(WebError::BadRequest(format!("unknown angle: {angle}"))),
             Some(s) if s.stage == crate::domain::SkillStage::Capstone => {
                 return Err(WebError::BadRequest(format!(

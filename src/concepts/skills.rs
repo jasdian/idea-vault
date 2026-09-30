@@ -70,7 +70,14 @@ const BUILTIN: &[(&str, &str)] = &[
         "extract-next-actions",
         include_str!("skills/extract-next-actions.md"),
     ),
+    ("ground-read", include_str!("skills/ground-read.md")),
+    ("panel-score", include_str!("skills/panel-score.md")),
 ];
+
+/// Skills only the workflow engine runs: Ground's readers and Panel's scorers (docs/adr/0034).
+/// Their output feeds code that parses and checks it, so an owner never runs one as a move, a
+/// swarm angle or a workflow step. An owner file may still override the prompt.
+pub const INTERNAL_SKILLS: [&str; 2] = ["ground-read", "panel-score"];
 
 /// Where a registered skill's definition came from — shown on the skill book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +111,8 @@ pub struct Skill {
     pub use_when: String,
     pub avoid_when: String,
     pub hidden: bool,
+    /// One of [`INTERNAL_SKILLS`]: engine-only, never offered or accepted as an owner step.
+    pub internal: bool,
     pub prompt: String,
     pub source: SkillSource,
 }
@@ -136,6 +145,7 @@ fn parse_skill_doc(raw: &str, source: SkillSource) -> Result<Skill, String> {
     if !prompt.contains("{context}") {
         return Err("prompt has no {context} slot for the idea".to_string());
     }
+    let internal = INTERNAL_SKILLS.contains(&fm.name.as_str());
     Ok(Skill {
         name: fm.name,
         description: fm.description,
@@ -145,6 +155,7 @@ fn parse_skill_doc(raw: &str, source: SkillSource) -> Result<Skill, String> {
         use_when: fm.use_when,
         avoid_when: fm.avoid_when,
         hidden: fm.hidden,
+        internal,
         prompt,
         source,
     })
@@ -458,6 +469,21 @@ pub(crate) async fn ask_on_contract(
     label: &str,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<String, ConceptError> {
+    ask_on_contract_counted(llm, ai_semaphore, prompt, contract, label, progress)
+        .await
+        .map(|(answer, _)| answer)
+}
+
+/// [`ask_on_contract`] plus how many model calls it made (1, or 2 with the retry), so a workflow
+/// can charge its call budget exactly (docs/adr/0034).
+pub(crate) async fn ask_on_contract_counted(
+    llm: &LlmBackend,
+    ai_semaphore: &Semaphore,
+    prompt: String,
+    contract: OutputContract,
+    label: &str,
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<(String, u32), ConceptError> {
     let ask = |content: String| {
         llm.chat(vec![ChatMessage {
             role: "user".to_string(),
@@ -475,7 +501,7 @@ pub(crate) async fn ask_on_contract(
         Ok(_) if first_score.is_some_and(|score| !plan_usable(score)) => {
             contract::Violation::NoUsablePlan
         }
-        Ok(repaired) => return Ok(repaired),
+        Ok(repaired) => return Ok((repaired, 1)),
         Err(violation) => violation,
     };
     progress(&format!("{label} · reshaping the answer"));
@@ -484,23 +510,25 @@ pub(crate) async fn ask_on_contract(
     let first_wins = |second: &str| first_score.is_some_and(|before| before > plan_score(second));
     let outcome = retried.as_deref().map(|r| contract::validate(contract, r));
     if let Ok(Ok(repaired)) = &outcome {
-        return Ok(if first_wins(repaired) {
+        let kept = if first_wins(repaired) {
             first.trim().to_string()
         } else {
             repaired.clone()
-        });
+        };
+        return Ok((kept, 2));
     }
     tracing::warn!(
         label,
         ?outcome,
         "retry did not produce an on-contract answer; keeping the best one"
     );
-    Ok(match retried {
+    let kept = match retried {
         Ok(second) if !second.trim().is_empty() && !first_wins(&second) => {
             second.trim().to_string()
         }
         _ => first.trim().to_string(),
-    })
+    };
+    Ok((kept, 2))
     // permit released on return — before any vault write, which needs no AI slot
 }
 
@@ -720,7 +748,7 @@ mod tests {
             assert_eq!(skill.source, SkillSource::BuiltIn);
             assert_eq!(
                 skill.hidden,
-                skill.stage == SkillStage::Extract,
+                skill.stage == SkillStage::Extract || skill.internal,
                 "{}",
                 skill.name
             );

@@ -19,6 +19,10 @@ pub enum Violation {
     MissingSections(Vec<String>),
     /// A build plan carried its headings but the plan parser finds no task in it.
     NoUsablePlan,
+    /// A Ground reader's answer held no line with a backticked `path:N` anchor.
+    NoClaims,
+    /// A Panel scorer's answer held no `C<i>: <0|1|2>` line.
+    NoScores,
 }
 
 impl std::fmt::Display for Violation {
@@ -42,6 +46,12 @@ impl std::fmt::Display for Violation {
             ),
             Violation::NoUsablePlan => f.write_str(
                 "the plan needs at least one task under `## Plan`",
+            ),
+            Violation::NoClaims => f.write_str(
+                "the answer must be claim lines of the form - `path:N` | `symbol` | claim, citing a real file and line",
+            ),
+            Violation::NoScores => f.write_str(
+                "the answer must be one line per criterion of the form C1: 0|1|2 — reason",
             ),
         }
     }
@@ -242,6 +252,67 @@ pub fn repair_build_plan(text: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
+/// Most claim lines a Ground reader's answer keeps, and most bullets a Panel proposal keeps
+/// (ADR-0034): a small model's ninth line is rarely better than its first eight, and the stage
+/// budgets assume the cap.
+pub const MAX_STAGE_LINES: usize = 8;
+
+/// The backticked spans of `line`, in order; an unclosed tick ends the scan.
+pub fn backtick_spans(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        out.push(&after[..close]);
+        rest = &after[close + 1..];
+    }
+    out
+}
+
+/// `path:N` or `path:N-M` as (path, first, last) — the anchor grammar a Ground reader and the
+/// build-plan G4 gate share. The path is anything non-empty without whitespace; the range must
+/// run forwards.
+pub fn parse_anchor(span: &str) -> Option<(&str, usize, usize)> {
+    let (path, range) = span.trim().rsplit_once(':')?;
+    if path.is_empty() || path.contains(char::is_whitespace) {
+        return None;
+    }
+    let (a, b) = range.split_once('-').unwrap_or((range, range));
+    let (first, last): (usize, usize) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    (first <= last).then_some((path, first, last))
+}
+
+/// True when `line` carries a backticked anchor — the one shape a Ground claim must have.
+fn is_claim_line(line: &str) -> bool {
+    backtick_spans(line)
+        .iter()
+        .any(|s| parse_anchor(s).is_some())
+}
+
+/// One `C<i>: <score> — reason` line as (criterion number, score, reason). Case-insensitive,
+/// tolerant of list markers and emphasis; a score outside 0..=2 is no score.
+pub fn score_line(line: &str) -> Option<(usize, u8, &str)> {
+    let t = line
+        .trim()
+        .trim_start_matches(['-', '*', ' '])
+        .trim_start_matches("**");
+    let rest = t.strip_prefix(['C', 'c'])?;
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    let id: usize = rest[..digits].parse().ok()?;
+    let after = rest[digits..].trim_start_matches(['*', ':', '.', ')', ' ', '=']);
+    let score = after.chars().next()?.to_digit(10)?;
+    if score > 2 || after[1..].starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let reason = after[1..]
+        .trim_start_matches(['*', ' ', ':', '-', '—', '–', '/'])
+        .trim();
+    Some((id, score as u8, reason))
+}
+
 /// Check `raw` against `contract`, returning the repaired answer (chatter stripped, shape
 /// normalized) or why it cannot be repaired. `BulletsOrEmpty` accepts an empty answer.
 pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation> {
@@ -294,6 +365,51 @@ pub fn validate(contract: OutputContract, raw: &str) -> Result<String, Violation
                 Err(Violation::MissingSections(missing))
             } else {
                 Ok(plan)
+            }
+        }
+        OutputContract::GroundClaims => {
+            if text.is_empty() {
+                return Err(Violation::Empty);
+            }
+            let claims: Vec<&str> = text
+                .lines()
+                .filter(|l| is_claim_line(l))
+                .map(str::trim)
+                .take(MAX_STAGE_LINES)
+                .collect();
+            if claims.is_empty() {
+                Err(Violation::NoClaims)
+            } else {
+                Ok(claims.join("\n"))
+            }
+        }
+        OutputContract::Proposal => {
+            if text.is_empty() {
+                return Err(Violation::Empty);
+            }
+            // The heading is code-owned: a proposal is its bullets, whatever heading the model
+            // wrote (or forgot) above them.
+            let block = item_block(text, is_bullet).ok_or(Violation::NotBullets)?;
+            let bullets: Vec<String> = items(&block)
+                .into_iter()
+                .take(MAX_STAGE_LINES)
+                .map(|b| format!("- {b}"))
+                .collect();
+            Ok(format!("## Proposal\n{}", bullets.join("\n")))
+        }
+        OutputContract::Scorecard => {
+            if text.is_empty() {
+                return Err(Violation::Empty);
+            }
+            let scored: Vec<&str> = text
+                .lines()
+                .filter(|l| score_line(l).is_some())
+                .map(str::trim)
+                .collect();
+            if scored.is_empty() {
+                Err(Violation::NoScores)
+            } else {
+                Ok(scored.join("\n"))
             }
         }
     }
@@ -568,6 +684,57 @@ mod tests {
         assert!(BUILD_PLAN_REQUIRED
             .iter()
             .all(|h| BUILD_PLAN_SECTIONS.contains(h)));
+    }
+
+    #[test]
+    fn ground_claims_keep_only_anchored_lines_up_to_the_cap() {
+        let raw = "Here is what I found:\n- `src/a.rs:10-12` | `run` | runs it\n- no anchor here\n- `/abs/b.rs:3` `Thing` defined here";
+        assert_eq!(
+            validate(OutputContract::GroundClaims, raw).unwrap(),
+            "- `src/a.rs:10-12` | `run` | runs it\n- `/abs/b.rs:3` `Thing` defined here"
+        );
+        let many: String = (1..=12)
+            .map(|i| format!("- `a.rs:{i}` | `x` | c\n"))
+            .collect();
+        let kept = validate(OutputContract::GroundClaims, &many).unwrap();
+        assert_eq!(kept.lines().count(), MAX_STAGE_LINES);
+        assert_eq!(
+            validate(OutputContract::GroundClaims, "- nothing to cite"),
+            Err(Violation::NoClaims)
+        );
+        assert_eq!(parse_anchor("a.rs:9-3"), None, "a range runs forwards");
+    }
+
+    #[test]
+    fn proposal_is_a_code_owned_heading_over_at_most_eight_bullets() {
+        let raw = "Sure!\n# My proposal\n- one\n  more\n- two\nThanks";
+        assert_eq!(
+            validate(OutputContract::Proposal, raw).unwrap(),
+            "## Proposal\n- one more\n- two"
+        );
+        let many: String = (1..=10).map(|i| format!("- b{i}\n")).collect();
+        let kept = validate(OutputContract::Proposal, &many).unwrap();
+        assert_eq!(kept.lines().count(), 1 + MAX_STAGE_LINES);
+        assert_eq!(
+            validate(OutputContract::Proposal, "just prose"),
+            Err(Violation::NotBullets)
+        );
+    }
+
+    #[test]
+    fn scorecard_keeps_score_lines_and_rejects_out_of_range_scores() {
+        assert_eq!(score_line("C2: 1 — fine"), Some((2, 1, "fine")));
+        assert_eq!(score_line("- **C1**: 2 - strong"), Some((1, 2, "strong")));
+        assert_eq!(score_line("C3: 3 — too high"), None);
+        assert_eq!(score_line("C3: 10"), None);
+        assert_eq!(
+            validate(OutputContract::Scorecard, "Scores:\nC1: 2 — a\nC2: 0 — b").unwrap(),
+            "C1: 2 — a\nC2: 0 — b"
+        );
+        assert_eq!(
+            validate(OutputContract::Scorecard, "all good"),
+            Err(Violation::NoScores)
+        );
     }
 
     #[test]

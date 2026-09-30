@@ -1,20 +1,26 @@
 //! Workflows: deterministic multi-stage orchestrations over an idea — a fixed pipeline of
-//! fan-out, chained, audit, and synthesis stages, as opposed to free-form chat
+//! fan-out, chained, audit, and synthesis stages, plus the grounded, ranked and bounded stages of
+//! ADR-0034 (Ground, Panel, Loop, Refine) — as opposed to free-form chat
 //! (docs/06-concepts/workflows.md D19, D32).
 //!
-//! Script-driven, not model-driven: the control flow (which stages, in which order) is fixed by
-//! the workflow definition; only stage *content* is generated. A chained step's output is carried
-//! forward as a `## Prior stage` block into every later stage, so a workflow can steelman an idea
-//! and then attack the steelman, or harvest findings and then fold them into a build prompt. The
-//! parallel stage delegates to `swarm`'s bounded fan-out primitive; a failed fan-out agent drops
-//! to a null result the judge skips; only the final stage's output is persisted as a turn
-//! (intermediates stay out of truth).
+//! Script-driven, not model-driven: the control flow (which stages, in which order, when a loop
+//! stops, who wins a panel) is fixed by the definition and decided in code; only stage *content*
+//! is generated. A chained step's output is carried forward as a `## Prior stage` block into every
+//! later stage, so a workflow can steelman an idea and then attack the steelman, or harvest
+//! findings and then fold them into a build prompt. The parallel stages delegate to `swarm`'s
+//! bounded fan-out primitive; a failed fan-out agent drops to a null result the judge skips. Only
+//! the final stage's output becomes a turn; the ADR-0034 stages' artifacts and the run record are
+//! written beside it in the same all-or-nothing tail, never as turns and never as evidence.
 //!
 //! A workflow is a markdown file (ADR-0035): built-ins in `src/concepts/workflows/*.md`, owner
 //! additions and overrides in `vault/.workflows/`, loaded and cross-validated against the skill
-//! registry by [`registry`]. The engine is [`run`].
+//! registry by [`registry`]. The engine is [`run`]; the ADR-0034 stages live in [`ground`],
+//! [`panel`] and [`rounds`].
 
+pub mod ground;
+pub mod panel;
 pub mod registry;
+pub mod rounds;
 pub mod run;
 
 use crate::concepts::agents::AgentRole;

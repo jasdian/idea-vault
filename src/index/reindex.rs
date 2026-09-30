@@ -900,6 +900,60 @@ mod tests {
         assert_eq!(snap1, snapshot(&fresh));
     }
 
+    #[test]
+    fn reindex_idempotent_with_new_artifact_kinds() {
+        use crate::domain::ArtifactKind;
+        let tmp = tempfile::tempdir().unwrap();
+        build_fixture_vault(tmp.path());
+        // A workflow run's stage artifacts (docs/adr/0034) are ordinary artifacts: searchable,
+        // rebuilt from disk like every other kind, never a derived table of their own.
+        for (slug, kind, body) in [
+            (
+                "20260930-101500-design-panel-1-ground",
+                ArtifactKind::GroundMap,
+                "grounded groundmapneedle",
+            ),
+            (
+                "20260930-101500-design-panel-2-panel",
+                ArtifactKind::Scorecard,
+                "scored scorecardneedle",
+            ),
+            (
+                "20260930-101500-design-panel-run",
+                ArtifactKind::WorkflowRun,
+                "stages runrecordneedle",
+            ),
+        ] {
+            let mut a = artifact(slug, "Stage", body);
+            a.frontmatter.kind = kind;
+            a.frontmatter.lens = None;
+            store::write_artifact(tmp.path(), "alpha", &a).unwrap();
+        }
+
+        let mut conn = mem_conn();
+        let counts1 = reindex(&mut conn, tmp.path()).unwrap();
+        let snap1 = snapshot(&conn);
+        let counts2 = reindex(&mut conn, tmp.path()).unwrap();
+        assert_eq!(counts1, counts2);
+        assert_eq!(snap1, snapshot(&conn));
+        let mut fresh = mem_conn();
+        reindex(&mut fresh, tmp.path()).unwrap();
+        assert_eq!(snap1, snapshot(&fresh));
+
+        for needle in ["groundmapneedle", "scorecardneedle", "runrecordneedle"] {
+            let refs: Vec<String> = conn
+                .prepare(
+                    "SELECT ref FROM search_fts WHERE kind = 'artifact' AND search_fts MATCH ?1",
+                )
+                .unwrap()
+                .query_map([needle], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(refs.len(), 1, "{needle}: {refs:?}");
+        }
+    }
+
     fn write_linked_ideas(vault: &Path, ideas: &[(&str, &str)]) {
         for (slug, body) in ideas {
             store::write_idea(vault, &idea(slug, slug, IdeaState::InDiscussion, &[], body))

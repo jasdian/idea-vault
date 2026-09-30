@@ -57,6 +57,9 @@ fn contract_str(contract: OutputContract) -> &'static str {
         OutputContract::RankedList => "ranked list",
         OutputContract::FencedMarkdown => "one fenced block",
         OutputContract::BuildPlan => "sectioned build plan",
+        OutputContract::GroundClaims => "anchored claims",
+        OutputContract::Proposal => "one proposal",
+        OutputContract::Scorecard => "rubric scores",
     }
 }
 
