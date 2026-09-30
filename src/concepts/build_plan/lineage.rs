@@ -572,7 +572,7 @@ mod tests {
         let dir = seeded();
         let v2 = submit(
             dir.path(),
-            super::super::workbench::tests::BASE,
+            crate::concepts::build_plan::workbench::tests::BASE,
             &[("Q1", Q1_ANSWER)],
             1,
         )
