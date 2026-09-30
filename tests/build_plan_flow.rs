@@ -88,6 +88,7 @@ fn run(vault: &Path, answer: &str, minute: u32) -> Result<Finished, ConceptError
         answer,
         turn_role: "assistant (skill: build-prompt)",
         lens: "build-prompt",
+        recipe: None,
         model: "llama3.2".into(),
         audit: None,
         probe: &probe,
@@ -205,6 +206,7 @@ fn finish_owner_skill_pointer_never_grounds() {
         answer: ANSWER,
         turn_role: "assistant (skill: house-plan)",
         lens: "house-plan",
+        recipe: None,
         model: "llama3.2".into(),
         audit: None,
         probe: &probe,
@@ -289,6 +291,7 @@ fn finish_consults_the_latest_open_questions_artifact() {
                     revises: None,
                     version: None,
                     answered: Vec::new(),
+                    recipe: None,
                 },
                 body: body.into(),
             },
@@ -335,6 +338,7 @@ fn finish_records_an_audited_run_and_counts_opened_claims_only() {
         answer: ANSWER,
         turn_role: "assistant (workflow: ready-to-build)",
         lens: "ready-to-build",
+        recipe: None,
         model: "llama3.2".into(),
         audit: Some(&audit),
         probe: &probe,
@@ -538,6 +542,24 @@ async fn quick_plan_lands_an_artifact_and_a_pointer_turn() {
         !conversation.contains("## Settled") && !conversation.contains("Sure, here is the plan"),
         "the plan body stays out of the transcript"
     );
+}
+
+#[tokio::test]
+async fn quick_plan_stamps_the_skill_recipe() {
+    let (dir, _mock, result) = quick_plan(&[PLANNER_ANSWER]).await;
+    result.unwrap();
+    let plans = plan_artifacts(dir.path());
+    let recipe = plans[0]
+        .frontmatter
+        .recipe
+        .as_ref()
+        .expect("a plan's recipe");
+    let registry = idea_vault::concepts::skills::SkillRegistry::builtin();
+    let skill = registry.get("build-prompt").unwrap();
+    assert_eq!(recipe.skill.as_deref(), Some("build-prompt"));
+    assert_eq!(recipe.skill_digest.as_deref(), Some(skill.digest.as_str()));
+    assert_eq!(recipe.skill_source.as_deref(), Some("built-in"));
+    assert!(recipe.build.starts_with(env!("CARGO_PKG_VERSION")));
 }
 
 #[tokio::test]

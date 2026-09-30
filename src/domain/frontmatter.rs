@@ -71,6 +71,40 @@ pub struct ArtifactFrontmatter {
     /// The `Q#`/`T#` ids the owner answered to make this version (docs/adr/0032).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answered: Vec<String>,
+    /// What made this artifact (ADR-0040). Absent on an artifact written before provenance
+    /// existed, which then reads as "provenance unknown", never as stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<Recipe>,
+}
+
+/// An artifact's recipe (ADR-0040): the skill or workflow definition it ran (by digest, so an
+/// edit since shows), the parse-coupled prompt templates it used, the build, and every lens whose
+/// answer was off its output contract. Truth in the markdown, round-tripped unchanged by reindex.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Recipe {
+    /// The skill's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    /// 12 hex digits of the skill file's raw bytes, before `{context}` is filled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_digest: Option<String>,
+    /// Where the skill came from: `built-in`, `vault override` or `vault`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_source: Option<String>,
+    /// The workflow's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    /// 12 hex digits of the resolved workflow file's raw bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_digest: Option<String>,
+    /// `id@vN:digest12` for each parse-coupled template the run used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<String>,
+    /// `CARGO_PKG_VERSION`, plus `+<sha>` in an image built with `IDEA_VAULT_BUILD_SHA`.
+    pub build: String,
+    /// `<lens>: off-contract: <violation>`, one per lens whose answer broke its contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contract: Vec<String>,
 }
 
 /// The (lighter) structured header of a `memory/<fact-slug>.md` file.
@@ -395,6 +429,7 @@ body\n";
             revises: None,
             version: None,
             answered: Vec::new(),
+            recipe: None,
         };
         let body = "- decided the sidecar stays\n";
         let emitted = emit_artifact(&fm, body).unwrap();
@@ -415,6 +450,7 @@ body\n";
             revises: None,
             version: None,
             answered: Vec::new(),
+            recipe: None,
         };
         let emitted = emit_artifact(&fm, "Converged summary.\n").unwrap();
         let (fm2, body2) = parse_artifact(&emitted).unwrap();
@@ -468,6 +504,70 @@ model: claude-code\n\
         };
         let (fm2, _) = parse_artifact(&emit_artifact(&versioned, &body).unwrap()).unwrap();
         assert_eq!(fm2, versioned);
+    }
+
+    #[test]
+    fn artifact_without_recipe_still_parses() {
+        let input = "---\n\
+slug: 20260708-193045-synthesis\n\
+title: Knowledge synthesis\n\
+kind: synthesis\n\
+created: 2026-07-08T19:30:45Z\n\
+model: claude-code\n\
+---\n\
+Converged.\n";
+        let (fm, body) = parse_artifact(input).unwrap();
+        assert_eq!(fm.recipe, None);
+        let emitted = emit_artifact(&fm, &body).unwrap();
+        assert!(!emitted.contains("recipe:"), "{emitted}");
+    }
+
+    #[test]
+    fn recipe_roundtrips() {
+        let fm = ArtifactFrontmatter {
+            slug: "20260708-193045-premortem".into(),
+            title: "Premortem".into(),
+            kind: ArtifactKind::Finding,
+            lens: Some("premortem".into()),
+            created: dt("2026-07-08T19:30:45Z"),
+            model: "qwen3-8b-local".into(),
+            revises: None,
+            version: None,
+            answered: Vec::new(),
+            recipe: Some(Recipe {
+                skill: Some("premortem".into()),
+                skill_digest: Some("3f2a1c9b8d7e".into()),
+                skill_source: Some("vault override".into()),
+                workflow: Some("interrogate".into()),
+                workflow_digest: Some("0123456789ab".into()),
+                templates: vec!["audit@v1:abc123def456".into()],
+                build: "0.1.0+abc123".into(),
+                contract: vec!["premortem: off-contract: the answer was empty".into()],
+            }),
+        };
+        let emitted = emit_artifact(&fm, "- a\n").unwrap();
+        let (fm2, body2) = parse_artifact(&emitted).unwrap();
+        assert_eq!(fm, fm2);
+        assert_eq!(body2, "- a\n");
+        let bare = Recipe {
+            skill: None,
+            skill_digest: None,
+            skill_source: None,
+            workflow: None,
+            workflow_digest: None,
+            templates: Vec::new(),
+            build: "0.1.0".into(),
+            contract: Vec::new(),
+        };
+        let emitted = emit_artifact(
+            &ArtifactFrontmatter {
+                recipe: Some(bare),
+                ..fm
+            },
+            "",
+        )
+        .unwrap();
+        assert!(emitted.contains("recipe:\n  build: 0.1.0\n"), "{emitted}");
     }
 
     #[test]

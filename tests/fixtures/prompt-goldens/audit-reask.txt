@@ -1,0 +1,4 @@
+
+
+Your previous answer gave no usable verdict for F2, F5. Reply with exactly one line for each of those findings and nothing else:
+F<n>: CONFIRMED|UNCERTAIN|REFUTED — <one-sentence reason>

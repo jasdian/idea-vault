@@ -104,8 +104,8 @@ async fn keystone_max_in_flight_equals_k_and_all_n_complete() {
     assert!(outcome.agent_results.iter().all(Option::is_some));
     assert_eq!(
         mock.chat_bodies().len(),
-        8,
-        "6 agents + 1 auditor + 1 synthesizer"
+        9,
+        "6 agents + 1 auditor + its one re-ask (\"finding\" is no verdict) + 1 synthesizer"
     );
     // … while in-flight calls never exceeded K, and genuinely reached K (real parallelism).
     assert!(
@@ -244,6 +244,8 @@ async fn a_garbled_audit_degrades_to_unverified_and_still_synthesizes() {
         vec![
             ChatScript::Tokens(vec!["1. Nobody pays".into()]),
             ChatScript::Tokens(vec!["These all look like great points!".into()]),
+            // The one targeted re-ask (ADR-0023 amendment) is garbled too.
+            ChatScript::Tokens(vec!["Still great points!".into()]),
             ChatScript::Tokens(vec!["converged anyway".into()]),
         ],
     )
@@ -256,7 +258,7 @@ async fn a_garbled_audit_degrades_to_unverified_and_still_synthesizes() {
     assert!(convo.contains("converged anyway"));
     assert!(convo.contains("findings above are unverified"));
     assert!(
-        !mock.chat_bodies()[2].contains("auditor's verdict"),
+        !mock.chat_bodies()[3].contains("auditor's verdict"),
         "no verdict guidance when the audit failed"
     );
 }
@@ -312,15 +314,15 @@ async fn related_block_reaches_every_angle_once_computed() {
     let bodies = mock.chat_bodies();
     assert_eq!(
         bodies.len(),
-        angles.len() + 2,
-        "angles + auditor + synthesizer"
+        angles.len() + 3,
+        "angles + auditor + its re-ask (\"1. x\" is no verdict) + synthesizer"
     );
     let (auditor, rest): (Vec<&String>, Vec<&String>) = bodies
         .iter()
         .partition(|b| b.contains("You are the Auditor"));
-    assert_eq!(auditor.len(), 1);
+    assert_eq!(auditor.len(), 2);
     assert!(
-        !auditor[0].contains("RELATED-MARKER"),
+        auditor.iter().all(|a| !a.contains("RELATED-MARKER")),
         "the audit prompt carries no related block; agent answers here never quote it"
     );
     let agents: Vec<&&String> = rest
@@ -350,6 +352,8 @@ async fn audit_cap_swarm_turn_counts_the_findings_left_out() {
         vec![
             ChatScript::Tokens(vec![items("p")]),
             ChatScript::Tokens(vec![items("q")]),
+            ChatScript::Tokens(vec!["F1: CONFIRMED — ok".into()]),
+            // The partial audit's one re-ask (ADR-0023 amendment) adds nothing.
             ChatScript::Tokens(vec!["F1: CONFIRMED — ok".into()]),
             ChatScript::Tokens(vec!["converged view".into()]),
         ],

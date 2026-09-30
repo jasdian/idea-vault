@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use crate::ai::provenance::digest12;
 use crate::concepts::agents::AgentRole;
 use crate::concepts::skills::{LiveSkills, SkillRegistry, INTERNAL_SKILLS};
 use crate::concepts::swarm::MAX_ANGLES;
@@ -339,6 +340,7 @@ fn build_workflow(
         hidden: fm.hidden,
         body,
         source,
+        digest: digest12(raw.as_bytes()),
         raw: raw.to_string(),
     })
 }

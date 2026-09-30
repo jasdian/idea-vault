@@ -54,6 +54,8 @@ pub struct IdeaPage {
     pub sources_html: String,
     /// The related-ideas panel (`_related.html`), pre-rendered like the other panels.
     pub related_html: String,
+    /// The newest run journal's id, for the "last run" link to R50 (ADR-0037).
+    pub last_run: Option<String>,
 }
 
 /// A tag this idea carries that looks like drift of another tag in the vault.
@@ -114,6 +116,42 @@ pub struct HistoryPage {
     pub title: String,
     pub slug: String,
     pub transcript_html: String,
+}
+
+/// The run inspector (`templates/run.html`, R50, ADR-0037): one run journal, call by call.
+#[derive(Template, WebTemplate)]
+#[template(path = "run.html")]
+pub struct RunPage {
+    pub slug: String,
+    pub idea_title: String,
+    pub run_id: String,
+    pub kind: String,
+    pub build: String,
+    /// `done`, `failed: <message>`, `cancelled`, `panicked`, or unfinished.
+    pub outcome: String,
+    pub calls: Vec<RunCallView>,
+    /// Lines that did not parse (a torn tail after a crash).
+    pub unreadable: usize,
+}
+
+/// One model call of a run, as R50 shows it.
+pub struct RunCallView {
+    pub seq: u64,
+    pub role: String,
+    pub backend: String,
+    pub model: String,
+    /// `<contract> · clean|repaired|retried|off-contract: <why>`, or `not checked`.
+    pub contract: String,
+    pub off_contract: bool,
+    pub prompt_tokens: String,
+    pub output_tokens: String,
+    pub api_calls: u64,
+    pub stop_reason: String,
+    /// `output truncated`, `input truncated`, both, or empty.
+    pub truncation: String,
+    pub ms: u64,
+    pub response: String,
+    pub tools: Vec<String>,
 }
 
 /// The settings page shell (`templates/settings.html`); the form is pre-rendered so a save can
@@ -354,6 +392,20 @@ pub struct ArtifactPage {
     pub attack_plan_md: Option<String>,
     /// The plan workbench (docs/adr/0032), for a build plan only.
     pub plan_work: Option<PlanWorkView>,
+    pub recipe: RecipeView,
+}
+
+/// An artifact's provenance as R19 shows it (ADR-0040): what made it, whether that skill or
+/// workflow changed since, and each lens whose answer was off its output contract.
+pub struct RecipeView {
+    /// `skill premortem @ 3f2a1c9b8d7e (vault override) · build 0.1.0+abc123`, or
+    /// `provenance unknown` for an artifact written before recipes.
+    pub line: String,
+    /// The template refs, for the line's tooltip.
+    pub templates: String,
+    /// Why the "recipe changed since" badge shows (the live digest now differs), if it does.
+    pub changed: Option<String>,
+    pub off_contract: Vec<String>,
 }
 
 /// Partial: the plan workbench (`templates/_plan_work.html`, `id="work"`, docs/adr/0032) — the
@@ -557,6 +609,8 @@ pub struct WorkflowCard {
     pub use_when: String,
     pub avoid_when: String,
     pub source: &'static str,
+    /// The file's digest, as a workflow artifact's recipe records it (ADR-0040).
+    pub digest: String,
     pub hidden: bool,
     /// Derived from the definition (it chains a build-plan skill): runs from the capstone row.
     pub capstone: bool,
@@ -615,6 +669,8 @@ pub struct SkillCard {
     pub role: &'static str,
     pub contract: &'static str,
     pub source: &'static str,
+    /// The file's digest, as an artifact's recipe records it (ADR-0040).
+    pub digest: String,
     pub hidden: bool,
 }
 

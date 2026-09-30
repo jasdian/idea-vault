@@ -9,7 +9,7 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::web::routes::{
-    admin, artifacts, chat, compact, ideas, mcp, memory, plans, settings, skills, sources,
+    admin, artifacts, chat, compact, ideas, mcp, memory, plans, runs, settings, skills, sources,
 };
 pub use crate::web::state::AppState;
 
@@ -70,6 +70,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/idea/{slug}/compact", post(compact::compact))
         // The "btw" history view + fork-to-new-idea.
         .route("/idea/{slug}/history", get(ideas::history_page))
+        // R50: the read-only run inspector over one run journal (ADR-0037).
+        .route("/idea/{slug}/runs/{run_id}", get(runs::run_page))
         .route("/idea/{slug}/fork", post(ideas::fork_idea))
         .route("/idea/{slug}/delete", post(ideas::delete_idea))
         // Search.

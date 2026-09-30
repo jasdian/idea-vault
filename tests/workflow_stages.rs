@@ -413,6 +413,37 @@ async fn design_panel_writes_groundmap_scorecard_run_artifacts() {
 }
 
 #[tokio::test]
+async fn stage_artifacts_carry_the_workflow_recipe() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path());
+    let (_src, sources) = source_tree();
+    let mut scripts = vec![tokens(READER_ONE), tokens(READER_TWO)];
+    scripts.extend(panel_scripts());
+    let mock = spawn_sequence(&["llama3.2"], scripts).await;
+    let rig = Rig::new(&mock, 1).with_sources(sources);
+    rig.run(tmp.path(), "design-panel").await.unwrap();
+
+    let digest = Book::builtin()
+        .workflows
+        .get("design-panel")
+        .unwrap()
+        .digest
+        .clone();
+    let all = artifacts(tmp.path());
+    assert_eq!(all.len(), 3);
+    for a in &all {
+        let recipe = a.frontmatter.recipe.as_ref().expect("every stage artifact");
+        assert_eq!(recipe.workflow.as_deref(), Some("design-panel"));
+        assert_eq!(recipe.workflow_digest.as_deref(), Some(digest.as_str()));
+        assert!(
+            recipe.templates.is_empty(),
+            "the audit was off: no audit template"
+        );
+        assert!(recipe.build.starts_with(env!("CARGO_PKG_VERSION")));
+    }
+}
+
+#[tokio::test]
 async fn stage_concurrency_never_exceeds_k() {
     let tmp = tempfile::tempdir().unwrap();
     seed_idea(tmp.path());

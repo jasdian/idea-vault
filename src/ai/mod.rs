@@ -14,6 +14,8 @@
 //! - [`stream`] — adapts a backend's token stream into SSE events (D11).
 //! - [`budget`] — assembles a prompt within the model's context limit (D21).
 //! - [`contract`] — pure output-shape checks + repair for skill answers (docs/adr/0023).
+//! - [`provenance`] — the digests, prompt-template refs and build id an artifact's `recipe:` is
+//!   stamped with (ADR-0040).
 //! - [`untrusted`] — the fence every tool result passes through before it reaches the Ollama
 //!   tool loop as a `role: "tool"` message (ADR-0039).
 //! - [`web`] — keyless web-search + page-fetch tool leaves (ADR-0017), executed by the router's
@@ -33,6 +35,7 @@ pub mod claude_code;
 pub mod contract;
 pub mod mcp;
 pub mod ollama;
+pub mod provenance;
 pub mod sources;
 pub mod stream;
 pub mod untrusted;

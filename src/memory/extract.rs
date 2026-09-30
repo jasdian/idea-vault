@@ -22,6 +22,7 @@ use chrono::Utc;
 
 use crate::ai::budget::{assemble_context, ContextBudget, ContextInput};
 use crate::ai::ollama::ChatMessage;
+use crate::ai::provenance::{self, PromptTemplate};
 use crate::ai::LlmBackend;
 use crate::domain::evidence::{grounded, normalize_for_match};
 use crate::domain::{links, slug as domain_slug};
@@ -36,6 +37,21 @@ use crate::vault::store;
 /// Bounded fact set per extraction (D12: "a small number of high-value facts, not a transcript
 /// dump") — extra candidates from the model are dropped.
 pub const MAX_FACTS: usize = 7;
+
+/// The store-time writeup prompt, registered for recipe refs (ADR-0040).
+pub const CONSOLIDATE_TEMPLATE: PromptTemplate = PromptTemplate {
+    id: "consolidate",
+    version: 1,
+    text: CONSOLIDATE_INSTRUCTION,
+};
+
+/// The fact-extraction prompt: `parse_facts` reads the `FACT:`/`OP:`/`QUOTE:` lines it asks for,
+/// so it is registered and pinned by a golden (ADR-0040).
+pub const EXTRACT_TEMPLATE: PromptTemplate = PromptTemplate {
+    id: "extract",
+    version: 1,
+    text: EXTRACT_INSTRUCTION,
+};
 
 const CONSOLIDATE_INSTRUCTION: &str = "You are consolidating an idea after a working discussion. \
 Rewrite the idea's current best statement as a short markdown document reflecting the \
@@ -529,6 +545,10 @@ pub async fn extract_and_store(
                     revises: None,
                     version: None,
                     answered: Vec::new(),
+                    recipe: Some(provenance::recipe(&[
+                        CONSOLIDATE_TEMPLATE,
+                        EXTRACT_TEMPLATE,
+                    ])),
                 },
                 body: quarantine_body(&held),
             },
@@ -550,6 +570,15 @@ pub async fn extract_and_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn golden_extract_instruction() {
+        crate::ai::provenance::assert_golden(
+            EXTRACT_TEMPLATE.text,
+            include_str!("../../tests/fixtures/prompt-goldens/extract.txt"),
+            "extract.txt",
+        );
+    }
 
     #[test]
     fn a_build_plan_pointer_turn_never_grounds_a_memory_quote() {

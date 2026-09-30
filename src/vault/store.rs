@@ -733,6 +733,54 @@ pub fn read_artifact(
     })
 }
 
+/// An idea's run-journal directory (ADR-0037). The journal is diagnostics, not truth: reindex,
+/// fork and prompts never read it; the store only reads it back for the R50 run inspector.
+pub const RUNS_DIR: &str = ".runs";
+
+/// A run id as the journal mints it (`20260930T120000123Z-skill`): ASCII letters, digits and
+/// `-` only, so it can never name a path outside `.runs/`.
+fn is_run_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Read one run journal, `vault/<slug>/.runs/<run_id>.jsonl`, as raw text.
+pub fn read_run_journal(
+    vault_dir: &Path,
+    idea_slug: &str,
+    run_id: &str,
+) -> Result<String, VaultError> {
+    let dir = checked_idea_dir(vault_dir, idea_slug)?.join(RUNS_DIR);
+    if !is_run_id(run_id) {
+        return Err(VaultError::RunNotFound(run_id.to_string()));
+    }
+    match fs::read_to_string(dir.join(format!("{run_id}.jsonl"))) {
+        Ok(raw) => Ok(raw),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(VaultError::RunNotFound(run_id.to_string()))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The id of the idea's newest run journal, if it has any. Run ids start with their UTC start
+/// time, so the greatest name is the newest run.
+pub fn latest_run_id(vault_dir: &Path, idea_slug: &str) -> Result<Option<String>, VaultError> {
+    let dir = checked_idea_dir(vault_dir, idea_slug)?.join(RUNS_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let id = name.strip_suffix(".jsonl")?;
+            is_run_id(id).then(|| id.to_string())
+        })
+        .max())
+}
+
 /// Read one derived `artifacts/<file-slug>.html` report export as raw text.
 pub fn read_artifact_html(
     vault_dir: &Path,
@@ -1272,6 +1320,7 @@ mod tests {
                 revises: None,
                 version: None,
                 answered: Vec::new(),
+                recipe: None,
             },
             body: "- the sidecar stays\n".into(),
         }

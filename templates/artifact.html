@@ -5,6 +5,12 @@
 <div class="idea-subhead">
   <span class="artifacts__meta">{{ meta }} · <code>artifacts/{{ file_name }}</code></span>
 </div>
+{# Recipe provenance (ADR-0040): what made this artifact, and whether it has changed since. #}
+<p class="recipe">
+  <span class="recipe__line"{% if !recipe.templates.is_empty() %} title="templates: {{ recipe.templates }}"{% endif %}>{{ recipe.line }}</span>
+  {% if let Some(why) = recipe.changed %}<span class="recipe__changed" title="{{ why }}">recipe changed since</span>{% endif %}
+</p>
+{% for note in recipe.off_contract %}<p class="recipe__off">{{ note }}</p>{% endfor %}
 
 {# The workbench sits above the plan body and the copy blocks: what the plan still needs from the
    owner comes first (docs/adr/0032). A Rust-rendered partial, so `safe` is the pre-rendered rule. #}

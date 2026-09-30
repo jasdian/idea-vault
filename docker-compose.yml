@@ -8,6 +8,8 @@ services:
       args:
         APP_UID: ${IDEA_VAULT_UID:-1000}
         APP_GID: ${IDEA_VAULT_GID:-1000}
+        # ADR-0040: e.g. IDEA_VAULT_BUILD_SHA=$(git rev-parse --short HEAD) docker compose build
+        IDEA_VAULT_BUILD_SHA: ${IDEA_VAULT_BUILD_SHA:-}
     image: idea-vault:latest
     container_name: idea-vault
     restart: "no"

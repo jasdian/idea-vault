@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="crumb" href="/idea/{{ slug }}">← back to {{ idea_title }}</a>
+<h1 class="title">Run — {{ kind }}</h1>
+<div class="idea-subhead">
+  <span class="artifacts__meta"><code>.runs/{{ run_id }}.jsonl</code> · build {{ build }} · {{ calls.len() }} call{% if calls.len() != 1 %}s{% endif %} · {{ outcome }}</span>
+</div>
+<p class="run__intro">A diagnostics record of what this run asked the model and how each answer
+  came back. It is never indexed, never read into a prompt, and not part of the idea.</p>
+{% if unreadable > 0 %}<p class="recipe__off">{{ unreadable }} unreadable line{% if unreadable != 1 %}s{% endif %} (a run cut off mid-write)</p>{% endif %}
+
+{% if calls.is_empty() %}
+<p class="mcp__empty">no model call was recorded.</p>
+{% else %}
+<ol class="run__calls">
+  {% for c in calls %}
+  <li class="run__call">
+    <div class="mcp__row-line1">
+      <span class="mcp__name">#{{ c.seq }} · {{ c.role }}</span>
+      <span class="mcp__token">{{ c.backend }} · {{ c.model }}</span>
+      <span class="{% if c.off_contract %}recipe__off{% else %}mcp__token{% endif %}">{{ c.contract }}</span>
+    </div>
+    <div class="mcp__row-line2">
+      <span class="mcp__token">tokens in {{ c.prompt_tokens }} · out {{ c.output_tokens }}</span>
+      <span class="mcp__token">api calls {{ c.api_calls }}</span>
+      <span class="mcp__token">stop · {{ c.stop_reason }}</span>
+      <span class="mcp__token">{{ c.ms }} ms</span>
+      {% if !c.truncation.is_empty() %}<span class="recipe__changed">{{ c.truncation }}</span>{% endif %}
+    </div>
+    {% if !c.tools.is_empty() %}
+    <ul class="run__tools">{% for t in c.tools %}<li>{{ t }}</li>{% endfor %}</ul>
+    {% endif %}
+    <details class="run__response">
+      <summary>response</summary>
+      <pre>{{ c.response }}</pre>
+    </details>
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}
+{% endblock %}

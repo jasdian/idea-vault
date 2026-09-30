@@ -6,6 +6,7 @@
 //! [`retry_note`] appended; a fan-out agent only repairs (a retry per agent would double the
 //! fan-out's cost). Compaction uses the heading helpers warn-only.
 
+use crate::ai::provenance::PromptTemplate;
 use crate::domain::OutputContract;
 
 /// Why an answer failed its contract — phrased so it can be read back to the model.
@@ -60,11 +61,18 @@ impl std::fmt::Display for Violation {
 /// The instruction appended to the original prompt for the one retry. The failed answer is not
 /// resent — it would only spend the context budget on the mistake.
 pub fn retry_note(violation: &Violation) -> String {
-    format!(
-        "\n\nIMPORTANT — a previous answer to this request was rejected because {violation}. \
-         Answer again, following the required format exactly, with no preamble."
-    )
+    RETRY_NOTE
+        .text
+        .replace("{violation}", &violation.to_string())
 }
+
+/// The retry note's wording: parse-coupled, so registered and pinned by a golden (ADR-0040).
+pub const RETRY_NOTE: PromptTemplate = PromptTemplate {
+    id: "retry-note",
+    version: 1,
+    text: "\n\nIMPORTANT — a previous answer to this request was rejected because {violation}. \
+           Answer again, following the required format exactly, with no preamble.",
+};
 
 fn is_bullet(line: &str) -> bool {
     let t = line.trim_start();

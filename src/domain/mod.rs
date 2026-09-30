@@ -18,7 +18,7 @@ pub mod workflow;
 pub use artifact::{Artifact, ArtifactKind};
 pub use compacted::Compacted;
 pub use frontmatter::{
-    ArtifactFrontmatter, CompactedFrontmatter, IdeaFrontmatter, MemoryFactFrontmatter,
+    ArtifactFrontmatter, CompactedFrontmatter, IdeaFrontmatter, MemoryFactFrontmatter, Recipe,
     SkillFrontmatter, MAX_IDEA_TAGS,
 };
 pub use idea::{Idea, IdeaState};

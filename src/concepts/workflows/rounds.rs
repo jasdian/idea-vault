@@ -409,19 +409,17 @@ pub(crate) async fn run_refine(
             "round {rounds} · re-auditing {} findings",
             findings.len()
         ));
-        *report = Some(
-            audit::audit(
-                ctx.llm,
-                ctx.sem,
-                &ctx.book.skills,
-                ctx.vault_dir,
-                ctx.idea_slug,
-                findings,
-                ctx.budget,
-            )
-            .await?,
-        );
-        calls.charge(1);
+        let target = audit::AuditTarget {
+            vault_dir: ctx.vault_dir,
+            idea_slug: ctx.idea_slug,
+            findings,
+            budget: ctx.budget,
+            // The re-audit's re-ask runs only on slack, as for an Audit stage (ADR-0023 amendment).
+            may_reask: calls.can_fund(2),
+        };
+        let run = audit::audit(ctx.llm, ctx.sem, &ctx.book.skills, target).await?;
+        calls.charge(run.calls);
+        *report = Some(run.report);
     }
     if rounds == 0 {
         let why = if report.as_ref().is_none_or(|r| r.failed) {

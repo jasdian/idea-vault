@@ -8,7 +8,8 @@ use chrono::Utc;
 
 use crate::concepts::build_plan::{plan, workbench};
 use crate::concepts::knowledge;
-use crate::domain::{slug as domain_slug, ArtifactKind};
+use crate::concepts::workflows::Book;
+use crate::domain::{slug as domain_slug, ArtifactKind, Recipe};
 use crate::vault::store;
 use crate::web::jobs;
 use crate::web::routes::memory::{guard_discussion_state, progress_sink};
@@ -17,6 +18,7 @@ use crate::web::routes::{reindex_logged, scoped_llm};
 use crate::web::state::AppState;
 use crate::web::templates::{
     render_markdown, ArtifactEntry, ArtifactExport, ArtifactPage, ArtifactsPanel, ExportSection,
+    RecipeView,
 };
 use crate::web::WebError;
 
@@ -167,6 +169,67 @@ fn artifact_meta(fm: &crate::domain::ArtifactFrontmatter) -> String {
     }
 }
 
+/// What R19 shows of an artifact's recipe (ADR-0040), checked against the live `book`: a stored
+/// skill or workflow digest that differs from today's (or names one no longer registered) earns
+/// the "recipe changed since" badge. No recipe is "provenance unknown", never stale.
+pub(crate) fn recipe_view(recipe: Option<&Recipe>, book: &Book) -> RecipeView {
+    let Some(r) = recipe else {
+        return RecipeView {
+            line: "provenance unknown".to_string(),
+            templates: String::new(),
+            changed: None,
+            off_contract: Vec::new(),
+        };
+    };
+    let made_by = |kind: &str, name: &Option<String>, digest: &Option<String>| {
+        name.as_ref().map(|n| match digest {
+            Some(d) => format!("{kind} {n} @ {d}"),
+            None => format!("{kind} {n}"),
+        })
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(skill) = made_by("skill", &r.skill, &r.skill_digest) {
+        parts.push(match &r.skill_source {
+            Some(source) => format!("{skill} ({source})"),
+            None => skill,
+        });
+    }
+    parts.extend(made_by("workflow", &r.workflow, &r.workflow_digest));
+    parts.push(format!("build {}", r.build));
+
+    let drift = |kind: &str, name: &Option<String>, stored: &Option<String>, live: Option<&str>| {
+        let (name, stored) = (name.as_ref()?, stored.as_ref()?);
+        match live {
+            None => Some(format!("{kind} {name} is no longer registered")),
+            Some(now) if now != stored => Some(format!("{kind} {name} is now @ {now}")),
+            Some(_) => None,
+        }
+    };
+    let skill_now = r
+        .skill
+        .as_deref()
+        .and_then(|n| book.skills.get(n))
+        .map(|s| s.digest.as_str());
+    let workflow_now = r
+        .workflow
+        .as_deref()
+        .and_then(|n| book.workflows.get(n))
+        .map(|w| w.digest.as_str());
+    let changed: Vec<String> = [
+        drift("skill", &r.skill, &r.skill_digest, skill_now),
+        drift("workflow", &r.workflow, &r.workflow_digest, workflow_now),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    RecipeView {
+        line: parts.join(" · "),
+        templates: r.templates.join(" · "),
+        changed: (!changed.is_empty()).then(|| changed.join("; ")),
+        off_contract: r.contract.clone(),
+    }
+}
+
 /// The workbench for the build plan `stem` (docs/adr/0032). Degrades to no workbench: a plan the
 /// workbench cannot read still renders as a page, with its body and copy blocks.
 fn plan_work(
@@ -231,6 +294,10 @@ pub async fn view_artifact(
                 prompt_md,
                 attack_plan_md,
                 plan_work,
+                recipe: recipe_view(
+                    artifact.frontmatter.recipe.as_ref(),
+                    &state.workflows.snapshot(),
+                ),
             }
             .into_response())
         }

@@ -239,6 +239,32 @@ mod tests {
         assert!(!prompt.contains("{context}"));
     }
 
+    /// The assembly shape (persona, blank line, skill body with `{context}` filled) is pinned; the
+    /// skill is a fixed test file, so editing a built-in skill never moves this golden
+    /// (skills are digested, not frozen — ADR-0040).
+    #[test]
+    fn golden_build_prompt_fixed_role_skill_context() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("golden-lens.md"),
+            "---\nname: golden-lens\ndescription: \"fixed\"\nstage: attack\n---\n\
+             List what breaks first.\n\n{context}\n",
+        )
+        .expect("write skill");
+        let (registry, issues) = SkillRegistry::load(dir.path());
+        assert!(issues.is_empty(), "{issues:?}");
+        let task = AgentTask {
+            role: AgentRole::Critic,
+            skill: Some("golden-lens".to_string()),
+            context: "## Idea\nA tool library for one street.".to_string(),
+        };
+        crate::ai::provenance::assert_golden(
+            &build_prompt(&registry, &task).expect("prompt"),
+            include_str!("../../tests/fixtures/prompt-goldens/build-prompt.txt"),
+            "build-prompt.txt",
+        );
+    }
+
     #[test]
     fn build_prompt_without_skill_is_persona_plus_context() {
         let registry = SkillRegistry::builtin();

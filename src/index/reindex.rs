@@ -711,6 +711,7 @@ mod tests {
                 revises: None,
                 version: None,
                 answered: Vec::new(),
+                recipe: None,
             },
             body: body.into(),
         }

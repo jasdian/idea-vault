@@ -23,7 +23,7 @@ use crate::concepts::build_plan::plan::{self, BuildPlan, Provenance};
 use crate::concepts::ConceptError;
 use crate::domain::evidence::POINTER_PREFIX;
 use crate::domain::frontmatter::ArtifactFrontmatter;
-use crate::domain::{slug, Artifact, ArtifactKind};
+use crate::domain::{slug, Artifact, ArtifactKind, Recipe};
 use crate::vault::store;
 
 /// The harvest lens whose artifacts list an idea's open questions.
@@ -39,6 +39,8 @@ pub struct PlanInputs<'a> {
     pub turn_role: &'a str,
     /// The registry name that produced the plan (`build-prompt` or `ready-to-build`).
     pub lens: &'a str,
+    /// What made the plan (ADR-0040); `None` stamps nothing, as for a plan from before recipes.
+    pub recipe: Option<Recipe>,
     pub model: String,
     /// The audited harvest the planner worked from; `None` for a quick (unaudited) plan.
     pub audit: Option<&'a AuditView>,
@@ -252,6 +254,7 @@ pub(crate) struct NewPlan<'a> {
     pub idea_slug: &'a str,
     pub idea_title: &'a str,
     pub lens: Option<String>,
+    pub recipe: Option<Recipe>,
     pub model: String,
     pub now: DateTime<Utc>,
     pub revises: Option<String>,
@@ -282,6 +285,7 @@ pub(crate) fn write_plan(plan: NewPlan) -> Result<String, ConceptError> {
                 revises: plan.revises,
                 version: (plan.version > 1).then_some(plan.version),
                 answered: plan.answered,
+                recipe: plan.recipe,
             },
             body: plan.body,
         },
@@ -387,6 +391,7 @@ pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, Concept
         idea_slug: inputs.idea_slug,
         idea_title: &idea.frontmatter.title,
         lens: Some(inputs.lens.to_string()),
+        recipe: inputs.recipe.clone(),
         model: inputs.model.clone(),
         now: inputs.now,
         revises: head.map(|h| h.stem),
@@ -524,6 +529,7 @@ mod tests {
             answer: replan,
             turn_role: "assistant (skill: build-prompt)",
             lens: "build-prompt",
+            recipe: None,
             model: "llama3.2".into(),
             audit: None,
             probe: &probe,
