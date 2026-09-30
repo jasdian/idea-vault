@@ -57,6 +57,9 @@ struct Ctx<'a> {
     owner_idea: String,
     foil: String,
     all: String,
+    /// Every figure number the discussion states, read the way [`figures`] reads a claim, so a
+    /// claim's `24` is found in a discussed `24h` (ADR-0030 §G6).
+    said_figures: Vec<String>,
     scan: TokenScan,
     complete: bool,
 }
@@ -82,13 +85,15 @@ impl<'a> Ctx<'a> {
         wanted.sort();
         wanted.dedup();
         let scan = inputs.probe.find_tokens(&wanted);
+        let all = join(&[Provenance::Owner, Provenance::Idea, Provenance::Foil]);
         Ctx {
             probe: inputs.probe,
             complete: inputs.probe.is_empty() || scan.complete,
             scan,
             owner_idea: join(&[Provenance::Owner, Provenance::Idea]),
             foil: join(&[Provenance::Foil]),
-            all: join(&[Provenance::Owner, Provenance::Idea, Provenance::Foil]),
+            said_figures: figures(&all).into_iter().map(|f| f.num).collect(),
+            all,
         }
     }
 }
@@ -136,8 +141,11 @@ fn gate_items(
 }
 
 fn judge(item: &mut Item, kind: Kind, ctx: &Ctx, report: &mut GateReport) -> Verdict {
+    let owner = kind == Kind::Claim && owner_answer(item);
     if kind == Kind::Claim {
         match g4(item, ctx.probe) {
+            Some(G4::Unpaired(anchor)) if owner => item.markers.push(unpaired_marker(&anchor)),
+            Some(G4::Faulty { marker, .. }) if owner => item.markers.push(marker),
             Some(G4::Unpaired(anchor)) => {
                 return Verdict::Verify {
                     check: None,
@@ -165,23 +173,27 @@ fn judge(item: &mut Item, kind: Kind, ctx: &Ctx, report: &mut GateReport) -> Ver
         }
         return verdict;
     }
-    if kind == Kind::Claim {
-        if let Some(verdict) = g6(item, ctx).filter(|_| !owner_answer(item)) {
+    if kind == Kind::Claim && !owner {
+        if let Some(verdict) = g6(item, ctx) {
             return verdict;
         }
         if let Some(verdict) = g12(item) {
             return verdict;
         }
     }
+    if owner && g12(item).is_some() {
+        item.markers.push(RECHECK.to_string());
+    }
     Verdict::Keep
 }
 
 /// An item that is the owner's own answer on the plan workbench (docs/adr/0032): it carries a
 /// code-owned `answers`/`unblocks` key (dropped from untrusted model output), G1 grounded its quote
-/// in an owner turn, and its text is that quote (whole, or clipped with `…`). A figure in it is in
-/// the discussion by definition, so G6 — which exists to catch model-invented numbers — never
-/// moves it (ADR-0030 §G6). A model paraphrase carrying the same keys is not the owner's words and
-/// stays gated.
+/// in an owner turn, and its text is that quote, whole or clipped with a trailing `…`. The owner's
+/// answer outranks every claim gate, so no gate moves it (ADR-0030 §G6): a figure in it is in the
+/// discussion by definition, so G6 skips it, and a G4 anchor fault or a G12 freshness cue becomes
+/// a marker on the Settled item. A model paraphrase or a bare prefix carrying the same keys is not
+/// the owner's words and stays gated.
 fn owner_answer(item: &Item) -> bool {
     use crate::domain::evidence::normalize_for_match;
     let keyed = item.field("answers").is_some() || item.field("unblocks").is_some();
@@ -190,8 +202,14 @@ fn owner_answer(item: &Item) -> bool {
     else {
         return false;
     };
-    let own = normalize_for_match(item.text.strip_suffix('…').unwrap_or(&item.text));
-    !own.is_empty() && normalize_for_match(quote).starts_with(&own)
+    let quote = normalize_for_match(quote);
+    match item.text.strip_suffix('…') {
+        Some(clip) => {
+            let own = normalize_for_match(clip);
+            !own.is_empty() && quote.starts_with(&own)
+        }
+        None => normalize_for_match(&item.text) == quote,
+    }
 }
 
 fn mark_task(task: &mut Item, ctx: &Ctx) {
@@ -666,7 +684,8 @@ fn g6(item: &Item, ctx: &Ctx) -> Option<Verdict> {
         return verify(marker);
     }
     let figs = figures(&item.text);
-    if let Some(f) = figs.iter().find(|f| !word_in(&ctx.all, &f.num)) {
+    let said = |f: &Figure| word_in(&ctx.all, &f.num) || ctx.said_figures.contains(&f.num);
+    if let Some(f) = figs.iter().find(|f| !said(f)) {
         return verify(format!("figure not in the discussion: {}", f.num));
     }
     if !figs.is_empty() && item.field("count").is_none() {
@@ -1133,6 +1152,70 @@ mod tests {
             "a model paraphrase of an answer keeps the figure check: {:?}",
             paraphrase.verify
         );
+    }
+
+    #[test]
+    fn g6_owner_answer_prefix_without_clip_mark_is_gated() {
+        let mut plan = owner_answer(&ANSWER[..40], "answers");
+        run_on(&mut plan, ANSWER_TURN);
+        assert_eq!(
+            plan.verify.len(),
+            1,
+            "a prefix with no `…` is a model narrowing, not the owner's answer"
+        );
+    }
+
+    #[test]
+    fn g6_a_glued_unit_figure_said_in_the_discussion_is_found() {
+        for text in [
+            "Results expire after 24h in the cache.",
+            "Results expire after 24 hours in the cache.",
+        ] {
+            let mut plan = settled(text);
+            plan.settled[0]
+                .fields
+                .insert("count".into(), "`grep -c ttl cache.md`".into());
+            run_on(&mut plan, ANSWER_TURN);
+            assert!(plan.verify.is_empty(), "{text}: {:?}", plan.verify);
+        }
+    }
+
+    const FRESH_ANSWER: &str = "Pin the latest claude release as of the probe run.";
+
+    #[test]
+    fn g4_g12_owner_answer_stays_settled_with_the_check_as_a_marker() {
+        let turn = format!(
+            "## user\nRe Q6 (plan-1): {FRESH_ANSWER}\n\n\
+## user\nRe Q7 (plan-1): The cache lives in `src/cache.rs:12` for now.\n"
+        );
+        let mut fresh = owner_answer(FRESH_ANSWER, "answers");
+        fresh.settled[0]
+            .fields
+            .insert("quote".into(), FRESH_ANSWER.into());
+        run_on(&mut fresh, &turn);
+        assert!(fresh.verify.is_empty(), "{:?}", fresh.verify);
+        assert!(
+            markers(&fresh.settled[0]).contains(RECHECK),
+            "{:?}",
+            fresh.settled
+        );
+
+        let anchored = "The cache lives in `src/cache.rs:12` for now.";
+        let mut anchor = owner_answer(anchored, "unblocks");
+        anchor.settled[0]
+            .fields
+            .insert("quote".into(), anchored.into());
+        run_on(&mut anchor, &turn);
+        assert!(anchor.verify.is_empty(), "{:?}", anchor.verify);
+        assert!(
+            markers(&anchor.settled[0]).contains("name the symbol at src/cache.rs:12"),
+            "{:?}",
+            anchor.settled
+        );
+
+        let mut model = settled(FRESH_ANSWER);
+        run_on(&mut model, &turn);
+        assert_eq!(model.verify.len(), 1, "a model claim keeps G12");
     }
 
     #[test]

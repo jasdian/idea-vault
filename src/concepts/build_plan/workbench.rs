@@ -447,10 +447,10 @@ fn apply_answers(plan: &mut BuildPlan, answers: &[Answered]) {
     }
 }
 
-/// Put every owner answer a gate moved to Verify first back in Settled, unmarked, so the gates
-/// judge it afresh: `reset_derived` keeps a premise's move reason, so without this an answer a
-/// plan written before the G6 owner-answer exemption demoted would stay a premise for good
-/// (ADR-0030 §G6, docs/adr/0032).
+/// Put every owner answer found in Verify first back in Settled, unmarked, before the gates run:
+/// no gate moves an owner answer (ADR-0030 §G6), but `reset_derived` keeps a premise's move
+/// reason, so an answer stored in Verify first would otherwise stay a premise for good
+/// (docs/adr/0032).
 fn restore_answers(plan: &mut BuildPlan) {
     let (answers, kept): (Vec<Item>, Vec<Item>) = std::mem::take(&mut plan.verify)
         .into_iter()
@@ -1163,6 +1163,33 @@ Ship the zone snapshot tool.
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn answer_with_a_freshness_cue_stays_settled_across_versions() {
+        let dir = seeded();
+        let fresh = "Freeze at entry, using the latest snapshot as of the run.";
+        let v2 = submit(dir.path(), BASE, &[("Q1", fresh)], 1).unwrap();
+        let s2 = answer_holder(&v2.plan, "Q1").unwrap().clone();
+        assert!(
+            s2.id.starts_with('S'),
+            "{s2:?} / verify {:?}",
+            v2.plan.verify
+        );
+        assert!(
+            s2.markers.iter().any(|m| m.starts_with("freshness")),
+            "{s2:?}"
+        );
+        let v3 = submit(
+            dir.path(),
+            &v2.stem,
+            &[("Q2", "Binance spot, daily candles.")],
+            2,
+        )
+        .unwrap();
+        let s3 = answer_holder(&v3.plan, "Q1").unwrap();
+        assert_eq!(s3.id, s2.id, "the answer keeps its id: {:?}", v3.plan);
+        assert!(v3.plan.verify.is_empty(), "{:?}", v3.plan.verify);
     }
 
     const GATED_PLAN: &str = "## Goal

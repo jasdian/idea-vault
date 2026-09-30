@@ -699,20 +699,22 @@ fn kill_wiring(plan: &mut BuildPlan, inputs: &GateInputs, report: &mut GateRepor
     }
     // Only what the owner said (or wrote in the idea) is a gate the owner set; a foil turn
     // musing "only if" is not a requirement the plan owes a kill row (ADR-0030, ADR-0032).
-    // An owner answer to an earlier G10 question settles every gate phrase said up to it, so
-    // only owner turns after the latest such answer are scanned (ADR-0030 §G10).
-    let settled_through = g10_answered_through(inputs);
+    // An owner answer to an earlier G10 question settles exactly what that question quoted and
+    // the answer turn itself; gate language the question never named is still asked about
+    // (ADR-0030 §G10).
+    let settled = G10Settled::from(inputs);
     let owner_turns = inputs
         .evidence
         .turns()
         .iter()
-        .enumerate()
-        .filter(|(i, _)| settled_through.is_none_or(|t| *i > t))
-        .map(|(_, t)| t)
         .filter(|t| matches!(t.speaker, Provenance::Owner | Provenance::Idea));
     for turn in owner_turns {
         let text = turn_body(turn);
-        let answered = answered_spans(plan, text);
+        if settled.is_answer_turn(text) {
+            continue;
+        }
+        let mut answered = answered_spans(plan, text);
+        answered.extend(settled.window_spans(text));
         let Some(at) = GATE_LANGUAGE
             .iter()
             .filter_map(|p| gate_phrase_at(text, p, &answered))
@@ -763,22 +765,57 @@ fn answered_spans(plan: &BuildPlan, text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// The evidence turn holding the newest owner answer to a G10 question (its `asked` is the
-/// code-generated question, so it starts with [`GATE_MARKER`]), if any. `asked` may carry the
-/// `proposed:` prefix the question was rendered with.
-fn g10_answered_through(inputs: &GateInputs) -> Option<usize> {
-    let turns = inputs.evidence.turns();
-    inputs
-        .answered
-        .iter()
-        .filter(|a| {
+/// What the owner's answers to earlier G10 questions settled. A G10 question's `asked` is the
+/// code-generated `gate language without a kill row: "<window>"` (possibly behind the `proposed:`
+/// prefix it was rendered with), so the window it named is read back from it verbatim.
+struct G10Settled {
+    /// The normalized windows the answered questions quoted.
+    windows: Vec<String>,
+    /// The normalized `re <qid> (<stem>):` opening of each answer turn.
+    answer_heads: Vec<String>,
+}
+
+impl G10Settled {
+    fn from(inputs: &GateInputs) -> Self {
+        let mut settled = G10Settled {
+            windows: Vec::new(),
+            answer_heads: Vec::new(),
+        };
+        for a in inputs.answered {
             let asked = a.asked.strip_prefix("proposed:").unwrap_or(&a.asked);
-            asked.trim_start().starts_with(GATE_MARKER)
+            let Some(rest) = asked.trim_start().strip_prefix(GATE_MARKER) else {
+                continue;
+            };
+            let window = rest.trim_start_matches([':', ' ']).trim();
+            let window = window.strip_prefix('"').unwrap_or(window);
+            let window = window.strip_suffix('"').unwrap_or(window);
+            let window = normalize_for_match(window);
+            if !window.is_empty() {
+                settled.windows.push(window);
+            }
+            settled.answer_heads.push(normalize_for_match(&format!(
+                "Re {} ({}):",
+                a.qid, a.in_stem
+            )));
+        }
+        settled
+    }
+
+    /// True for the owner turn that answers a G10 question: its gate language is the answer.
+    fn is_answer_turn(&self, body: &str) -> bool {
+        self.answer_heads
+            .iter()
+            .any(|h| body.starts_with(h.as_str()))
+    }
+
+    /// Every place in `body` (a normalized turn body) where an answered question's window occurs:
+    /// the turn the question was asked about, and any later turn that pastes the window back.
+    fn window_spans<'a>(&'a self, body: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {
+        self.windows.iter().flat_map(move |w| {
+            body.match_indices(w.as_str())
+                .map(|(at, _)| (at, at + w.len()))
         })
-        .filter_map(|a| inputs.evidence.locate(&a.answer))
-        .map(|(turn, _)| turn)
-        .filter(|&turn| turns[turn].speaker == Provenance::Owner)
-        .max()
+    }
 }
 
 /// The first whole-word occurrence of `phrase` in `text` outside every `answered` span and not
@@ -1383,6 +1420,53 @@ mod tests {
             "## user\nMy rule stays \"ship only if tests pass\" for this one.\n",
         );
         assert_eq!(gate_questions(&plan), 1, "{:?}", plan.open);
+    }
+
+    #[test]
+    fn gate_language_answer_settles_only_the_turn_it_was_asked_about() {
+        let conversation = format!(
+            "{GATE_TURN}\n## user\nThe probe must not be built until the budget is known.\n\n\
+## user\nRe Q3 (plan-1): {G10_ANSWER}\n"
+        );
+        let mut plan = task_plan();
+        run_with_answered(&mut plan, &conversation, &[g10_answer()]);
+        assert_eq!(gate_questions(&plan), 1, "{:?}", plan.open);
+        assert!(
+            plan.open[0].text.contains("must not be built"),
+            "{:?}",
+            plan.open
+        );
+    }
+
+    #[test]
+    fn gate_language_answer_text_typed_earlier_still_settles_the_question() {
+        let conversation = format!(
+            "## user\n{G10_ANSWER}\n\n{GATE_TURN}\n## user\nRe Q3 (plan-1): {G10_ANSWER}\n"
+        );
+        let mut plan = task_plan();
+        run_with_answered(&mut plan, &conversation, &[g10_answer()]);
+        assert_eq!(gate_questions(&plan), 0, "{:?}", plan.open);
+    }
+
+    #[test]
+    fn gate_language_in_the_g10_answer_turn_is_not_reasked() {
+        let mut answer = g10_answer();
+        answer.answer = "No kill row; the indexer ships only if someone asks for it.".into();
+        let conversation = format!("{GATE_TURN}\n## user\nRe Q3 (plan-1): {}\n", answer.answer);
+        let mut plan = task_plan();
+        run_with_answered(&mut plan, &conversation, &[answer]);
+        assert_eq!(gate_questions(&plan), 0, "{:?}", plan.open);
+    }
+
+    #[test]
+    fn gate_language_pasting_an_answered_g10_window_does_not_fire() {
+        let conversation = format!(
+            "{GATE_TURN}\n## user\nRe Q3 (plan-1): {G10_ANSWER}\n\n\
+## user\nQ3 flagged ship the indexer only if the parser passes, which was a steelman.\n"
+        );
+        let mut plan = task_plan();
+        run_with_answered(&mut plan, &conversation, &[g10_answer()]);
+        assert_eq!(gate_questions(&plan), 0, "{:?}", plan.open);
     }
 
     #[test]

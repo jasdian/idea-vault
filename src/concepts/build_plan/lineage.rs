@@ -563,6 +563,7 @@ mod tests {
         );
         assert_eq!(copied.settled[0].field("answers"), Some("Q6"));
     }
+
     #[test]
     fn answered_in_lineage_reads_answers_left_in_verify() {
         use crate::concepts::build_plan::workbench::tests::{

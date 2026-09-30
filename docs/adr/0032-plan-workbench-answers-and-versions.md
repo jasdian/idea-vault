@@ -60,7 +60,7 @@ plan **version** deterministically. Six rules:
    texts, each `answered Qn → words`), capped at 1500 bytes: it keeps ids stable and is never
    evidence.
 5. **A deterministic version re-gates the plan.** `parse_artifact`, then `reset_derived`, then
-   `apply_answers`, then `gates::run` with `audit: None`, against fresh on-disk evidence. The
+   `restore_answers` (see the 2026-09-30 amendment), then `apply_answers`, then `gates::run` with `audit: None`, against fresh on-disk evidence. The
    header reads `v{n} · answers on <base> · audit not re-run`. The plan grammar gains owner-only
    item fields (`answers`, `asked`, `in`, `unblocks`, `unblocked`) which the untrusted model
    parse drops, so a model cannot forge an answer, and an `owner: model` field on a task the
@@ -125,8 +125,9 @@ Routes: R46 `POST /idea/{slug}/plan/{stem}/answer`, R47 `GET /idea/{slug}/plan/l
   `reset_derived`, then `restore_answers` (every Verify first item with `answers` or `unblocks`
   goes back to Settled with a fresh `S#`, its markers and `check` cleared), then `apply_answers`,
   then `gates::run`. `reset_derived` keeps a premise's move reason, so without this an answer G6
-  moved before its owner-answer exemption ([ADR-0030](./0030-gated-build-plan.md)) would stay a
-  premise for good. Re-gating stays idempotent: `restore_answers` runs only on a new answered
+  moved before the owner-answer exemption ([ADR-0030](./0030-gated-build-plan.md)) would stay a
+  premise for good. Since no gate moves an owner answer, a restored answer stays in Settled and
+  keeps its `S#` on later versions. Re-gating stays idempotent: `restore_answers` runs only on a new answered
   version, never in `reset_derived`.
 
 ## Alternatives considered
