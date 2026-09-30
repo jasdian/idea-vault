@@ -1,3 +1,41 @@
+# Intent — claude-code foil lockdown and tool-output fence (P4)
+
+The claude-code foil ran with `--dangerously-skip-permissions`, about 27 built-in tools (Bash, Write,
+Edit, Task and more), the owner's user-level MCP servers (idea-vault's own among them), the vault root
+as its cwd and the server's full environment, `IDEA_VAULT_MCP_TOKEN` included. A turn busy with tool
+calls had no end, because only the per-line timeout bounded it. On the Ollama path, fetched pages,
+source files and MCP answers reached the model raw, so text inside them could pass for instructions.
+The fix: the foil runs `--restricted --tools Read,Grep,Glob` (plus WebSearch and WebFetch only while
+web access is on), always with `--strict-mcp-config`, in the idea's own folder with sources as
+`--add-dir`, and never skips permissions. It gets an allowlisted environment and a 1800s wall-clock
+turn deadline, its init event is checked against the allowlist before any output is accepted, and every
+Ollama tool result is fenced as untrusted data. Design: ADR-0039, with the owner decisions of
+2026-09-30 (spec §7.2).
+
+## Acceptance criteria
+
+- No code path passes `--dangerously-skip-permissions`; every foil argv carries `--restricted`,
+  `--tools` equal to the allowlist, and `--strict-mcp-config` with an `--mcp-config` file (an empty
+  `{"mcpServers":{}}` when none is registered, removed after the turn).
+- An idea turn's foil cwd is that idea's folder; extraction and compaction run there too, source-free.
+- The child environment is the pass-list plus `IDEA_VAULT_CLAUDE_ENV_PASS`; no `IDEA_VAULT_*` key ever
+  reaches it, even when listed.
+- The init tools the app accepts are exactly the allowlist, plus `mcp__<server>__*` tools of registered
+  servers; one extra tool, an unregistered MCP server, or output before the init event fails the turn.
+- A turn still busy at `IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS` (default 1800) fails with a wall-clock
+  error, and its process is killed.
+- Every `role: "tool"` message in the Ollama loop is fenced, with smuggled markers escaped (CR counts as
+  a line break), the turn's first message carries the fence note, and no fence reaches
+  `conversation.md`.
+- Every change is observed failing first, and `bash scripts/gate.sh` is green.
+
+## Expectation changes
+
+- `tests/fixtures/fake-claude.sh` now emits an init event listing its `--tools` in every mode, and gains
+  the `dumpenv`, `leakytools`, `noinit` and `busytools` modes.
+- `tests/support/mod.rs` gains `ChatScript::ToolCall`; test `ClaudeSettings` literals drop
+  `skip_permissions` and gain `turn_timeout` and `env_pass`.
+
 # Intent — grounded, ranked and bounded workflow stages; workflows as markdown; MCP workflows
 
 A workflow could argue about code it had never looked at, merge competing designs without ranking

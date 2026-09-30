@@ -98,8 +98,9 @@ pub fn default_claude_settings(vault_dir: &std::path::Path) -> idea_vault::confi
         add_dirs: Vec::new(),
         allowed_tools: Vec::new(),
         model: None,
-        skip_permissions: true,
         timeout: std::time::Duration::from_secs(5),
+        turn_timeout: std::time::Duration::from_secs(1800),
+        env_pass: Vec::new(),
         effort: "high".to_string(),
     }
 }

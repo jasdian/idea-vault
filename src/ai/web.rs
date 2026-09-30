@@ -1,4 +1,4 @@
-//! Deterministic web tools (ADR-0017): keyless search + page fetch, so the foil can pull live
+//! Keyless web tools (ADR-0017): search + page fetch, so the foil can pull live
 //! external facts into an interrogation on EITHER backend.
 //!
 //! claude-code brings its own `WebSearch`/`WebFetch` tools (the router just allows them,

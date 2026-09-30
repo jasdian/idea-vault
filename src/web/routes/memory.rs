@@ -93,7 +93,7 @@ pub(crate) fn guard_can_store(
 /// the inbound MCP `store_idea` task (`web::mcp_server::tasks`, ADR-0024).
 pub(crate) async fn run_store_work(state: &AppState, slug: &str) -> Result<Option<String>, String> {
     let outcome = memory::extract::extract_and_store(
-        &state.llm,
+        &crate::web::routes::idea_llm(state, slug),
         &state.ai_semaphore,
         &state.config.vault_dir,
         slug,

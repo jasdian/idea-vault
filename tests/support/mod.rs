@@ -29,6 +29,12 @@ pub enum ChatScript {
     /// Stream each token, then close the connection WITHOUT sending `{done:true}` —
     /// exercises the incomplete-stream protocol error.
     EofAfter(Vec<String>),
+    /// Answer a `"stream": false` tool-loop round by asking to call tool `name` with `arguments`
+    /// (ADR-0017/0021). A streaming request gets an empty completed stream.
+    ToolCall {
+        name: String,
+        arguments: serde_json::Value,
+    },
 }
 
 pub struct MockOllama {
@@ -265,13 +271,30 @@ async fn handle(
                 .and_then(|v| v.get("stream").and_then(serde_json::Value::as_bool))
                 .unwrap_or(true);
         if !wants_stream {
+            if let ChatScript::ToolCall { name, arguments } = &script {
+                let call = serde_json::json!({"function": {"name": name, "arguments": arguments}});
+                let payload = serde_json::json!({
+                    "message": {"role": "assistant", "content": "", "tool_calls": [call]},
+                    "done": true,
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                sock.write_all(resp.as_bytes()).await?;
+                return Ok(());
+            }
             let tokens = match &script {
                 ChatScript::Tokens(tokens) => Some(tokens.clone()),
                 ChatScript::TokensAfterDelay { tokens, delay_ms } => {
                     tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
                     Some(tokens.clone())
                 }
-                ChatScript::StallAfter(_) | ChatScript::EofAfter(_) => None,
+                ChatScript::StallAfter(_)
+                | ChatScript::EofAfter(_)
+                | ChatScript::ToolCall { .. } => None,
             };
             if let Some(tokens) = tokens {
                 let payload = serde_json::json!({
@@ -348,6 +371,17 @@ async fn handle(
                     sock.flush().await?;
                 }
                 // Drop the socket without `{done:true}`.
+            }
+            ChatScript::ToolCall { .. } => {
+                sock.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"message": {"content": ""}, "done": true})
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+                sock.flush().await?;
             }
         }
         return Ok(());

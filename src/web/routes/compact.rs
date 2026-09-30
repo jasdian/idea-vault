@@ -43,7 +43,7 @@ pub async fn compact(
         jobs::set_note(&ts.jobs, &tslug, "compacting older turns…");
         // force = true: ignore the toggle/threshold and fold at the forced (zero-tail) targets.
         let r = compact::run_compaction(
-            &ts.llm,
+            &crate::web::routes::idea_llm(&ts, &tslug),
             &ts.ai_semaphore,
             &ts.config.vault_dir,
             &tslug,
