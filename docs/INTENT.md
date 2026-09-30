@@ -1,27 +1,28 @@
-# Intent — CI runs the no-mistakes gate: one job, no wasted runs, pinned actions (ADR-0041, D41)
+# Intent — hardening: a Rust `validate` command, frontmatter round-trip and version, conversation fsync, validate in the gate (ADR-0002, ADR-0041)
 
-Pull-request CI ran four cargo commands in two jobs (gate steps 3 to 6), so a green check said
-nothing about intent, the invariant catalog, `validate` on the golden vault or honesty, and CI had
-passed pull requests that fail `scripts/gate.sh`. A push to main re-ran the same four commands,
-and every CI completion started a Claude review run that its job `if` then skipped. The two jobs
-each checked out, installed and compiled the crate, and `ci.yml` pinned no action. This change
-makes CI the gate (ADR-0041, D41): one job that runs `cargo fetch --locked` and then
-`bash scripts/gate.sh` unchanged, on the PR merge ref with a local `main` ref for step 1; the
-review workflow ignores push-to-main runs; the hotfix diagnose job restores the same cache key;
-every action in `ci.yml` is pinned to a commit; and docs/10, docs/14 and CLAUDE.md describe what
-CI runs. The gate script itself is not edited.
+The owner's hardening plan (build plan 20260930-141215, a small ticket set, not an architecture
+idea). Markdown is the source of truth (ADR-0002), so the files must be trustworthy on their own:
+nothing checks a vault's frontmatter, MEMORY.md coverage or duplicate memories; a rewrite of
+`idea.md` drops any frontmatter key the app does not know; `idea.md` carries no format version;
+and `conversation.md` is appended without an fsync. The chat route's swallowed Draft→InDiscussion
+write (the plan's T4) is already fixed on main (BE-007). Turn ordering is deliberately not
+validated: consecutive user turns are legitimate (ADR-0032).
 
 ## Acceptance criteria
 
-- A pull request's CI is one job whose log carries every gate step `1/7` … `7/7` and
-  `validate: N idea(s), 0 finding(s)` with N > 0.
-- A pull request that leaves `docs/INTENT.md` unchanged, or adds an unlisted fixture change, goes
-  red in CI (checked on a throwaway branch, then deleted).
-- A push to main runs CI once and starts no Claude review run.
-- A stale `Cargo.lock` fails CI.
-- The hotfix `diagnose` job's restore-only cache hits the key CI saves (`shared-key`).
-- `actionlint` (with shellcheck) is clean on `.github/workflows/`, and `bash scripts/gate.sh` is
-  green locally.
+- `idea-vault validate` (vault from `IDEA_VAULT_VAULT_DIR`) reports every unparseable `idea.md` or
+  `memory/*.md` and every slug that does not match its folder or file name, every memory fact
+  missing from `MEMORY.md` and every `MEMORY.md` line pointing at a missing fact, and every pair of
+  facts in one idea sharing a title or a body (case and whitespace folded). One line per finding,
+  exit 1 on any finding, exit 0 when clean; read-only. `cargo test validate` covers each check.
+- Rewriting an `idea.md` keeps every frontmatter key the app does not know: known keys first in
+  struct order, then unknown keys sorted (`cargo test frontmatter_roundtrip`).
+- A newly written `idea.md` carries a frontmatter format version; an `idea.md` without one still
+  loads (`cargo test frontmatter_version`).
+- Every append to an existing `conversation.md` is fsynced before it returns (`cargo test
+  chat_fsync`).
+- `scripts/gate.sh` runs `validate` on a temporary copy of the golden vault fixture and fails on any
+  finding, and `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
