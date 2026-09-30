@@ -157,19 +157,45 @@
       // owner is there to keep pushing the exchange, not to re-read the opening line every time.
       // Gated on #idea-state's live text (kept fresh by every transcript response's OOB badge,
       // see state_badge_oob) rather than a static attribute, so the very first chat turn (which
-      // flips Draft -> InDiscussion mid-page, no reload) is caught too. Runs on every #transcript
-      // swap, including poll ticks, so it keeps pinning to bottom as the reply streams in — but
-      // Draft/Stored/Reopened-before-first-turn are left at their natural scroll position.
+      // flips Draft -> InDiscussion mid-page, no reload) is caught too. Draft/Stored/
+      // Reopened-before-first-turn are left at their natural scroll position.
+      // Poll ticks (ADR-0010 rebuilds all of #transcript every 1.5s) must not steal the scroll:
+      // a tick pins to the bottom only if the owner was already there, otherwise it restores
+      // their position, so they can scroll up and read while a job runs. Owner-initiated swaps
+      // (send, skill, swarm) still pin to the bottom.
       (function () {
-        function scrollDiscussionToBottom() {
+        var NEAR_BOTTOM_PX = 120;
+        var wasNearBottom = true;
+        var savedY = 0;
+        function isInDiscussion() {
           var stateBadge = document.getElementById("idea-state");
-          if (!stateBadge || stateBadge.textContent.trim() !== "in_discussion") return;
+          return !!stateBadge && stateBadge.textContent.trim() === "in_discussion";
+        }
+        function scrollToBottom() {
           window.scrollTo(0, document.body.scrollHeight);
         }
-        document.addEventListener("DOMContentLoaded", scrollDiscussionToBottom);
-        document.addEventListener("htmx:afterSwap", function (e) {
+        function isPollTick(e) {
+          var elt = e.detail && e.detail.elt;
+          return !!elt && !!elt.classList &&
+            (elt.classList.contains("foil-pending") || elt.classList.contains("queue-poll"));
+        }
+        function isTranscriptSwap(e) {
           var target = e.detail && e.detail.target;
-          if (target && target.id === "transcript") scrollDiscussionToBottom();
+          return !!target && target.id === "transcript";
+        }
+        document.addEventListener("DOMContentLoaded", function () {
+          if (isInDiscussion()) scrollToBottom();
+        });
+        document.addEventListener("htmx:beforeSwap", function (e) {
+          if (!isTranscriptSwap(e)) return;
+          savedY = window.scrollY;
+          wasNearBottom =
+            document.documentElement.scrollHeight - (window.scrollY + window.innerHeight) < NEAR_BOTTOM_PX;
+        });
+        document.addEventListener("htmx:afterSwap", function (e) {
+          if (!isTranscriptSwap(e) || !isInDiscussion()) return;
+          if (!isPollTick(e) || wasNearBottom) scrollToBottom();
+          else window.scrollTo(0, savedY);
         });
       })();
     </script>
