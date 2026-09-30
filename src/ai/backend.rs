@@ -24,6 +24,7 @@ use crate::ai::budget::ContextBudget;
 use crate::ai::claude_code::{ClaudeCodeClient, ClaudeCodeConfig};
 use crate::ai::mcp::{McpClient, McpSession, McpTool};
 use crate::ai::ollama::{ChatMessage, ChatOptions, OllamaClient, TokenStream};
+use crate::ai::untrusted::{fence_untrusted, FENCE_NOTE};
 use crate::ai::{AiError, AiHealth};
 use crate::mcp::{McpRegistry, McpServerConfig};
 use crate::sources::ResolvedSource;
@@ -159,6 +160,10 @@ pub struct LlmBackend {
     /// [`with_turn_sources`](Self::with_turn_sources), so `ai` never reads app state (D4).
     /// `Arc` keeps the clone cheap; the shared instance is immutable-by-construction.
     turn_sources: Arc<Vec<ResolvedSource>>,
+    /// This turn's idea folder (ADR-0039): the claude-code foil's cwd, which `--restricted`
+    /// makes the edge of what it may read. `None` on the shared instance, whose turns fall back
+    /// to the configured base cwd.
+    turn_dir: Option<Arc<std::path::PathBuf>>,
     /// The agent role this scoped clone calls as ([`for_role`](Self::for_role)); `None` on the
     /// shared instance, so role-less calls (free chat, compaction, extraction) read the global
     /// settings.
@@ -185,6 +190,7 @@ impl LlmBackend {
             mcp: None,
             mcp_tools_cache: Arc::new(RwLock::new(HashMap::new())),
             turn_sources: Arc::new(Vec::new()),
+            turn_dir: None,
             call_role: None,
             tool_budget: (MAX_TOOL_ROUNDS, MAX_CALLS_PER_ROUND),
         }
@@ -193,11 +199,20 @@ impl LlmBackend {
     /// A per-turn scoped view of the backend: same settings/caches/registries (shared `Arc`s),
     /// plus this idea's resolved reference sources (ADR-0021). Built once per background job by
     /// the web layer; attaching/detaching a source in the UI is live on the very next turn
-    /// because nothing persists past the clone. Turns with no idea in scope (probe, compaction,
-    /// store-time extraction) run on the shared instance and stay source-free by construction.
+    /// because nothing persists past the clone. The probe runs on the shared instance, and
+    /// compaction and store-time extraction run on a [`with_turn_dir`](Self::with_turn_dir) view
+    /// only, so they stay source-free by construction.
     pub fn with_turn_sources(&self, sources: Vec<ResolvedSource>) -> Self {
         let mut scoped = self.clone();
         scoped.turn_sources = Arc::new(sources);
+        scoped
+    }
+
+    /// A per-turn view whose claude-code foil runs in `dir`, the idea's own folder (ADR-0039).
+    /// Settings, caches, registries and sources are shared with `self`.
+    pub fn with_turn_dir(&self, dir: std::path::PathBuf) -> Self {
+        let mut scoped = self.clone();
+        scoped.turn_dir = Some(Arc::new(dir));
         scoped
     }
 
@@ -275,11 +290,12 @@ impl LlmBackend {
             cwd: std::path::PathBuf::from("."),
             add_dirs: Vec::new(),
             allowed_tools: Vec::new(),
-            disallowed_tools: Vec::new(),
+            web_access: false,
             model: None,
             system_prompt: None,
-            skip_permissions: true,
             token_timeout: std::time::Duration::from_secs(300),
+            turn_timeout: crate::ai::claude_code::DEFAULT_TURN_TIMEOUT,
+            env_pass: Vec::new(),
             mcp_config_json: None,
         };
         Self::new(
@@ -345,12 +361,11 @@ impl LlmBackend {
     }
 
     /// Build a claude-code client for the current settings: apply the model override, append the
-    /// effort hint to the system prompt (the CLI has no effort flag), apply the web-access
-    /// toggle (ADR-0017) — allow the CLI's own WebSearch/WebFetch when on, explicitly disallow
-    /// them when off (an allowlist omission would not survive `--dangerously-skip-permissions`)
-    /// — and hand the enabled MCP servers to the CLI as an `--mcp-config` JSON blob plus a
-    /// `mcp__<name>` tool-prefix allow per server (the CLI expands a bare prefix to every tool
-    /// the server offers).
+    /// effort hint to the system prompt (the CLI has no effort flag), carry the web-access toggle
+    /// (ADR-0017; the client adds or denies WebSearch/WebFetch), run in this turn's idea folder
+    /// (ADR-0039), and hand the enabled MCP servers to the CLI as an `--mcp-config` JSON blob plus
+    /// a `mcp__<name>` tool-prefix approval per server (the CLI expands a bare prefix to every
+    /// tool the server offers).
     fn claude(&self, s: &LlmSettings) -> ClaudeCodeClient {
         ClaudeCodeClient::new(self.claude_config_from(s))
     }
@@ -366,6 +381,10 @@ impl LlmBackend {
     /// composition (model/effort/web/MCP) is assertable in unit tests without spawning a CLI.
     fn claude_config_from(&self, s: &LlmSettings) -> ClaudeCodeConfig {
         let mut cfg = self.claude_base.clone();
+        if let Some(dir) = &self.turn_dir {
+            cfg.cwd = dir.as_ref().clone();
+        }
+        cfg.web_access = s.web_access;
         if !s.claude_model.trim().is_empty() {
             cfg.model = Some(s.claude_model.trim().to_string());
         }
@@ -394,19 +413,12 @@ impl LlmBackend {
             ));
         }
         if s.web_access {
-            for tool in ["WebSearch", "WebFetch"] {
-                if !cfg.allowed_tools.iter().any(|t| t == tool) {
-                    cfg.allowed_tools.push(tool.to_string());
-                }
-            }
             hints.push(
                 "Web access is enabled: use WebSearch/WebFetch when live external facts \
                  (market numbers, prior art, competitors, current events) would sharpen the \
                  interrogation, and cite the URLs you used."
                     .to_string(),
             );
-        } else {
-            cfg.disallowed_tools = vec!["WebSearch".to_string(), "WebFetch".to_string()];
         }
         // The Ollama path's equivalent is the `with_sources_note` prompt prefix — never both.
         if !self.turn_sources.is_empty() {
@@ -630,14 +642,16 @@ impl LlmBackend {
                 // at the fallback budget; the next turn assembles at the real window. Accepted —
                 // one conservative turn, never an over-budget one.
                 self.refresh_ollama_ctx().await;
-                // Sources note BEFORE ollama_options, so the num_ctx floor counts it.
+                // Both notes BEFORE ollama_options, so the num_ctx floor counts them.
                 let messages = self.with_sources_note(messages);
-                let options = self.ollama_options(&s, &messages);
                 let mcp_servers = self.enabled_mcp_servers();
                 if s.web_access || !mcp_servers.is_empty() || !self.turn_sources.is_empty() {
+                    let messages = with_fence_note(messages);
+                    let options = self.ollama_options(&s, &messages);
                     self.ollama_chat_with_tools(options, messages, s.web_access, &mcp_servers)
                         .await
                 } else {
+                    let options = self.ollama_options(&s, &messages);
                     self.ollama.chat_with(options, messages).await
                 }
             }
@@ -822,10 +836,12 @@ impl LlmBackend {
                     }
                     None => crate::ai::web::execute_tool(name, &args).await,
                 };
+                // Tool output is untrusted data (ADR-0039): fenced so an injected "ignore the
+                // above" reads as quoted text, never as the owner or the system speaking.
                 convo.push(serde_json::json!({
                     "role": "tool",
                     "tool_name": name,
-                    "content": result,
+                    "content": fence_untrusted(&format!("tool {name}"), &result),
                 }));
             }
         }
@@ -853,6 +869,17 @@ impl LlmBackend {
             LlmBackendKind::ClaudeCode => self.claude(&s).chat_stream(messages).await,
         }
     }
+}
+
+/// Prefix a tool-loop turn's first message with the fence note ([`FENCE_NOTE`], ADR-0039), so the
+/// model knows the fenced tool results that follow are data. The tool loop has no separate system
+/// prompt, so it rides where the sources note does. Only tool-loop turns carry it: a plain call
+/// has no tool output to fence.
+fn with_fence_note(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    if let Some(first) = messages.first_mut() {
+        first.content = format!("{FENCE_NOTE}\n\n{}", first.content);
+    }
+    messages
 }
 
 /// Merge the web tool definitions (already Ollama-shaped, or `None` when web access is off) and
@@ -1197,6 +1224,28 @@ mod tests {
         s.temperature = 1.3;
         scoped.set_settings(s);
         assert_eq!(shared.settings().temperature, 1.3);
+    }
+
+    #[test]
+    fn claude_foil_runs_in_the_turn_dir_with_the_live_web_toggle() {
+        let b = test_backend();
+        let mut s = b.settings();
+        s.backend = LlmBackendKind::ClaudeCode;
+        s.web_access = true;
+        b.set_settings(s);
+
+        // The shared instance keeps the configured base cwd; an idea turn runs in its folder.
+        assert_eq!(b.claude_config().cwd, std::path::PathBuf::from("."));
+        let idea = b.with_turn_dir(std::path::PathBuf::from("/vault/my-idea"));
+        let cfg = idea.claude_config();
+        assert_eq!(cfg.cwd, std::path::PathBuf::from("/vault/my-idea"));
+        assert!(cfg.web_access);
+        assert!(b.turn_dir.is_none(), "the shared instance is untouched");
+
+        let mut s = b.settings();
+        s.web_access = false;
+        b.set_settings(s);
+        assert!(!idea.claude_config().web_access, "the toggle is live");
     }
 
     #[test]

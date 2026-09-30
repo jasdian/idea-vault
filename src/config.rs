@@ -108,8 +108,13 @@ pub struct ClaudeSettings {
     pub add_dirs: Vec<PathBuf>,
     pub allowed_tools: Vec<String>,
     pub model: Option<String>,
-    pub skip_permissions: bool,
+    /// Longest silence between two output lines (`IDEA_VAULT_CLAUDE_TIMEOUT_SECS`, D20).
     pub timeout: std::time::Duration,
+    /// Wall-clock ceiling on one foil turn (`IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS`, ADR-0039).
+    pub turn_timeout: std::time::Duration,
+    /// Extra environment keys the claude child may inherit (`IDEA_VAULT_CLAUDE_ENV_PASS`,
+    /// comma-separated, ADR-0039). `IDEA_VAULT_*` keys are withheld even when listed.
+    pub env_pass: Vec<String>,
     /// Reasoning effort (`low`/`medium`/`high`) — initial value, retunable on the Settings page.
     pub effort: String,
 }
@@ -124,6 +129,8 @@ const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_CLAUDE_BIN: &str = "claude";
 // Agentic turns (process spawn + tool use) run longer than a hot local model.
 const DEFAULT_CLAUDE_TIMEOUT_SECS: u64 = 300;
+/// Owned by `ai::claude_code` (config depends on ai, never the reverse, D4).
+pub use crate::ai::claude_code::DEFAULT_TURN_TIMEOUT as DEFAULT_CLAUDE_TURN_TIMEOUT;
 const DEFAULT_OLLAMA_TEMPERATURE: f32 = 0.7;
 const DEFAULT_CLAUDE_EFFORT: &str = "high";
 const DEFAULT_AUTO_COMPACT: bool = true;
@@ -215,6 +222,21 @@ impl Config {
             Some(raw) => raw.parse::<u64>().unwrap_or(DEFAULT_CLAUDE_TIMEOUT_SECS),
         };
 
+        let claude_turn_timeout = lookup("IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS")
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(DEFAULT_CLAUDE_TURN_TIMEOUT);
+
+        // The foil can no longer skip permissions (ADR-0039); a leftover setting is reported,
+        // not silently honoured or silently dropped.
+        if lookup("IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS").is_some() {
+            tracing::warn!(
+                "IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS is ignored: the claude-code foil always runs \
+                 --restricted with a fixed tool allowlist (ADR-0039)"
+            );
+        }
+
         let ollama_temperature = lookup("IDEA_VAULT_OLLAMA_TEMPERATURE")
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|t| (0.0..=2.0).contains(t))
@@ -294,12 +316,9 @@ impl Config {
             add_dirs: split_paths(lookup("IDEA_VAULT_CLAUDE_ADD_DIRS")),
             allowed_tools: split_csv(lookup("IDEA_VAULT_CLAUDE_ALLOWED_TOOLS")),
             model: lookup("IDEA_VAULT_CLAUDE_MODEL").filter(|s| !s.trim().is_empty()),
-            // Unattended server: default to skipping interactive permission prompts (the owner's
-            // "full agentic" choice; see docs/adr/0009). Set to `false` for a locked-down run.
-            skip_permissions: lookup("IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS")
-                .map(|v| v != "false" && v != "0")
-                .unwrap_or(true),
             timeout: std::time::Duration::from_secs(claude_timeout_secs),
+            turn_timeout: claude_turn_timeout,
+            env_pass: split_csv(lookup("IDEA_VAULT_CLAUDE_ENV_PASS")),
             effort: claude_effort,
         };
 
@@ -405,8 +424,12 @@ mod tests {
             "claude cwd defaults to the vault, not the app"
         );
         assert!(cfg.claude.add_dirs.is_empty());
-        assert!(cfg.claude.skip_permissions);
         assert_eq!(cfg.claude.timeout, std::time::Duration::from_secs(300));
+        assert_eq!(
+            cfg.claude.turn_timeout,
+            std::time::Duration::from_secs(1800)
+        );
+        assert!(cfg.claude.env_pass.is_empty());
         // Auto-compact defaults on, threshold 0.80.
         assert!(cfg.auto_compact);
         assert_eq!(cfg.compact_threshold, 0.80);
@@ -589,7 +612,8 @@ mod tests {
         );
         map.insert("IDEA_VAULT_CLAUDE_ALLOWED_TOOLS", "Read, Grep , Glob");
         map.insert("IDEA_VAULT_CLAUDE_MODEL", "opus");
-        map.insert("IDEA_VAULT_CLAUDE_SKIP_PERMISSIONS", "false");
+        map.insert("IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS", "600");
+        map.insert("IDEA_VAULT_CLAUDE_ENV_PASS", "SSL_CERT_FILE, GIT_SSH");
         let cfg = Config::from_lookup(lookup_from(map));
 
         assert_eq!(cfg.llm_backend, LlmBackendKind::ClaudeCode);
@@ -603,7 +627,16 @@ mod tests {
         );
         assert_eq!(cfg.claude.allowed_tools, vec!["Read", "Grep", "Glob"]);
         assert_eq!(cfg.claude.model.as_deref(), Some("opus"));
-        assert!(!cfg.claude.skip_permissions);
+        assert_eq!(cfg.claude.turn_timeout, std::time::Duration::from_secs(600));
+        assert_eq!(cfg.claude.env_pass, vec!["SSL_CERT_FILE", "GIT_SSH"]);
+        // Zero or garbage keeps the default rather than an instant or unbounded deadline.
+        for bad in ["0", "soon"] {
+            let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+                "IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS",
+                bad,
+            )])));
+            assert_eq!(cfg.claude.turn_timeout, DEFAULT_CLAUDE_TURN_TIMEOUT);
+        }
 
         // Alias + unknown fallback.
         let alias = Config::from_lookup(lookup_from(HashMap::from([(

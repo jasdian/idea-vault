@@ -186,8 +186,9 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         add_dirs,
         allowed_tools,
         model,
-        skip_permissions,
         timeout,
+        turn_timeout,
+        env_pass,
         effort,
     } = config.claude.clone();
     let system_prompt = claude_system_prompt(&add_dirs);
@@ -196,12 +197,13 @@ fn build_llm(config: &Config) -> anyhow::Result<LlmBackend> {
         cwd,
         add_dirs,
         allowed_tools,
-        // The live web-access toggle decides the deny-list per call (ai::backend::claude).
-        disallowed_tools: Vec::new(),
+        // The live web-access toggle is applied per call (ai::backend::claude_config_from).
+        web_access: false,
         model: model.clone(),
         system_prompt,
-        skip_permissions,
         token_timeout: timeout,
+        turn_timeout,
+        env_pass,
         // Set per call by `ai::backend::claude` from the live MCP registry, never at boot.
         mcp_config_json: None,
     };

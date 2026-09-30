@@ -130,6 +130,26 @@ const SEEDS: &[Seed] = &[
     ("intent-archive", |r| {
         write(r, "docs/INTENT.md", &format!("{INTENT}\n{INTENT}"))
     }),
+    ("tool-fence", |r| {
+        write(
+            r,
+            "src/ai/tool_loop.rs",
+            concat!(
+                "fn f() {\n    json!({\"role\": \"to",
+                "ol\", \"content\": result});\n}\n"
+            ),
+        )
+    }),
+    ("no-skip-permissions", |r| {
+        write(
+            r,
+            "src/ai/foil.rs",
+            concat!(
+                "fn f() { cmd.arg(\"--dangerously-skip",
+                "-permissions\"); }\n"
+            ),
+        )
+    }),
 ];
 
 #[test]

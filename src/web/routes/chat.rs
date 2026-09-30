@@ -120,7 +120,7 @@ pub(crate) fn spawn_chat_turn(
         // no-op compaction (threshold not met) just flips straight to "thinking".
         jobs::set_note(&task_state.jobs, &task_slug, "compacting older turns…");
         if let Err(e) = memory::compact::maybe_run_compaction(
-            &task_state.llm,
+            &crate::web::routes::idea_llm(&task_state, &task_slug),
             &task_state.ai_semaphore,
             &task_state.config.vault_dir,
             &task_slug,

@@ -25,16 +25,24 @@ use crate::web::state::AppState;
 /// `SourceRegistry::resolve_attached` applies to a stale name. Worst case the foil answers
 /// without its reference material, never not at all.
 pub(crate) fn scoped_llm(state: &AppState, slug: &str) -> crate::ai::LlmBackend {
+    let llm = idea_llm(state, slug);
     match crate::vault::store::read_idea(&state.config.vault_dir, slug) {
-        Ok(idea) if !idea.frontmatter.sources.is_empty() => state
-            .llm
-            .with_turn_sources(state.sources.resolve_attached(&idea.frontmatter.sources)),
-        Ok(_) => state.llm.clone(),
+        Ok(idea) if !idea.frontmatter.sources.is_empty() => {
+            llm.with_turn_sources(state.sources.resolve_attached(&idea.frontmatter.sources))
+        }
+        Ok(_) => llm,
         Err(e) => {
             tracing::warn!(slug, error = %e, "sources lookup failed; running the turn unscoped");
-            state.llm.clone()
+            llm
         }
     }
+}
+
+/// The shared backend with the claude-code foil's cwd set to the idea's own folder (ADR-0039),
+/// without attaching sources: for the idea turns that deliberately run source-free (store-time
+/// extraction, compaction), so `--restricted` still confines the foil to this one idea.
+pub(crate) fn idea_llm(state: &AppState, slug: &str) -> crate::ai::LlmBackend {
+    state.llm.with_turn_dir(state.config.vault_dir.join(slug))
 }
 
 /// The related-ideas block for `slug` in at most `allowance` bytes (`memory::related`), or `""`.
@@ -126,8 +134,9 @@ mod tests {
                 add_dirs: Vec::new(),
                 allowed_tools: Vec::new(),
                 model: None,
-                skip_permissions: true,
                 timeout: std::time::Duration::from_secs(5),
+                turn_timeout: std::time::Duration::from_secs(1800),
+                env_pass: Vec::new(),
                 effort: "high".to_string(),
             },
             auto_compact: true,

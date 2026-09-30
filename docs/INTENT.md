@@ -53,3 +53,11 @@ expectation changes are red.
 - check-invariants catalog: the nine existing rules gain ids (`ollama-url` … `d4-web-app`) and the
   script collects all findings; no rule is removed or downgraded.
 - IGNORE_FLOOR: a new ratchet floor at 0, not a rise.
+- tests/fixtures/fake-claude.sh: emits an init event listing its `--tools` in every mode and gains
+  the `dumpenv`, `leakytools`, `noinit` and `busytools` modes (ADR-0039 init check and env scrub).
+- tests/support/mod.rs: gains `ChatScript::ToolCall`; test `ClaudeSettings` literals drop
+  `skip_permissions` and gain `turn_timeout` and `env_pass` (ADR-0039).
+- check-invariants catalog: two new error rules, `tool-fence` (every `"role": "tool"` message in
+  src/ai goes through `fence_untrusted`) and `no-skip-permissions` (no
+  `--dangerously-skip-permissions` in src/), each with a seed in `tests/gate_invariants.rs`
+  (ADR-0039); nothing removed or downgraded.

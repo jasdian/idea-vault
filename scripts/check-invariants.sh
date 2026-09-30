@@ -44,7 +44,9 @@ ignore-ratchet|error|TST-6|#[ignore] count in src/ and tests/ at or under IGNORE
 doc-ranges|error|D-catalog, ADR index|CLAUDE.md D1–Dnn and ADRs 0001–NNNN name the highest D and ADR
 doc-range-gaps|info|D-catalog, ADR index|no unused D or ADR number below the highest
 checklist-mirror|error|ADR-0041|every [dev] phrase of the docs/14 checklist is mirrored verbatim in .claude/
-intent-archive|info|ADR-0041|docs/INTENT.md holds one intent block'
+intent-archive|info|ADR-0041|docs/INTENT.md holds one intent block
+tool-fence|error|ADR-0039|every "role": "tool" message in src/ai goes through fence_untrusted
+no-skip-permissions|error|ADR-0039|no --dangerously-skip-permissions in src/'
 
 usage() {
     printf 'check-invariants.sh: %s\n' "$1" >&2
@@ -306,6 +308,25 @@ if [ -f docs/INTENT.md ]; then
         found INFO docs/INTENT.md "$blocks intent blocks: move all but the top one to docs/intent-archive.md"
 fi
 report intent-archive
+
+# tool-fence (ADR-0039): a tool result is untrusted data, so every "role": "tool" message built in
+# src/ai carries fence_untrusted( within the next four lines; a raw push lets fetched text pass
+# for instructions.
+while IFS= read -r h; do
+    [ -n "$h" ] || continue
+    file=${h%%:*}
+    rest=${h#*:}
+    n=${rest%%:*}
+    sed -n "${n},$((n + 4))p" "$file" | grep -q 'fence_untrusted(' ||
+        found ERROR "$file:$n" "tool message without fence_untrusted( in the next four lines"
+done < <(rs_grep '"role"[[:space:]]*:[[:space:]]*"tool"' src/ai)
+report tool-fence
+
+# no-skip-permissions (ADR-0039): the foil runs --restricted with a tool allowlist; no code path
+# may hand it the permission bypass. Comments may name the flag to say it is never passed.
+found_hits ERROR "the claude foil never skips permissions" \
+    < <(rs_grep 'dangerously-skip-permissions' src)
+report no-skip-permissions
 
 printf 'summary: %d error(s), %d warning(s), %d info\n' "$errors" "$warns" "$infos"
 [ "$errors" -eq 0 ]
