@@ -1,6 +1,10 @@
 //! Web tests for the make-skill button (docs/adr/0042, D42): R51 drafts a skill as a background
 //! job that ends in a `skill_draft` artifact and a notice, never a turn; R52 saves the reviewed
 //! draft into the skill book. Mock Ollama only.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 

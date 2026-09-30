@@ -1,6 +1,10 @@
 //! Make-skill distil against the mock Ollama (docs/adr/0042, D42): one contract-held call (two on
 //! a violation) turns a discussion into exactly one `skill_draft` artifact the skill loader
 //! accepts, with every evidence quote grounded or marked, and never a transcript turn.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] fns; HTC-6 binds shipping code"
+)]
 
 mod support;
 
