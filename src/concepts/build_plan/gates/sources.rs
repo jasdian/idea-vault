@@ -166,7 +166,7 @@ fn judge(item: &mut Item, kind: Kind, ctx: &Ctx, report: &mut GateReport) -> Ver
         return verdict;
     }
     if kind == Kind::Claim {
-        if let Some(verdict) = g6(item, ctx) {
+        if let Some(verdict) = g6(item, ctx).filter(|_| !owner_answer(item)) {
             return verdict;
         }
         if let Some(verdict) = g12(item) {
@@ -174,6 +174,24 @@ fn judge(item: &mut Item, kind: Kind, ctx: &Ctx, report: &mut GateReport) -> Ver
         }
     }
     Verdict::Keep
+}
+
+/// An item that is the owner's own answer on the plan workbench (docs/adr/0032): it carries a
+/// code-owned `answers`/`unblocks` key (dropped from untrusted model output), G1 grounded its quote
+/// in an owner turn, and its text is that quote (whole, or clipped with `…`). A figure in it is in
+/// the discussion by definition, so G6 — which exists to catch model-invented numbers — never
+/// moves it (ADR-0030 §G6). A model paraphrase carrying the same keys is not the owner's words and
+/// stays gated.
+fn owner_answer(item: &Item) -> bool {
+    use crate::domain::evidence::normalize_for_match;
+    let keyed = item.field("answers").is_some() || item.field("unblocks").is_some();
+    let (true, Some(Provenance::Owner), Some(quote)) =
+        (keyed, item.provenance, item.field("quote"))
+    else {
+        return false;
+    };
+    let own = normalize_for_match(item.text.strip_suffix('…').unwrap_or(&item.text));
+    !own.is_empty() && normalize_for_match(quote).starts_with(&own)
 }
 
 fn mark_task(task: &mut Item, ctx: &Ctx) {
@@ -1050,6 +1068,71 @@ mod tests {
         let mut plan = settled("In 2026 step 3 is done on port 3000 under ADR 0030.");
         run(&mut plan, &SourceProbe::default());
         assert_eq!(plan.settled.len(), 1, "{:?}", plan.verify);
+    }
+
+    const ANSWER_TURN: &str = "## user\nThe vault has 56 facts.\n\n\
+## user\nRe Q6 (plan-1): Measured on claude 2.1.285: results live in memory with a 24h TTL.\n";
+    const ANSWER: &str = "Measured on claude 2.1.285: results live in memory with a 24h TTL.";
+
+    fn run_on(plan: &mut BuildPlan, conversation: &str) {
+        let evidence = Evidence::new("", conversation);
+        let probe = SourceProbe::default();
+        let inputs = GateInputs {
+            evidence: &evidence,
+            open_artifact: None,
+            audit: None,
+            probe: &probe,
+            answered: &[],
+        };
+        apply(plan, &inputs, &mut GateReport::default());
+    }
+
+    fn owner_answer(text: &str, key: &str) -> BuildPlan {
+        let mut plan = settled(text);
+        let item = &mut plan.settled[0];
+        item.fields.insert("quote".into(), ANSWER.into());
+        item.fields.insert(key.into(), "Q6".into());
+        item.provenance = Some(Provenance::Owner);
+        plan
+    }
+
+    #[test]
+    fn g6_owner_answer_with_figure_stays_settled() {
+        for key in ["answers", "unblocks"] {
+            let mut plan = owner_answer(ANSWER, key);
+            run_on(&mut plan, ANSWER_TURN);
+            assert!(plan.verify.is_empty(), "{key}: {:?}", plan.verify);
+            assert_eq!(plan.settled.len(), 1);
+        }
+        let clipped = format!("{}…", &ANSWER[..40]);
+        let mut plan = owner_answer(&clipped, "answers");
+        run_on(&mut plan, ANSWER_TURN);
+        assert!(plan.verify.is_empty(), "{:?}", plan.verify);
+    }
+
+    #[test]
+    fn g6_model_item_with_same_figure_still_moves() {
+        let mut foil = owner_answer(ANSWER, "answers");
+        foil.settled[0].provenance = Some(Provenance::Foil);
+        run_on(&mut foil, ANSWER_TURN);
+        assert_eq!(foil.verify.len(), 1, "a foil-grounded item is not exempt");
+
+        let mut plain = owner_answer(ANSWER, "answers");
+        plain.settled[0].fields.remove("answers");
+        run_on(&mut plain, ANSWER_TURN);
+        assert_eq!(
+            plain.verify.len(),
+            1,
+            "an owner quote alone is not an answer"
+        );
+
+        let mut paraphrase = owner_answer("The cache holds results for 48 hours.", "answers");
+        run_on(&mut paraphrase, ANSWER_TURN);
+        assert!(
+            markers(&paraphrase.verify[0]).contains("figure not in the discussion: 48"),
+            "a model paraphrase of an answer keeps the figure check: {:?}",
+            paraphrase.verify
+        );
     }
 
     #[test]

@@ -101,10 +101,12 @@ pub fn successors(plans: &[PlanRef], stem: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every owner answer recorded on `stem`'s chain: each Settled item carrying `answers`. When a
-/// question id was answered more than once, the newest answer wins: the chain is walked newest
-/// plan first and, within a plan, last item first, since an answer is appended after any item
-/// an older version carried under the same id. Oldest answer first.
+/// Every owner answer recorded on `stem`'s chain: each item carrying `answers`, wherever the
+/// gates left it (Settled, Verify first, Open or Quarantined, the order the workbench's
+/// `answer_holder` reads), so an answer a gate moved out of Settled is still never re-asked
+/// (docs/adr/0032). When a question id was answered more than once, the newest answer wins: the
+/// chain is walked newest plan first and, within a plan, last item first, since an answer is
+/// appended after any item an older version carried under the same id. Oldest answer first.
 pub fn answered_in_lineage(
     vault_dir: &Path,
     slug: &str,
@@ -120,7 +122,13 @@ pub fn answered_in_lineage(
         else {
             continue;
         };
-        for item in parsed.settled.iter().rev() {
+        let holders = parsed
+            .settled
+            .iter()
+            .chain(&parsed.verify)
+            .chain(&parsed.open)
+            .chain(&parsed.quarantined);
+        for item in holders.rev() {
             let Some(qid) = item.field("answers") else {
                 continue;
             };
@@ -554,5 +562,34 @@ mod tests {
             "the model's own copy is re-labelled"
         );
         assert_eq!(copied.settled[0].field("answers"), Some("Q6"));
+    }
+    #[test]
+    fn answered_in_lineage_reads_answers_left_in_verify() {
+        use crate::concepts::build_plan::workbench::tests::{
+            demote_to_verify, seeded, submit, Q1_ANSWER, SLUG,
+        };
+        let dir = seeded();
+        let v2 = submit(
+            dir.path(),
+            super::super::workbench::tests::BASE,
+            &[("Q1", Q1_ANSWER)],
+            1,
+        )
+        .unwrap();
+        let sid = v2
+            .plan
+            .settled
+            .iter()
+            .find(|s| s.field("answers") == Some("Q1"))
+            .unwrap()
+            .id
+            .clone();
+        demote_to_verify(dir.path(), &v2.stem, &sid, "recount: no count command");
+        let answers = answered_in_lineage(dir.path(), SLUG, &v2.stem).unwrap();
+        assert_eq!(
+            answers.iter().map(|a| a.qid.as_str()).collect::<Vec<_>>(),
+            ["Q1"]
+        );
+        assert_eq!(answers[0].answer, Q1_ANSWER);
     }
 }

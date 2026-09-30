@@ -308,7 +308,7 @@ flowchart TD
     H -- yes --> V{each id an open Q or an<br/>answerable T, 3+ own words,<br/>2000 bytes max, not the question?}
     V -- no --> ERR[422 with per-field errors,<br/>nothing written]
     V -- yes --> T[append one owner turn per answer<br/>Re Q6 - stem: words]
-    T --> P[parse_artifact B, reset_derived,<br/>apply_answers]
+    T --> P[parse_artifact B, reset_derived,<br/>restore_answers, apply_answers]
     P --> G[gates::run with audit None<br/>against fresh evidence]
     G --> W[write new artifact<br/>revises B, version n+1, answered ids]
     W --> PT[append pointer turn<br/>audit not re-run]

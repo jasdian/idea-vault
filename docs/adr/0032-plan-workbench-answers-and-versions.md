@@ -116,6 +116,19 @@ Routes: R46 `POST /idea/{slug}/plan/{stem}/answer`, R47 `GET /idea/{slug}/plan/l
   twice in a submission (`q6` and `Q6`) is refused (`DuplicateId`); re-gating is idempotent (`reset_derived` then
   `gates::run` renders the same bytes).
 
+## Amendment (2026-09-30): answers a gate moved
+
+- **The lineage reads every section.** `answered_in_lineage` collects `answers` items from
+  Settled, Verify first, Open and Quarantined (the order `answer_holder` reads), newest last within
+  a plan, so an answer a gate moved out of Settled is still carried and never re-asked.
+- **A workbench answer restores a demoted answer.** Step 5 becomes `parse_artifact`, then
+  `reset_derived`, then `restore_answers` (every Verify first item with `answers` or `unblocks`
+  goes back to Settled with a fresh `S#`, its markers and `check` cleared), then `apply_answers`,
+  then `gates::run`. `reset_derived` keeps a premise's move reason, so without this an answer G6
+  moved before its owner-answer exemption ([ADR-0030](./0030-gated-build-plan.md)) would stay a
+  premise for good. Re-gating stays idempotent: `restore_answers` runs only on a new answered
+  version, never in `reset_derived`.
+
 ## Alternatives considered
 
 - **Editing the plan in place.** Loses the history and breaks "a run is an artifact".
