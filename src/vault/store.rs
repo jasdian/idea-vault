@@ -861,12 +861,76 @@ pub fn delete_artifact(
     }
 }
 
+/// `<skills_dir>/<name>.md` for an owner skill, the name checked before the join (PFC-3).
+fn owner_skill_path(skills_dir: &Path, name: &str) -> Result<PathBuf, VaultError> {
+    if !crate::domain::slug::is_valid(name) {
+        return Err(VaultError::InvalidSlug(name.to_string()));
+    }
+    Ok(skills_dir.join(format!("{name}.md")))
+}
+
+/// Write the owner skill file `<skills_dir>/<name>.md` (the make-skill Save, docs/adr/0042),
+/// creating the directory on first write. `vault/.skills/` is app configuration, not idea truth
+/// (ADR-0022), but it is still a file the owner keeps, so it is written atomically like truth.
+/// Overwrites: the caller has already decided ADD or UPDATE.
+pub fn write_owner_skill(skills_dir: &Path, name: &str, raw: &str) -> Result<(), VaultError> {
+    let path = owner_skill_path(skills_dir, name)?;
+    fs::create_dir_all(skills_dir)?;
+    write_atomic(&path, raw)
+}
+
+/// The raw text of the owner skill file `<skills_dir>/<name>.md`, or `None` when there is none.
+pub fn read_owner_skill(skills_dir: &Path, name: &str) -> Result<Option<String>, VaultError> {
+    let path = owner_skill_path(skills_dir, name)?;
+    match fs::read_to_string(&path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
     use crate::domain::{ArtifactKind, IdeaFrontmatter, IdeaState, MemoryFactFrontmatter};
+
+    #[test]
+    fn owner_skill_round_trips_and_creates_the_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".skills");
+        assert_eq!(read_owner_skill(&dir, "my-move").unwrap(), None);
+        write_owner_skill(&dir, "my-move", "one").unwrap();
+        write_owner_skill(&dir, "my-move", "two").unwrap();
+        assert_eq!(
+            read_owner_skill(&dir, "my-move").unwrap().as_deref(),
+            Some("two")
+        );
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, ["my-move.md"], "no temp file left behind");
+    }
+
+    #[test]
+    fn owner_skill_refuses_a_bad_name_before_any_path_join() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".skills");
+        for name in ["../x", "Bad Name", ""] {
+            assert!(matches!(
+                write_owner_skill(&dir, name, "x"),
+                Err(VaultError::InvalidSlug(_))
+            ));
+            assert!(matches!(
+                read_owner_skill(&dir, name),
+                Err(VaultError::InvalidSlug(_))
+            ));
+        }
+        assert!(!dir.exists(), "a refused name creates nothing");
+        assert!(!tmp.path().join("x.md").exists());
+    }
 
     #[test]
     fn pointer_turn_is_recognised_by_shape_for_assistant_turns_only() {
