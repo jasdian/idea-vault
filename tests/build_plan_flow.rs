@@ -11,6 +11,7 @@ use idea_vault::ai::sources::SourceProbe;
 use idea_vault::concepts::audit::Label;
 use idea_vault::concepts::build_plan::finish::{finish, Finished, PlanInputs};
 use idea_vault::concepts::build_plan::gates::{AuditView, AuditedFinding};
+use idea_vault::concepts::workflows::{Book, RunCtx};
 use idea_vault::concepts::ConceptError;
 use idea_vault::domain::{ArtifactKind, Idea, IdeaFrontmatter, IdeaState};
 use idea_vault::vault::store;
@@ -798,16 +799,18 @@ async fn audited_plan() -> (
     )
     .await;
     let outcome = idea_vault::concepts::workflows::run_workflow(
-        &mock_backend(&mock),
-        &tokio::sync::Semaphore::new(1),
-        &idea_vault::concepts::skills::SkillRegistry::builtin(),
-        dir.path(),
-        SLUG,
+        &RunCtx {
+            llm: &mock_backend(&mock),
+            sem: &tokio::sync::Semaphore::new(1),
+            book: &Book::builtin(),
+            vault_dir: dir.path(),
+            idea_slug: SLUG,
+            budget: idea_vault::ai::budget::ContextBudget::new(8192),
+            audit_on: true,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "ready-to-build",
-        idea_vault::ai::budget::ContextBudget::new(8192),
-        true,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -877,16 +880,18 @@ async fn both_persist_callers_share_one_gated_path() {
     ));
     let mock = support::spawn_sequence(&["llama3.2"], scripts).await;
     idea_vault::concepts::workflows::run_workflow(
-        &mock_backend(&mock),
-        &tokio::sync::Semaphore::new(1),
-        &idea_vault::concepts::skills::SkillRegistry::builtin(),
-        dir.path(),
-        SLUG,
+        &RunCtx {
+            llm: &mock_backend(&mock),
+            sem: &tokio::sync::Semaphore::new(1),
+            book: &Book::builtin(),
+            vault_dir: dir.path(),
+            idea_slug: SLUG,
+            budget: idea_vault::ai::budget::ContextBudget::new(8192),
+            audit_on: false,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "ready-to-build",
-        idea_vault::ai::budget::ContextBudget::new(8192),
-        false,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap();

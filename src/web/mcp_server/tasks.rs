@@ -816,12 +816,12 @@ fn claim_and_spawn(
         TaskKind::Plan => {
             let key = op_key(kind, args)?;
             if plan_audited(args)? {
-                guard_workflow(&idea, PLAN_WORKFLOW)
+                let book = guard_workflow(state, &idea, PLAN_WORKFLOW)
                     .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
                 if !jobs::try_claim(&state.jobs, slug) {
                     return Err(busy_error(slug));
                 }
-                spawn_workflow_job(state, slug, PLAN_WORKFLOW.to_string());
+                spawn_workflow_job(state, slug, PLAN_WORKFLOW.to_string(), book);
             } else {
                 let skill = guard_skill(state, &idea, PLAN_SKILL)
                     .map_err(|e| McpError::invalid_params(e.to_string(), None))?;

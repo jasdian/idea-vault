@@ -35,6 +35,13 @@ pub const DEFAULT_ANGLES: [&str; 4] = [
     "second-order-effects",
 ];
 
+/// Upper bound on one fan-out's width: the semaphore bounds concurrency (K in flight), this bounds
+/// total queued work N so a single request cannot monopolize the shared AI budget for every other
+/// route (ADR-0006 spirit: bounded latency, not just bounded rate). R7 checks a swarm's angles
+/// against it, the workflow registry every fan-out stage (ADR-0035), and the idea page's angle
+/// picker renders it as its selection cap.
+pub const MAX_ANGLES: usize = 8;
+
 /// What a swarm run produced: the converged synthesis plus the per-angle raw results
 /// (`None` = that agent failed and was skipped by the judge — degrade, don't abort).
 #[derive(Debug)]

@@ -177,7 +177,7 @@ pub async fn reopen_idea(
     let vault_dir = state.config.vault_dir.clone();
     let conversation = store::read_conversation(&vault_dir, &slug)?;
     let health = state.llm.probe().await;
-    let skills = state.skills.snapshot();
+    let book = state.workflows.snapshot();
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     let queued_items = crate::web::jobs::list_queued(&state.queues, &slug);
     // The reopen form swaps `#discussion` (buttons come back with it); the subhead badge sits
@@ -190,7 +190,7 @@ pub async fn reopen_idea(
         &state.llm.settings(),
         &state.llm.model(),
         true,
-        &skills,
+        &book,
         pending,
         queued_items,
         state.llm.context_budget().max_bytes,
@@ -311,12 +311,6 @@ pub struct SwarmForm {
     pub angles: String,
 }
 
-/// Upper bound on one swarm request's fan-out: the semaphore bounds concurrency (K in
-/// flight), this bounds total queued work N so a single request cannot monopolize the shared
-/// AI budget for every other route (ADR-0006 spirit: bounded latency, not just bounded rate).
-/// The idea page's angle picker renders this as its selection cap; this check stays authoritative.
-pub const MAX_ANGLES: usize = 8;
-
 /// R7 — `POST /idea/{slug}/swarm` — fan out subagents, converge, as a background job (D14). The
 /// swarm bounds itself on the shared semaphore and persists only the converged synthesis.
 pub async fn run_swarm(
@@ -357,10 +351,11 @@ pub(crate) fn guard_swarm(
     } else {
         requested
     };
-    if angles.len() > MAX_ANGLES {
+    if angles.len() > crate::concepts::swarm::MAX_ANGLES {
         return Err(WebError::BadRequest(format!(
-            "too many angles: {} (max {MAX_ANGLES})",
-            angles.len()
+            "too many angles: {} (max {})",
+            angles.len(),
+            crate::concepts::swarm::MAX_ANGLES
         )));
     }
     // Reject unknown angles synchronously (they map to skills) — `swarm` checks this too, but that
@@ -416,33 +411,44 @@ pub async fn run_workflow(
     Path((slug, name)): Path<(String, String)>,
 ) -> Result<axum::response::Html<String>, WebError> {
     let idea = store::read_idea(&state.config.vault_dir, &slug)?; // 404 if missing
-    guard_workflow(&idea, &name)?;
+    let book = guard_workflow(&state, &idea, &name)?;
 
     if !jobs::try_claim(&state.jobs, &slug) {
         return respond_with_transcript(&state, &slug);
     }
-    spawn_workflow_job(&state, &slug, name);
+    spawn_workflow_job(&state, &slug, name, book);
     respond_with_transcript(&state, &slug)
 }
 
 /// R22's synchronous guards, shared with the plan workbench's re-plan (R48) and the MCP
 /// `build_plan` tool (HND-10, docs/adr/0032): the idea must be in an active discussion state, and
-/// an unknown name is a synchronous 404, not an error turn (`run_workflow` checks again, but that
-/// runs in the background task).
-pub(crate) fn guard_workflow(idea: &Idea, name: &str) -> Result<(), WebError> {
+/// an unknown name — including one present only as an invalid owner file — is a synchronous 404,
+/// not an error turn (`run_workflow` checks again, but that runs in the background task). Returns
+/// the one skills + workflows snapshot the job must run against (ADR-0035).
+pub(crate) fn guard_workflow(
+    state: &AppState,
+    idea: &Idea,
+    name: &str,
+) -> Result<Arc<concepts::workflows::Book>, WebError> {
     guard_discussion_state(idea.frontmatter.state)?;
-    if concepts::workflows::get_workflow(name).is_none() {
+    let book = state.workflows.snapshot();
+    if book.workflows.get(name).is_none() {
         return Err(WebError::NotFound(format!("workflow: {name}")));
     }
-    Ok(())
+    Ok(book)
 }
 
 /// Spawn R22's detached workflow job on an already-claimed slot — see [`spawn_skill_job`].
-pub(crate) fn spawn_workflow_job(state: &AppState, slug: &str, name: String) {
+pub(crate) fn spawn_workflow_job(
+    state: &AppState,
+    slug: &str,
+    name: String,
+    book: Arc<concepts::workflows::Book>,
+) {
     let ts = state.clone();
     let tslug = slug.to_string();
     let abort = jobs::spawn_job(&state.jobs, slug, async move {
-        match run_workflow_work(&ts, &tslug, &name).await {
+        match run_workflow_work(&ts, &tslug, &name, &book).await {
             Ok(()) => jobs::mark_done(&ts.jobs, &tslug),
             Err(m) => jobs::mark_failed(&ts.jobs, &tslug, m),
         }
@@ -450,25 +456,29 @@ pub(crate) fn spawn_workflow_job(state: &AppState, slug: &str, name: String) {
     jobs::set_abort(&state.jobs, slug, abort);
 }
 
-async fn run_workflow_work(state: &AppState, slug: &str, name: &str) -> Result<(), String> {
+async fn run_workflow_work(
+    state: &AppState,
+    slug: &str,
+    name: &str,
+    book: &concepts::workflows::Book,
+) -> Result<(), String> {
     let progress = progress_sink(state, slug);
     // Scoped once per job (ADR-0021): every step turn sees the idea's attached sources.
     let llm = scoped_llm(state, slug);
-    let skills = state.skills.snapshot();
-    let outcome = concepts::workflows::run_workflow(
-        &llm,
-        &state.ai_semaphore,
-        &skills,
-        &state.config.vault_dir,
-        slug,
-        name,
-        llm.context_budget(),
-        llm.settings().audit_findings,
-        &|max| related_block_logged(state, slug, max),
-        &progress,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let ctx = concepts::workflows::RunCtx {
+        llm: &llm,
+        sem: &state.ai_semaphore,
+        book,
+        vault_dir: &state.config.vault_dir,
+        idea_slug: slug,
+        budget: llm.context_budget(),
+        audit_on: llm.settings().audit_findings,
+        related: &|max| related_block_logged(state, slug, max),
+        progress: &progress,
+    };
+    let outcome = concepts::workflows::run_workflow(&ctx, name)
+        .await
+        .map_err(|e| e.to_string())?;
     if outcome.synthesis.trim().is_empty() {
         return Err("the workflow produced nothing — try again".to_string());
     }

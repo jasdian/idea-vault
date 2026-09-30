@@ -141,6 +141,7 @@ mod tests {
             sources_dir: None,
             sources_applied: None,
             skills_dir: vault_dir.join(".skills"),
+            workflows_dir: vault_dir.join(".workflows"),
             mcp_server_token: None,
         };
         let ollama =
@@ -155,6 +156,10 @@ mod tests {
         let skills = Arc::new(crate::concepts::skills::LiveSkills::load(
             config.skills_dir.clone(),
         ));
+        let workflows = Arc::new(crate::concepts::workflows::LiveWorkflows::load(
+            config.workflows_dir.clone(),
+            &skills,
+        ));
         let state = AppState {
             config: Arc::new(config),
             db: Arc::new(Mutex::new(
@@ -163,6 +168,7 @@ mod tests {
             llm: crate::ai::LlmBackend::ollama_only(ollama),
             ai_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             skills,
+            workflows,
             jobs: crate::web::jobs::new_registry(),
             queues: crate::web::jobs::new_queues(),
             mcp: Arc::new(crate::mcp::McpRegistry::load(

@@ -184,6 +184,36 @@ async fn run_workflow_interrogate_persists_only_synthesis_and_guards() {
 }
 
 #[tokio::test]
+async fn r22_404s_workflow_present_only_as_invalid_file() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["x".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    seed(&vault_dir, IdeaState::InDiscussion);
+    let dir = state.workflows.dir().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    // A well-formed file naming a skill that does not exist: it loads as an issue, not a workflow.
+    std::fs::write(
+        dir.join("broken.md"),
+        "---\nname: broken\ndescription: d\nstages:\n  - kind: fan_out\n    steps:\n      - {role: critic, skill: no-such-skill}\n  - kind: synthesize\n---\n",
+    )
+    .unwrap();
+    state.workflows.reload(&state.skills);
+    assert!(state
+        .workflows
+        .issues()
+        .iter()
+        .any(|i| i.file == "broken.md"));
+    let before = store::read_conversation(&vault_dir, "movable").unwrap();
+
+    let (status, _) = post_form(state.clone(), "/idea/movable/workflow/broken", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(mock.chat_bodies().is_empty(), "no job started");
+    assert_eq!(
+        store::read_conversation(&vault_dir, "movable").unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
 async fn run_swarm_custom_angles_and_unknown_angle_400() {
     let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["out".into()])).await;
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
@@ -250,7 +280,7 @@ async fn oversized_angle_list_is_400_with_no_ai_calls() {
 
 #[tokio::test]
 async fn swarm_picker_caps_selection_at_max_angles() {
-    use idea_vault::web::routes::memory::MAX_ANGLES;
+    use idea_vault::concepts::swarm::MAX_ANGLES;
     let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["x".into()])).await;
     let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
     seed(&vault_dir, IdeaState::InDiscussion);

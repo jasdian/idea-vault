@@ -17,6 +17,9 @@ pub struct AppState {
     /// The live skill registry: built-ins plus the owner's `vault/.skills/` (docs/adr/0022).
     /// Handlers take one `snapshot()` per request/job so a reload never changes a run mid-flight.
     pub skills: Arc<crate::concepts::skills::LiveSkills>,
+    /// The live workflow book (ADR-0035): skills and workflows paired and validated together.
+    /// A workflow job takes one `snapshot()` so the two registries can never disagree mid-run.
+    pub workflows: Arc<crate::concepts::workflows::LiveWorkflows>,
     /// In-flight background AI jobs, one per idea, so a slow model call survives the browser
     /// navigating away (`web::jobs`).
     pub jobs: crate::web::jobs::Jobs,

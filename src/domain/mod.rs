@@ -13,6 +13,7 @@ pub mod name;
 pub mod skill;
 pub mod slug;
 pub mod tag;
+pub mod workflow;
 
 pub use artifact::{Artifact, ArtifactKind};
 pub use compacted::Compacted;
@@ -24,6 +25,7 @@ pub use idea::{Idea, IdeaState};
 pub use memory::{MemoryFact, MemoryIndex};
 pub use name::{InvalidName, Name};
 pub use skill::{OutputContract, SkillRole, SkillStage};
+pub use workflow::{StageKind, StageSpec, WorkflowFrontmatter};
 
 /// Errors produced while parsing/validating domain data (frontmatter + state).
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +34,10 @@ pub enum DomainError {
     MissingFrontmatter,
     #[error("invalid idea state: {0}")]
     InvalidState(String),
+    /// A workflow stage that is not a known `kind:` or whose body does not fit it; the message
+    /// names `stages[i] (<kind>)` (ADR-0035).
+    #[error("{0}")]
+    InvalidStage(String),
     #[error("yaml error: {0}")]
     Yaml(#[from] serde_norway::Error),
 }

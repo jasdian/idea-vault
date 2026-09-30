@@ -106,12 +106,13 @@ pub async fn skills_page(State(state): State<AppState>) -> Result<SkillsPage, We
     })
 }
 
-/// `POST /skills/reload` — re-read the owner skills folder and return the refreshed panel.
-/// Synchronous: a handful of small file reads, no model call.
+/// `POST /skills/reload` — re-read the owner skills folder, then revalidate the workflows against
+/// those fresh skills as one pair (ADR-0035), and return the refreshed panel. Synchronous: a
+/// handful of small file reads, no model call.
 pub async fn reload_skills(
     State(state): State<AppState>,
 ) -> Result<axum::response::Html<String>, WebError> {
-    state.skills.reload();
+    state.workflows.reload(&state.skills);
     Ok(axum::response::Html(render_list(&state)?))
 }
 

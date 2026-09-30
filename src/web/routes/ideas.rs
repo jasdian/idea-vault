@@ -315,7 +315,8 @@ pub(crate) fn skill_tooltip(skill: &crate::concepts::skills::Skill) -> String {
 pub(crate) struct ActionsInput<'a> {
     pub vault_dir: &'a std::path::Path,
     pub slug: &'a str,
-    pub skills: &'a crate::concepts::skills::SkillRegistry,
+    /// The one skills + workflows snapshot the chips are drawn from (ADR-0035).
+    pub book: &'a crate::concepts::workflows::Book,
     pub conversation: &'a str,
     pub can_store: bool,
     pub busy: bool,
@@ -349,17 +350,19 @@ pub(crate) fn render_actions(input: ActionsInput) -> Result<String, WebError> {
     let ActionsInput {
         vault_dir,
         slug,
-        skills,
+        book,
         conversation,
         can_store,
         busy,
         settings,
         oob,
     } = input;
-    // The workflow chips come straight off the static built-in registry — no caller threading.
-    let workflows = crate::concepts::workflows::builtin_workflows()
-        .iter()
-        .filter(|w| w.name != crate::concepts::workflows::READY_TO_BUILD)
+    let skills = book.skills.as_ref();
+    // Every visible workflow except a capstone, which has its own button row (ADR-0035).
+    let workflows = book
+        .workflows
+        .visible()
+        .filter(|w| !w.capstone)
         .map(|w| crate::web::templates::WorkflowChip {
             name: w.name.to_string(),
             description: w.description.to_string(),
@@ -388,7 +391,7 @@ pub(crate) fn render_actions(input: ActionsInput) -> Result<String, WebError> {
         .collect();
     let default_angles = swarm_angles.iter().filter(|a| a.on).count();
     // The spine strip + next move + wrong-turn warnings, derived from the transcript (ADR-0022).
-    let coverage = crate::concepts::coverage::coverage(conversation, skills);
+    let coverage = crate::concepts::coverage::coverage(conversation, skills, &book.workflows);
     let (next_skill, next_why, next_is_swarm) = match coverage.next {
         Some(crate::concepts::coverage::NextMove::Skill { name, why }) => (name, why, false),
         Some(crate::concepts::coverage::NextMove::Swarm) => (
@@ -403,7 +406,7 @@ pub(crate) fn render_actions(input: ActionsInput) -> Result<String, WebError> {
         can_store,
         moves,
         swarm_angles,
-        max_angles: crate::web::routes::memory::MAX_ANGLES,
+        max_angles: crate::concepts::swarm::MAX_ANGLES,
         default_angles,
         spine: coverage
             .stages
@@ -476,12 +479,12 @@ pub(crate) fn respond_with_transcript(
         idea.frontmatter.state,
         IdeaState::InDiscussion | IdeaState::Reopened
     );
-    let skills = state.skills.snapshot();
+    let book = state.workflows.snapshot();
     html.push_str(&state_badge_oob(idea.frontmatter.state));
     html.push_str(&render_actions(ActionsInput {
         vault_dir: &state.config.vault_dir,
         slug,
-        skills: &skills,
+        book: &book,
         conversation: &conversation,
         can_store,
         busy,
@@ -773,7 +776,7 @@ pub(crate) fn build_discussion(
     settings: &crate::ai::LlmSettings,
     model: &str,
     can_store: bool,
-    skills: &crate::concepts::skills::SkillRegistry,
+    book: &crate::concepts::workflows::Book,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -798,7 +801,7 @@ pub(crate) fn build_discussion(
     let actions_html = render_actions(ActionsInput {
         vault_dir,
         slug,
-        skills,
+        book,
         conversation,
         can_store,
         busy,
@@ -829,7 +832,7 @@ fn render_panel(
     health: crate::ai::AiHealth,
     settings: &crate::ai::LlmSettings,
     model: &str,
-    skills: &crate::concepts::skills::SkillRegistry,
+    book: &crate::concepts::workflows::Book,
     pending: crate::web::jobs::Pending,
     queued_items: Vec<crate::web::jobs::QueuedMessage>,
     budget_bytes: usize,
@@ -856,7 +859,7 @@ fn render_panel(
         settings,
         model,
         can_store,
-        skills,
+        book,
         pending,
         queued_items,
         budget_bytes,
@@ -883,7 +886,7 @@ pub async fn idea_page(
     // most that per page view.
     let health = state.llm.probe().await;
 
-    let skills = state.skills.snapshot();
+    let book = state.workflows.snapshot();
     // If a background job is running for this idea, this resumes its indicator on the fresh page.
     let pending = crate::web::jobs::peek(&state.jobs, &slug);
     // Scoped for the meter (ADR-0021) — the probe above stays on the shared instance (health is
@@ -899,7 +902,7 @@ pub async fn idea_page(
         health,
         &llm.settings(),
         &llm.model(),
-        &skills,
+        &book,
         pending,
         queued_items,
         llm.context_budget().max_bytes,

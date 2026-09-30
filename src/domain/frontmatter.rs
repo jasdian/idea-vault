@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use crate::domain::artifact::ArtifactKind;
 use crate::domain::idea::IdeaState;
 use crate::domain::skill::{OutputContract, SkillRole, SkillStage};
+use crate::domain::workflow::{parse_stage, StageSpec, WorkflowFrontmatter};
 use crate::domain::DomainError;
 
 /// Cap on `IdeaFrontmatter::tags`, shared by every writer (the owner-edit form and store-time
@@ -225,6 +226,23 @@ pub fn parse_skill(input: &str) -> Result<(SkillFrontmatter, String), DomainErro
     let (yaml, body) = split_fence(input)?;
     let fm: SkillFrontmatter = serde_norway::from_str(yaml)?;
     Ok((fm, body.trim_end().to_string()))
+}
+
+/// Parse a workflow file (ADR-0035) into its frontmatter, its stages dispatched on `kind:`, and
+/// its body (the owner-facing explanation shown on the book, never a prompt). Unknown keys at the
+/// top level or inside any stage are an error, as for a skill file.
+pub fn parse_workflow(
+    input: &str,
+) -> Result<(WorkflowFrontmatter, Vec<StageSpec>, String), DomainError> {
+    let (yaml, body) = split_fence(input)?;
+    let fm: WorkflowFrontmatter = serde_norway::from_str(yaml)?;
+    let stages = fm
+        .stages
+        .iter()
+        .enumerate()
+        .map(|(i, v)| parse_stage(i, v).map_err(DomainError::InvalidStage))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((fm, stages, body.trim().to_string()))
 }
 
 /// Parse a `memory/<fact-slug>.md` document into its frontmatter and body.

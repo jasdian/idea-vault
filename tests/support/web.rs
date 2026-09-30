@@ -47,6 +47,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         sources_dir: None,
         sources_applied: None,
         skills_dir: vault_dir.join(".skills"),
+        workflows_dir: vault_dir.join(".workflows"),
         mcp_server_token: None,
     };
 
@@ -65,6 +66,11 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
         config.skills_dir.clone(),
     ));
 
+    let workflows = Arc::new(idea_vault::concepts::workflows::LiveWorkflows::load(
+        config.workflows_dir.clone(),
+        &skills,
+    ));
+
     std::mem::forget(tmp);
 
     (
@@ -74,6 +80,7 @@ pub fn test_state_with_ollama(ollama_url: &str, ai_concurrency: usize) -> (AppSt
             llm: idea_vault::ai::LlmBackend::ollama_only(ollama).with_mcp(mcp.clone()),
             ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
             skills,
+            workflows,
             jobs: idea_vault::web::jobs::new_registry(),
             queues: idea_vault::web::jobs::new_queues(),
             mcp,

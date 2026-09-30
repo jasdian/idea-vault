@@ -7,7 +7,8 @@
 //! Warnings never block anything — they are advice, like a skill book's "common wrong turns".
 
 use crate::concepts::skills::SkillRegistry;
-use crate::concepts::{swarm, workflows};
+use crate::concepts::swarm;
+use crate::concepts::workflows::{Stage, WorkflowRegistry};
 use crate::domain::SkillStage;
 use crate::vault::store::{self, TurnSource};
 
@@ -33,7 +34,11 @@ pub struct Coverage {
 }
 
 /// The spine stages one assistant turn covers.
-fn stages_of(source: &TurnSource, registry: &SkillRegistry) -> Vec<SkillStage> {
+fn stages_of(
+    source: &TurnSource,
+    registry: &SkillRegistry,
+    workflows: &WorkflowRegistry,
+) -> Vec<SkillStage> {
     let skill_stage = |name: &str| registry.get(name).map(|s| s.stage);
     match source {
         TurnSource::Skill(name) => skill_stage(name).into_iter().collect(),
@@ -49,16 +54,17 @@ fn stages_of(source: &TurnSource, registry: &SkillRegistry) -> Vec<SkillStage> {
                 .chain([SkillStage::Converge])
                 .collect()
         }
-        TurnSource::Workflow(name) => match workflows::get_workflow(name) {
+        // A workflow no longer registered (renamed, or its owner file now invalid) covers nothing.
+        TurnSource::Workflow(name) => match workflows.get(name) {
             Some(wf) => wf
                 .stages
                 .iter()
                 .flat_map(|stage| {
-                    let converges = matches!(stage, workflows::Stage::Synthesize);
+                    let converges = matches!(stage, Stage::Synthesize);
                     stage
                         .steps()
                         .iter()
-                        .filter_map(|s| s.skill.and_then(skill_stage))
+                        .filter_map(|s| s.skill.as_deref().and_then(skill_stage))
                         .chain(converges.then_some(SkillStage::Converge))
                         .collect::<Vec<_>>()
                 })
@@ -70,14 +76,22 @@ fn stages_of(source: &TurnSource, registry: &SkillRegistry) -> Vec<SkillStage> {
     }
 }
 
-/// Coverage of `conversation` against the spine, with the next move and any warnings.
-pub fn coverage(conversation: &str, registry: &SkillRegistry) -> Coverage {
+/// Coverage of `conversation` against the spine, with the next move and any warnings. A workflow
+/// turn covers what its definition in `workflows` names (ADR-0035).
+pub fn coverage(
+    conversation: &str,
+    registry: &SkillRegistry,
+    workflows: &WorkflowRegistry,
+) -> Coverage {
     let turns = store::split_turns(conversation);
     let sources: Vec<TurnSource> = turns
         .iter()
         .map(|t| store::parse_turn_heading(store::turn_role(t)))
         .collect();
-    let per_turn: Vec<Vec<SkillStage>> = sources.iter().map(|s| stages_of(s, registry)).collect();
+    let per_turn: Vec<Vec<SkillStage>> = sources
+        .iter()
+        .map(|s| stages_of(s, registry, workflows))
+        .collect();
     let covered = |stage: SkillStage| per_turn.iter().any(|s| s.contains(&stage));
     let first_turn_with =
         |stage: SkillStage| per_turn.iter().position(|stages| stages.contains(&stage));
@@ -172,6 +186,10 @@ pub fn skill_book(registry: &SkillRegistry, max_bytes: usize) -> String {
 mod tests {
     use super::*;
 
+    fn workflows(registry: &SkillRegistry) -> WorkflowRegistry {
+        WorkflowRegistry::builtin(registry)
+    }
+
     fn convo(headings: &[&str]) -> String {
         headings.iter().map(|h| format!("## {h}\nbody\n")).collect()
     }
@@ -187,7 +205,11 @@ mod tests {
     #[test]
     fn a_fresh_discussion_suggests_the_steelman_and_warns_nothing() {
         let registry = SkillRegistry::builtin();
-        let c = coverage(&convo(&["user", "assistant"]), &registry);
+        let c = coverage(
+            &convo(&["user", "assistant"]),
+            &registry,
+            &workflows(&registry),
+        );
         assert!(covered(&c).is_empty());
         assert!(matches!(&c.next, Some(NextMove::Skill { name, .. }) if name == "steelman"));
         assert!(c.warnings.is_empty());
@@ -207,6 +229,7 @@ mod tests {
                 "assistant (swarm: premortem, constraints)",
             ]),
             &registry,
+            &workflows(&registry),
         );
         assert_eq!(
             covered(&c),
@@ -215,10 +238,18 @@ mod tests {
         assert!(matches!(&c.next, Some(NextMove::Skill { name, .. }) if name == "build-prompt"));
         assert!(!c.untested);
 
-        let legacy = coverage(&convo(&["assistant (swarm)"]), &registry);
+        let legacy = coverage(
+            &convo(&["assistant (swarm)"]),
+            &registry,
+            &workflows(&registry),
+        );
         assert_eq!(covered(&legacy), ["attack", "consequence", "converge"]);
 
-        let wf = coverage(&convo(&["assistant (workflow: ready-to-build)"]), &registry);
+        let wf = coverage(
+            &convo(&["assistant (workflow: ready-to-build)"]),
+            &registry,
+            &workflows(&registry),
+        );
         assert_eq!(covered(&wf), ["capstone"], "extract lenses are off-spine");
     }
 
@@ -231,12 +262,16 @@ mod tests {
     #[test]
     fn converge_is_suggested_as_the_converge_skill() {
         let registry = SkillRegistry::builtin();
-        let c = coverage(&convo(&THROUGH_CONSEQUENCE), &registry);
+        let c = coverage(
+            &convo(&THROUGH_CONSEQUENCE),
+            &registry,
+            &workflows(&registry),
+        );
         assert!(matches!(&c.next, Some(NextMove::Skill { name, .. }) if name == "converge"));
 
         let mut headings = THROUGH_CONSEQUENCE.to_vec();
         headings.push("assistant (skill: converge)");
-        let done = coverage(&convo(&headings), &registry);
+        let done = coverage(&convo(&headings), &registry, &workflows(&registry));
         assert_eq!(
             covered(&done),
             ["steelman", "attack", "consequence", "converge"]
@@ -253,7 +288,11 @@ mod tests {
         .unwrap();
         let (registry, issues) = SkillRegistry::load(tmp.path());
         assert!(issues.is_empty(), "{issues:?}");
-        let c = coverage(&convo(&THROUGH_CONSEQUENCE), &registry);
+        let c = coverage(
+            &convo(&THROUGH_CONSEQUENCE),
+            &registry,
+            &workflows(&registry),
+        );
         assert_eq!(c.next, Some(NextMove::Swarm));
     }
 
@@ -266,6 +305,7 @@ mod tests {
                 "assistant (skill: premortem)",
             ]),
             &registry,
+            &workflows(&registry),
         );
         assert_eq!(early.warnings.len(), 1);
         assert!(early.warnings[0].contains("before any attack"));
@@ -275,6 +315,7 @@ mod tests {
                 "assistant (skill: build-prompt)",
             ]),
             &registry,
+            &workflows(&registry),
         );
         assert!(fine.warnings.is_empty());
     }
@@ -290,6 +331,7 @@ mod tests {
                 "assistant (skill: premortem)",
             ]),
             &registry,
+            &workflows(&registry),
         );
         assert!(c
             .warnings
@@ -303,6 +345,7 @@ mod tests {
                 "assistant (skill: premortem)",
             ]),
             &registry,
+            &workflows(&registry),
         );
         assert!(broken.warnings.is_empty(), "a chat reply breaks the run");
     }
@@ -315,5 +358,17 @@ mod tests {
         assert!(!book.contains("extract-"));
         let tiny = skill_book(&registry, 120);
         assert!(tiny.len() <= 120);
+    }
+
+    #[test]
+    fn unknown_workflow_yields_empty_coverage() {
+        let registry = SkillRegistry::builtin();
+        let c = coverage(
+            &convo(&["assistant (workflow: gone-now)"]),
+            &registry,
+            &workflows(&registry),
+        );
+        assert!(covered(&c).is_empty());
+        assert!(c.warnings.is_empty());
     }
 }

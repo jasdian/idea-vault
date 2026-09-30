@@ -316,17 +316,15 @@ pub async fn replan(
         return Err(WebError::NotFound(format!("build plan {stem}")));
     }
     let audited = form.audited == "1";
-    let skill = if audited {
-        guard_workflow(&idea, READY_TO_BUILD)?;
-        None
+    if audited {
+        let book = guard_workflow(&state, &idea, READY_TO_BUILD)?;
+        if jobs::try_claim(&state.jobs, &slug) {
+            spawn_workflow_job(&state, &slug, READY_TO_BUILD.to_string(), book);
+        }
     } else {
-        Some(guard_skill(&state, &idea, QUICK_PLANNER)?)
-    };
-
-    if jobs::try_claim(&state.jobs, &slug) {
-        match skill {
-            Some(skill) => spawn_skill_job(&state, &slug, skill),
-            None => spawn_workflow_job(&state, &slug, READY_TO_BUILD.to_string()),
+        let skill = guard_skill(&state, &idea, QUICK_PLANNER)?;
+        if jobs::try_claim(&state.jobs, &slug) {
+            spawn_skill_job(&state, &slug, skill);
         }
     }
     Ok(([("HX-Redirect", format!("/idea/{slug}"))], StatusCode::OK).into_response())

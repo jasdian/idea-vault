@@ -53,6 +53,7 @@ fn test_state() -> AppState {
         sources_dir: None,
         sources_applied: None,
         skills_dir: vault_dir.join(".skills"),
+        workflows_dir: vault_dir.join(".workflows"),
         mcp_server_token: None,
     };
 
@@ -71,6 +72,11 @@ fn test_state() -> AppState {
         config.skills_dir.clone(),
     ));
 
+    let workflows = Arc::new(idea_vault::concepts::workflows::LiveWorkflows::load(
+        config.workflows_dir.clone(),
+        &skills,
+    ));
+
     // Keep the tempdir alive for the process lifetime.
     std::mem::forget(tmp);
 
@@ -80,6 +86,7 @@ fn test_state() -> AppState {
         llm: idea_vault::ai::LlmBackend::ollama_only(ollama),
         ai_semaphore: Arc::new(Semaphore::new(1)),
         skills,
+        workflows,
         jobs: idea_vault::web::jobs::new_registry(),
         queues: idea_vault::web::jobs::new_queues(),
         mcp,

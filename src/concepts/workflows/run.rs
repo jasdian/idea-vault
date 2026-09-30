@@ -1,14 +1,6 @@
-//! Workflows: deterministic multi-stage orchestrations over an idea — a fixed pipeline of
-//! fan-out, chained, audit, and synthesis stages, as opposed to free-form chat
-//! (docs/06-concepts/workflows.md D19, D32).
-//!
-//! Script-driven, not model-driven: the control flow (which stages, in which order) is fixed by
-//! the workflow definition; only stage *content* is generated. A chained step's output is carried
-//! forward as a `## Prior stage` block into every later stage, so a workflow can steelman an idea
-//! and then attack the steelman, or harvest findings and then fold them into a build prompt. The
-//! parallel stage delegates to `swarm`'s bounded fan-out primitive; a failed fan-out agent drops
-//! to a null result the judge skips; only the final stage's output is persisted as a turn
-//! (intermediates stay out of truth).
+//! The workflow engine (D19/D32): runs one workflow's stages in order against an idea and
+//! persists only the final output. Control flow is fixed by the definition; only stage content is
+//! generated.
 
 use std::path::Path;
 
@@ -16,148 +8,45 @@ use tokio::sync::Semaphore;
 
 use crate::ai::budget::{related_allowance, ContextBudget};
 use crate::ai::LlmBackend;
-use crate::concepts::agents::{build_prompt, AgentResult, AgentRole, AgentTask};
+use crate::concepts::agents::{build_prompt, AgentResult, AgentTask};
 use crate::concepts::audit::{self, AuditReport, Finding};
 use crate::concepts::build_plan::finish::PlanMode;
 use crate::concepts::build_plan::gates::AuditView;
 use crate::concepts::skills::{
     ask_on_contract, hydrate_context, persist_plan, prior_plan_block, RelatedProvider,
-    SkillRegistry,
 };
 use crate::concepts::swarm::{angles_line, fan_out, judge, synthesize};
+use crate::concepts::workflows::{Book, Stage};
 use crate::concepts::ConceptError;
 use crate::domain::OutputContract;
 use crate::vault::store;
 
-/// One agent in a workflow: a role, optionally through a skill lens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorkflowStep {
-    pub role: AgentRole,
-    pub skill: Option<&'static str>,
-}
-
-/// One stage of a workflow (D32).
-#[derive(Debug, Clone, Copy)]
-pub enum Stage {
-    /// Run these steps in parallel over the same context (the swarm fan-out primitive); their
-    /// answers become findings for a later `Audit` / `Synthesize` / `Chain`.
-    FanOut(&'static [WorkflowStep]),
-    /// Run one step alone. Mid-workflow, its output is carried forward to every later stage; as
-    /// the last stage, its output is the workflow's result.
-    Chain(WorkflowStep),
-    /// The factored audit over the findings gathered so far (skipped when the Settings toggle is
-    /// off, docs/adr/0023).
-    Audit,
-    /// Converge the findings gathered so far into one position.
-    Synthesize,
-}
-
-impl Stage {
-    /// The agents this stage runs (none for the audit and synthesis stages).
-    pub fn steps(&self) -> &[WorkflowStep] {
-        match self {
-            Stage::FanOut(steps) => steps,
-            Stage::Chain(step) => std::slice::from_ref(step),
-            Stage::Audit | Stage::Synthesize => &[],
-        }
-    }
-}
-
-/// A named, fixed workflow definition.
-#[derive(Debug, Clone)]
-pub struct Workflow {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub stages: &'static [Stage],
-}
-
-const fn step(role: AgentRole, skill: &'static str) -> WorkflowStep {
-    WorkflowStep {
-        role,
-        skill: Some(skill),
-    }
-}
-
-/// The canonical "interrogate an idea" fan-out — the D19 node list: diverse critics + a
-/// researcher.
-const INTERROGATE_STEPS: &[WorkflowStep] = &[
-    step(AgentRole::Critic, "premortem"),
-    step(AgentRole::Critic, "cheapest-disproof"),
-    step(AgentRole::Researcher, "constraints"),
-    step(AgentRole::Critic, "second-order-effects"),
-];
-
-/// The attack that follows a steelman.
-const ATTACK_STEPS: &[WorkflowStep] = &[
-    step(AgentRole::Critic, "premortem"),
-    step(AgentRole::Critic, "cheapest-disproof"),
-    step(AgentRole::Critic, "devils-advocate"),
-];
-
-/// The five knowledge-harvest lenses (`concepts::knowledge::LENSES`), as a fan-out.
-const HARVEST_STEPS: &[WorkflowStep] = &[
-    step(AgentRole::Harvester, "extract-key-decisions"),
-    step(AgentRole::Harvester, "extract-durable-facts"),
-    step(AgentRole::Harvester, "extract-open-questions"),
-    step(AgentRole::Harvester, "extract-risks-assumptions"),
-    step(AgentRole::Harvester, "extract-next-actions"),
-];
-
-/// Name of the audited capstone workflow, which the capstone row renders instead of the generic list.
-pub const READY_TO_BUILD: &str = "ready-to-build";
-
-/// The built-in workflow definitions shipping with the binary — the skill book's named recipes.
-pub fn builtin_workflows() -> &'static [Workflow] {
-    const WORKFLOWS: &[Workflow] = &[
-        Workflow {
-            name: "interrogate",
-            description: "Fan out diverse critics + a researcher, audit the findings, synthesize \
-                          one position (the canonical D19 run-it-into-the-ground pass)",
-            stages: &[
-                Stage::FanOut(INTERROGATE_STEPS),
-                Stage::Audit,
-                Stage::Synthesize,
-            ],
-        },
-        Workflow {
-            name: "steelman-then-attack",
-            description: "Build the strongest case for the idea first, then send three critics at \
-                          that steelman, audit what they find, and synthesize",
-            stages: &[
-                Stage::Chain(step(AgentRole::Advocate, "steelman")),
-                Stage::FanOut(ATTACK_STEPS),
-                Stage::Audit,
-                Stage::Synthesize,
-            ],
-        },
-        Workflow {
-            name: READY_TO_BUILD,
-            description: "Harvest what the discussion settled, audit it, then fold the survivors \
-                          into a gated build plan for a coding agent",
-            stages: &[
-                Stage::FanOut(HARVEST_STEPS),
-                Stage::Audit,
-                Stage::Chain(step(AgentRole::Synthesizer, "build-prompt")),
-            ],
-        },
-    ];
-    WORKFLOWS
-}
-
-/// Look up a built-in workflow by name.
-pub fn get_workflow(name: &str) -> Option<&'static Workflow> {
-    builtin_workflows().iter().find(|w| w.name == name)
+/// Everything one workflow run reads, borrowed for the run's lifetime. `book` is the job's one
+/// skills + workflows snapshot (ADR-0035), so a reload mid-run never changes what the run resolves.
+pub struct RunCtx<'a> {
+    pub llm: &'a LlmBackend,
+    pub sem: &'a Semaphore,
+    pub book: &'a Book,
+    pub vault_dir: &'a Path,
+    pub idea_slug: &'a str,
+    pub budget: ContextBudget,
+    /// The Settings audit toggle (docs/adr/0023): off skips every Audit stage.
+    pub audit_on: bool,
+    pub related: RelatedProvider<'a>,
+    pub progress: &'a (dyn Fn(&str) + Sync),
 }
 
 /// What a workflow run produced: the final stage's output (for a workflow ending in a build-plan
 /// step, the pointer turn it appended) plus every fan-out agent's raw result
-/// (`None` = failed agent, skipped by the judge) and the audit, if one ran.
+/// (`None` = failed agent, skipped by the judge), the audit, if one ran, and the slugs of the stage
+/// artifacts it wrote (ADR-0034).
 #[derive(Debug)]
 pub struct WorkflowOutcome {
-    pub workflow: &'static str,
+    pub workflow: String,
     pub synthesis: String,
     pub step_results: Vec<Option<AgentResult>>,
     pub audit: Option<AuditReport>,
+    pub artifacts: Vec<String>,
 }
 
 /// How a build-plan planner routes audited findings into plan sections, keyed to the kind labels
@@ -362,30 +251,32 @@ const AUDIT_OFF_REASON: &str = "audit off in Settings";
 /// build-plan gates instead: the audited harvest (when the audit ran) is carried into them, the
 /// plan lands as an artifact and the turn is its pointer; an unusable plan fails the run with
 /// nothing persisted.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_workflow(
-    ollama: &LlmBackend,
-    ai_semaphore: &Semaphore,
-    registry: &SkillRegistry,
-    vault_dir: &Path,
-    idea_slug: &str,
-    name: &str,
-    budget: ContextBudget,
-    audit_findings: bool,
-    related: RelatedProvider<'_>,
-    progress: &(dyn Fn(&str) + Sync),
-) -> Result<WorkflowOutcome, ConceptError> {
-    let workflow = get_workflow(name).ok_or_else(|| ConceptError::UnknownWorkflow(name.into()))?;
+pub async fn run_workflow(ctx: &RunCtx<'_>, name: &str) -> Result<WorkflowOutcome, ConceptError> {
+    let RunCtx {
+        llm: ollama,
+        sem: ai_semaphore,
+        book,
+        vault_dir,
+        idea_slug,
+        budget,
+        audit_on: audit_findings,
+        related,
+        progress,
+    } = *ctx;
+    let registry = book.skills.as_ref();
+    let workflow = book
+        .workflows
+        .get(name)
+        .ok_or_else(|| ConceptError::UnknownWorkflow(name.into()))?;
 
-    // Fail fast if a step names a skill the registry doesn't have — before any AI call.
-    for stage in workflow.stages {
-        for step in stage.steps() {
-            if let Some(skill) = step.skill {
-                if registry.get(skill).is_none() {
-                    return Err(ConceptError::UnknownSkill(skill.to_string()));
-                }
-            }
-        }
+    // Run-time backstop to the registry's load-time check (ADR-0035): fail fast if a step names a
+    // skill the snapshot doesn't have — before any AI call.
+    if let Some(skill) = workflow
+        .skills()
+        .into_iter()
+        .find(|s| registry.get(s).is_none())
+    {
+        return Err(ConceptError::UnknownSkill(skill.to_string()));
     }
 
     let total = workflow.stages.len();
@@ -408,7 +299,7 @@ pub async fn run_workflow(
                     .iter()
                     .map(|s| AgentTask {
                         role: s.role,
-                        skill: s.skill.map(str::to_string),
+                        skill: s.skill.clone(),
                         context: context.clone(),
                     })
                     .collect();
@@ -416,20 +307,17 @@ pub async fn run_workflow(
                     note(&format!("fanned out {done}/{of} {angle}"));
                 };
                 let results = fan_out(ollama, ai_semaphore, registry, tasks, &on_done).await;
-                fanned.0.extend(
-                    steps
-                        .iter()
-                        .map(|s| s.skill.unwrap_or(s.role.as_str()).to_string()),
-                );
+                fanned.0.extend(steps.iter().map(|s| s.label().to_string()));
                 fanned.1.extend(results.iter().cloned());
                 step_results.extend(results);
                 findings = None;
             }
             Stage::Chain(step) => {
-                let label = step.skill.unwrap_or(step.role.as_str());
+                let label = step.label();
                 note(label);
                 let contract = step
                     .skill
+                    .as_deref()
                     .and_then(|s| registry.get(s))
                     .map_or(OutputContract::Free, |s| s.contract);
                 let planner = contract == OutputContract::BuildPlan;
@@ -464,7 +352,7 @@ pub async fn run_workflow(
                 }
                 let task = AgentTask {
                     role: step.role,
-                    skill: step.skill.map(str::to_string),
+                    skill: step.skill.clone(),
                     context,
                 };
                 let prompt = build_prompt(registry, &task)?;
@@ -540,6 +428,11 @@ pub async fn run_workflow(
                     carried.push(format!("## Prior stage: synthesis\n{synthesis}"));
                 }
             }
+            // ADR-0034's kinds load and validate, but this engine has no arm for them yet: refuse
+            // the run rather than skip a stage silently.
+            Stage::Ground(_) | Stage::Panel(_) | Stage::Loop(_) | Stage::Refine(_) => {
+                return Err(ConceptError::NotImplemented(stage.kind().as_str()))
+            }
         }
     }
 
@@ -547,6 +440,7 @@ pub async fn run_workflow(
     let planner = match workflow.stages.last() {
         Some(Stage::Chain(step)) => step
             .skill
+            .as_deref()
             .and_then(|s| registry.get(s))
             .filter(|s| s.contract == OutputContract::BuildPlan)
             .map(|_| step.role),
@@ -563,7 +457,7 @@ pub async fn run_workflow(
             vault_dir,
             idea_slug,
             output,
-            workflow.name,
+            &workflow.name,
             audit,
             PlanMode::ReadyToBuild { skipped },
         )
@@ -571,7 +465,7 @@ pub async fn run_workflow(
         output = finished.pointer;
     } else if output.trim().is_empty() {
         tracing::warn!(
-            workflow = workflow.name,
+            workflow = %workflow.name,
             idea_slug,
             "workflow final stage returned empty output; nothing persisted"
         );
@@ -592,58 +486,18 @@ pub async fn run_workflow(
     }
 
     Ok(WorkflowOutcome {
-        workflow: workflow.name,
+        workflow: workflow.name.clone(),
         synthesis: output,
         step_results,
         audit: report,
+        artifacts: Vec::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn canonical_interrogate_is_fan_out_audit_synthesize_over_the_d19_nodes() {
-        let wf = get_workflow("interrogate").expect("built-in exists");
-        assert!(matches!(
-            wf.stages,
-            [Stage::FanOut(_), Stage::Audit, Stage::Synthesize]
-        ));
-        let shape: Vec<(AgentRole, Option<&str>)> = wf.stages[0]
-            .steps()
-            .iter()
-            .map(|s| (s.role, s.skill))
-            .collect();
-        assert_eq!(
-            shape,
-            vec![
-                (AgentRole::Critic, Some("premortem")),
-                (AgentRole::Critic, Some("cheapest-disproof")),
-                (AgentRole::Researcher, Some("constraints")),
-                (AgentRole::Critic, Some("second-order-effects")),
-            ]
-        );
-    }
-
-    #[test]
-    fn every_builtin_step_names_a_registered_skill() {
-        let registry = SkillRegistry::builtin();
-        for wf in builtin_workflows() {
-            for stage in wf.stages {
-                for s in stage.steps() {
-                    let skill = s.skill.expect("built-in steps are lenses");
-                    assert!(registry.get(skill).is_some(), "{}: {skill}", wf.name);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn harvest_steps_mirror_the_knowledge_lenses() {
-        let skills: Vec<&str> = HARVEST_STEPS.iter().filter_map(|s| s.skill).collect();
-        assert_eq!(skills, crate::concepts::knowledge::LENSES);
-    }
+    use crate::concepts::agents::AgentRole;
 
     fn finding(lens: &str, text: &str) -> Finding {
         Finding {
@@ -723,10 +577,5 @@ mod tests {
             total <= roomy.max_bytes / PLANNER_FINDINGS_DIVISOR,
             "{total}"
         );
-    }
-
-    #[test]
-    fn unknown_workflow_lookup_is_none() {
-        assert!(get_workflow("does-not-exist").is_none());
     }
 }

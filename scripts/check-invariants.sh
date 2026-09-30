@@ -75,7 +75,7 @@ ok "$rule"
 # 7. Ratchet: clippy -D warnings counts none of these, so a grep holds the line.
 #    A rise needs a same-line justification and a floor bump in this block; a
 #    fall lowers the floor in the same commit. Floors measured 2026-09-28.
-CLIPPY_ALLOW_FLOOR=6
+CLIPPY_ALLOW_FLOOR=5
 UNSAFE_FLOOR=0
 rule="ratchet: #[allow(clippy::…)] <= $CLIPPY_ALLOW_FLOOR and unsafe blocks <= $UNSAFE_FLOOR in src/"
 allows=$({ grep -rn '#\[allow(clippy::' src --include='*.rs' || true; } | strip_rust_comments | wc -l)

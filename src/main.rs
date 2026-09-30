@@ -137,12 +137,17 @@ async fn main() -> anyhow::Result<()> {
     let skills = Arc::new(idea_vault::concepts::skills::LiveSkills::load(
         config.skills_dir.clone(),
     ));
+    let workflows = Arc::new(idea_vault::concepts::workflows::LiveWorkflows::load(
+        config.workflows_dir.clone(),
+        &skills,
+    ));
     let state = AppState {
         config: Arc::new(config),
         db: Arc::new(Mutex::new(conn)),
         llm,
         ai_semaphore: Arc::new(Semaphore::new(ai_concurrency)),
         skills,
+        workflows,
         jobs: idea_vault::web::jobs::new_registry(),
         queues: idea_vault::web::jobs::new_queues(),
         mcp,

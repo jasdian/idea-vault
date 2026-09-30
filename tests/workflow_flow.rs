@@ -10,8 +10,7 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 use idea_vault::ai::budget::ContextBudget;
 use idea_vault::ai::{LlmBackend, OllamaClient};
-use idea_vault::concepts::skills::SkillRegistry;
-use idea_vault::concepts::workflows::run_workflow;
+use idea_vault::concepts::workflows::{run_workflow, Book, RunCtx};
 use idea_vault::concepts::ConceptError;
 use idea_vault::domain::{Idea, IdeaFrontmatter, IdeaState};
 use idea_vault::vault::store;
@@ -63,19 +62,20 @@ async fn interrogate_runs_the_fixed_dag_in_order_and_persists_only_the_synthesis
     .await;
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
-    let registry = SkillRegistry::builtin();
 
     let outcome = run_workflow(
-        &client,
-        &semaphore,
-        &registry,
-        tmp.path(),
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &semaphore,
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(4096),
+            audit_on: false,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "interrogate",
-        ContextBudget::new(4096),
-        false,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -120,19 +120,20 @@ async fn failed_step_is_skipped_and_workflow_degrades() {
     .await;
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
-    let registry = SkillRegistry::builtin();
 
     let outcome = run_workflow(
-        &client,
-        &semaphore,
-        &registry,
-        tmp.path(),
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &semaphore,
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(4096),
+            audit_on: false,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "interrogate",
-        ContextBudget::new(4096),
-        false,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -161,19 +162,20 @@ async fn all_steps_failed_errors_and_persists_nothing() {
     let mock = spawn(&["llama3.2"], ChatScript::EofAfter(vec![])).await;
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(2));
-    let registry = SkillRegistry::builtin();
 
     let err = run_workflow(
-        &client,
-        &semaphore,
-        &registry,
-        tmp.path(),
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &semaphore,
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(4096),
+            audit_on: false,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "interrogate",
-        ContextBudget::new(4096),
-        false,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap_err();
@@ -191,19 +193,20 @@ async fn unknown_workflow_fails_fast_with_no_ai_calls() {
     let mock = spawn(&["llama3.2"], tokens("x")).await;
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
-    let registry = SkillRegistry::builtin();
 
     let err = run_workflow(
-        &client,
-        &semaphore,
-        &registry,
-        tmp.path(),
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &semaphore,
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(4096),
+            audit_on: false,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "nope",
-        ContextBudget::new(4096),
-        false,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap_err();
@@ -229,18 +232,19 @@ async fn run_at(
 ) -> idea_vault::concepts::workflows::WorkflowOutcome {
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let semaphore = Arc::new(Semaphore::new(1));
-    let registry = SkillRegistry::builtin();
     run_workflow(
-        &client,
-        &semaphore,
-        &registry,
-        vault,
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &semaphore,
+            book: &Book::builtin(),
+            vault_dir: vault,
+            idea_slug: "i",
+            budget: ContextBudget::new(max_bytes),
+            audit_on: audit,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         name,
-        ContextBudget::new(max_bytes),
-        audit,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap()
@@ -375,16 +379,18 @@ async fn run_ready_to_build(role_tuning: bool) -> Vec<f64> {
     let semaphore = Arc::new(Semaphore::new(1));
 
     run_workflow(
-        &client,
-        &semaphore,
-        &SkillRegistry::builtin(),
-        tmp.path(),
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &semaphore,
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(4096),
+            audit_on: false,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "ready-to-build",
-        ContextBudget::new(4096),
-        false,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -438,16 +444,18 @@ async fn related_block_reaches_workflow_stages_but_not_audit() {
     };
 
     run_workflow(
-        &client,
-        &Semaphore::new(1),
-        &SkillRegistry::builtin(),
-        tmp.path(),
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &Semaphore::new(1),
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(8192),
+            audit_on: true,
+            related: &provider,
+            progress: &|_: &str| {},
+        },
         "steelman-then-attack",
-        ContextBudget::new(8192),
-        true,
-        &provider,
-        &|_: &str| {},
     )
     .await
     .unwrap();
@@ -600,16 +608,18 @@ async fn empty_harvest_run(audit: bool) -> (Vec<String>, ConceptError, String, u
     let mock = spawn_sequence(&["llama3.2"], scripts).await;
     let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
     let err = run_workflow(
-        &client,
-        &Arc::new(Semaphore::new(1)),
-        &SkillRegistry::builtin(),
-        tmp.path(),
-        "i",
+        &RunCtx {
+            llm: &client,
+            sem: &Arc::new(Semaphore::new(1)),
+            book: &Book::builtin(),
+            vault_dir: tmp.path(),
+            idea_slug: "i",
+            budget: ContextBudget::new(8192),
+            audit_on: audit,
+            related: &|_| String::new(),
+            progress: &|_: &str| {},
+        },
         "ready-to-build",
-        ContextBudget::new(8192),
-        audit,
-        &|_| String::new(),
-        &|_: &str| {},
     )
     .await
     .unwrap_err();
@@ -673,16 +683,18 @@ async fn an_empty_interrogate_fan_out_fails_in_synthesize_without_an_audit_call(
             LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
         let semaphore = Arc::new(Semaphore::new(2));
         let err = run_workflow(
-            &client,
-            &semaphore,
-            &SkillRegistry::builtin(),
-            tmp.path(),
-            "i",
+            &RunCtx {
+                llm: &client,
+                sem: &semaphore,
+                book: &Book::builtin(),
+                vault_dir: tmp.path(),
+                idea_slug: "i",
+                budget: ContextBudget::new(4096),
+                audit_on: audit,
+                related: &|_| String::new(),
+                progress: &|_: &str| {},
+            },
             "interrogate",
-            ContextBudget::new(4096),
-            audit,
-            &|_| String::new(),
-            &|_: &str| {},
         )
         .await
         .unwrap_err();

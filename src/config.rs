@@ -85,6 +85,10 @@ pub struct Config {
     /// `<vault_dir>/.skills` — host-persistent like the other vault dotfiles and invisible to the
     /// idea walker (no `idea.md`). App config, NOT vault truth: it is never indexed.
     pub skills_dir: PathBuf,
+    /// `IDEA_VAULT_WORKFLOWS_DIR`: where owner-authored workflow files live (ADR-0035). Defaults
+    /// to `<vault_dir>/.workflows` — a vault dotdir like `.skills`, so reindex never walks it.
+    /// App config, NOT vault truth: it is never indexed.
+    pub workflows_dir: PathBuf,
     /// `IDEA_VAULT_MCP_TOKEN`: the Bearer token that gates the **inbound** MCP server at
     /// `/api/mcp` (docs/adr/0024) — not to be confused with [`Config::mcp_config_path`], which is
     /// the *outbound* registry of MCP servers idea-vault calls. `None` (unset, or set but blank)
@@ -138,6 +142,8 @@ const MCP_CONFIG_FILENAME: &str = ".mcp-servers.json";
 const SOURCES_CONFIG_FILENAME: &str = ".sources.json";
 /// Default owner-skills directory, joined onto the vault dir (same dotfile rationale).
 const SKILLS_DIRNAME: &str = ".skills";
+/// Default owner workflows directory name inside the vault (ADR-0035).
+const WORKFLOWS_DIRNAME: &str = ".workflows";
 /// Clamp band for a nonzero context-window override (tokens): below 1k is useless, above 2M is
 /// beyond any supported model (the claude 1M window fits comfortably).
 pub const CTX_TOKENS_MIN: usize = 1_024;
@@ -269,6 +275,12 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| vault_dir.join(SKILLS_DIRNAME));
 
+        // Owner workflow files: beside the owner skills, for the same reason.
+        let workflows_dir = lookup("IDEA_VAULT_WORKFLOWS_DIR")
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| vault_dir.join(WORKFLOWS_DIRNAME));
+
         // Inbound MCP server gate (docs/adr/0024): unset or blank leaves the feature unmounted.
         let mcp_server_token = lookup("IDEA_VAULT_MCP_TOKEN").filter(|s| !s.trim().is_empty());
 
@@ -313,6 +325,7 @@ impl Config {
             sources_dir,
             sources_applied,
             skills_dir,
+            workflows_dir,
             mcp_server_token,
         }
     }

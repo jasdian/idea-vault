@@ -413,18 +413,20 @@ pub fn finish_as(inputs: PlanInputs, mode: PlanMode) -> Result<Finished, Concept
 mod tests {
     use super::*;
     use crate::concepts::build_plan::gates::AuditedFinding;
-    use crate::concepts::workflows::builtin_workflows;
+    use crate::concepts::workflows::WorkflowRegistry;
     use crate::domain::evidence::CAPSTONE_TURNS;
 
     #[test]
     fn every_workflow_chaining_the_planner_is_a_capstone() {
-        for w in builtin_workflows() {
+        let skills = crate::concepts::skills::SkillRegistry::builtin();
+        for w in WorkflowRegistry::builtin(&skills).list() {
             let chains_planner = w.stages.iter().any(|s| {
-                matches!(s, crate::concepts::workflows::Stage::Chain(step) if step.skill == Some("build-prompt"))
+                matches!(s, crate::concepts::workflows::Stage::Chain(step) if step.skill.as_deref() == Some("build-prompt"))
             });
+            assert_eq!(chains_planner, w.capstone, "{}", w.name);
             if chains_planner {
                 assert!(
-                    CAPSTONE_TURNS.contains(&w.name),
+                    CAPSTONE_TURNS.contains(&w.name.as_str()),
                     "{} chains build-prompt",
                     w.name
                 );
