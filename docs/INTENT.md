@@ -14,7 +14,7 @@ if a successful same-repository `pull_request` run of `ci.yml` uploaded it and t
 - A pull request whose gate is green uploads one artifact named `gate-green-<tree>`, where `<tree>`
   is `git rev-parse 'HEAD^{tree}'` of the PR merge commit; a red gate uploads none.
 - A push to main whose commit tree equals a green, unexpired, same-repository `pull_request` run's
-  marker finishes CI green without running checkout, toolchain, cache, fetch or the gate, and its
+  marker finishes CI green after only the checkout (no toolchain, cache, fetch or gate), and its
   step summary links the pull-request run.
 - Any other push to main (one that changes `.github/workflows/`, since a PR that edits the
   workflow could drop the gate from its own run; no marker, an expired marker, a marker from a fork

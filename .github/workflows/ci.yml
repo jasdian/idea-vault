@@ -43,35 +43,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Full history: gate step 1 (intent freshness) and step 7 (honesty) diff against
+      # merge-base(HEAD, main), step 7 reads the base's scripts/check-invariants.sh, and the skip
+      # step below diffs the push locally. It runs on every event: it is cheap, and the skip
+      # decision needs it.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       # Push to main only, and never red: any error leaves `skip` false and the gate runs. Skips
       # only when the push leaves .github/workflows/ untouched (a PR that edits the workflow could
       # drop the gate from its own run and still upload a marker, so the gate's own definition is
-      # never trusted from a PR run) and an unexpired `gate-green-<tree>` artifact for this
-      # commit's tree came from a successful pull_request run of this workflow on a branch of this
-      # repository (fork runs execute the fork's own workflow file, so theirs never count). Every
-      # decision is logged, so a silent loss of the skip shows up in the step log.
+      # never trusted from a PR run; checked with a local git diff, which has no file cap) and an
+      # unexpired `gate-green-<tree>` artifact for this commit's tree came from a successful
+      # pull_request run of this workflow on a branch of this repository (fork runs execute the
+      # fork's own workflow file, so theirs never count). Every decision is logged, so a silent
+      # loss of the skip shows up in the step log.
       - name: Skip if this exact tree already passed the gate on its pull request
         id: tested
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
           api() { gh api "repos/$GITHUB_REPOSITORY/$1" --jq "$2"; }
           decide() {
-            local tree files runs run info path event conclusion repo url
+            local changed tree runs run same info path event conclusion repo url
             case "$BEFORE" in ''|*[!0]*) ;; *) echo "No previous main commit to compare against."; return 1 ;; esac
-            # The compare API lists at most 300 files: a full page could hide a workflow change.
-            files=$(api "compare/$BEFORE...$SHA" '.files | length, (.[].filename)') ||
-              { echo "Compare $BEFORE...$SHA failed."; return 1; }
-            if [ "$(head -n1 <<<"$files")" -ge 300 ]; then
-              echo "The push changes 300 or more files; the workflow cannot be checked."; return 1
+            changed=$(git diff --name-only "$BEFORE" HEAD -- .github/workflows/) ||
+              { echo "Diffing $BEFORE..HEAD failed."; return 1; }
+            if [ -n "$changed" ]; then
+              echo "The push changes $(tr '\n' ' ' <<<"$changed"); a PR run of an edited workflow is not trusted."
+              return 1
             fi
-            if tail -n +2 <<<"$files" | grep -q '^\.github/workflows/'; then
-              echo "The push changes .github/workflows/; a PR run of an edited workflow is not trusted."; return 1
-            fi
-            tree=$(api "commits/$SHA" .commit.tree.sha) || { echo "Reading commit $SHA failed."; return 1; }
+            tree=$(git rev-parse 'HEAD^{tree}') || { echo "Reading the HEAD tree failed."; return 1; }
             runs=$(api "actions/artifacts?name=gate-green-$tree&per_page=100" \
               '.artifacts[] | select(.expired | not) | .workflow_run
                | "\(.id) \(.head_repository_id == .repository_id)"') ||
@@ -95,14 +101,6 @@ jobs:
           }
           if decide; then skip=true; else skip=false; echo "Running the gate."; fi
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
-
-      # Full history: gate step 1 (intent freshness) and step 7 (honesty) diff against
-      # merge-base(HEAD, main), and step 7 reads the base's scripts/check-invariants.sh.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        if: steps.tested.outputs.skip != 'true'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
 
       # Gate step 1 needs a local `main` ref. On a pull request the checkout is the PR merge
       # commit (detached HEAD, parents: main and the PR head), so merge-base(HEAD, main) is the
