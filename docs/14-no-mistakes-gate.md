@@ -24,7 +24,9 @@ no `--skip`, `--from` or environment seam; the only flags are `--list` (print th
 The gate is not local-only: CI (`.github/workflows/ci.yml`, docs/10 "CI, automated review and
 hotfix") runs this same script, unchanged, on every pull request and every push to main, after
 `cargo fetch --locked`. A green CI check therefore means all seven steps passed on the PR merge
-commit, with a local `main` ref for step 1.
+commit, with a local `main` ref for step 1. The one exception is a push to main whose tree is
+byte-identical to a tree that already went green on a same-repository pull request: CI skips the
+gate there, because those exact files already passed it (docs/10).
 
 `--install-hook` writes a `pre-push` hook (marker `# idea-vault gate pre-push hook v1`, mode
 0755) into `git rev-parse --git-path hooks`, which honours `core.hooksPath` and worktrees. It

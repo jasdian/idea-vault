@@ -190,7 +190,12 @@ its header comment.
   against `HEAD`). Every action is pinned to a commit, and the cargo cache is saved under the
   explicit `shared-key` `gate`, which the hotfix `diagnose` job restores. The push-to-main run
   is kept: it is the hotfix trigger, and it catches a semantic conflict when main moved under a
-  PR.
+  PR. A green merge does not pay for the gate twice, though: a green pull-request run uploads a
+  `gate-green-<tree sha>` artifact for the merge commit it gated, and a push to main whose commit
+  has that exact tree (main did not move under the PR) finds it in its first step and skips the
+  rest, green, with the PR run linked in the step summary. Only a successful `pull_request` run of
+  `ci.yml` from a branch of this repository counts, never a fork's; anything else, an expired
+  artifact or an API error included, runs the whole gate.
 - **`claude-review.yml`** runs when CI goes green on a same-repo PR by the owner or on a
   `hotfix/ci-*` PR from the hotfix workflow's bot (the `CI_HOTFIX_BOT` app if set, else
   github-actions). Claude posts one review comment, which is advisory for a bot-authored PR. Fork
