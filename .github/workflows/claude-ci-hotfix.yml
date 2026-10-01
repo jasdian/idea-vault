@@ -588,7 +588,7 @@ jobs:
               echo "CI has not run on this PR: it was opened with the workflow's GITHUB_TOKEN, which GitHub does not start workflows from. Approve the pending run, or close and reopen the PR, to start CI."
             fi
             echo
-            echo "CI on this PR runs the full no-mistakes gate (\`scripts/gate.sh\`), so a green check is gate-green. Gate step 1 needs this branch's own top block in \`docs/INTENT.md\`: if that step is red, write the block (moving the previous one to \`docs/intent-archive.md\`) and push before merging."
+            echo "CI on this PR runs the full no-mistakes gate (\`scripts/gate.sh\`), so a green check is gate-green. Gate step 1 needs this branch's own top block in \`docs/INTENT.md\`, which Claude was told to write: if that step is red, the block is missing or malformed, so write it by hand (moving the previous one to \`docs/intent-archive.md\`) and push before merging."
           } > "$body"
           draft=()
           if [ "$VERDICT" = draft ]; then draft=(--draft); fi

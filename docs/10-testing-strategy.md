@@ -233,10 +233,11 @@ its header comment.
   job's environment, which includes `CLAUDE_CODE_OAUTH_TOKEN`. The job holds no write token, and
   `publish` refuses any output that contains a token. If a leak is suspected, rotate the OAuth
   token.
-- **Gate-green in CI, intent by hand.** CI on a hotfix PR runs `scripts/gate.sh` like any PR, so
-  a green check is gate-green. Gate step 1 needs the branch's own top block in `docs/INTENT.md`,
-  which the hotfix does not write: if step 1 is red on the PR, write the block (moving the previous
-  one to `docs/intent-archive.md`) and push before merging.
+- **Gate-green in CI.** CI on a hotfix PR runs `scripts/gate.sh` like any PR, so a green check is
+  gate-green. Gate step 1 needs the branch's own top block in `docs/INTENT.md`, and the `diagnose`
+  prompt has Claude write it (moving the previous block to `docs/intent-archive.md`). Step 1 is red
+  on a hotfix PR only if that block is missing or malformed: then write it by hand and push before
+  merging.
 
 ## What is explicitly not tested by machines
 
