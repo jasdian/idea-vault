@@ -194,8 +194,9 @@ its header comment.
   `gate-green-<tree sha>` artifact for the merge commit it gated, and a push to main whose commit
   has that exact tree (main did not move under the PR) finds it in its first step and skips the
   rest, green, with the PR run linked in the step summary. Only a successful `pull_request` run of
-  `ci.yml` from a branch of this repository counts, never a fork's; anything else, an expired
-  artifact or an API error included, runs the whole gate.
+  `ci.yml` from a branch of this repository counts, never a fork's, and never for a push that
+  changes `.github/workflows/` (a PR that edits the workflow could drop the gate from its own run);
+  anything else, an expired artifact or an API error included, runs the whole gate.
 - **`claude-review.yml`** runs when CI goes green on a same-repo PR by the owner or on a
   `hotfix/ci-*` PR from the hotfix workflow's bot (the `CI_HOTFIX_BOT` app if set, else
   github-actions). Claude posts one review comment, which is advisory for a bot-authored PR. Fork

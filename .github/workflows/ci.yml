@@ -12,8 +12,8 @@ name: CI
 # named `gate-green-<tree sha>` (the tree of the PR merge commit it gated). A push to main whose
 # commit has that exact tree (the usual merge: main did not move under the PR) finds the artifact
 # in its first step and skips the rest: those bytes already passed the gate. Every other push to
-# main (main moved under the PR, a fork PR, a direct push, an expired artifact, an API error) runs
-# the whole gate, so the semantic-conflict catch and the hotfix trigger stay intact.
+# main (main moved under the PR, a push that changes .github/workflows/, a fork PR, a direct push,
+# an expired artifact, an API error) runs the whole gate, so the semantic-conflict catch and the hotfix trigger stay intact.
 #
 # One job, deliberately: the gate is one fixed pipeline, and a second job would repeat the
 # checkout, toolchain install, cache restore and compile for nothing. The workflow name `CI` is
@@ -44,36 +44,56 @@ jobs:
     timeout-minutes: 30
     steps:
       # Push to main only, and never red: any error leaves `skip` false and the gate runs. Skips
-      # only on an unexpired `gate-green-<tree>` artifact for this commit's tree that a successful
-      # pull_request run of this workflow uploaded from a branch of this repository (fork runs
-      # execute the fork's own workflow file, so their artifacts are never trusted).
+      # only when the push leaves .github/workflows/ untouched (a PR that edits the workflow could
+      # drop the gate from its own run and still upload a marker, so the gate's own definition is
+      # never trusted from a PR run) and an unexpired `gate-green-<tree>` artifact for this
+      # commit's tree came from a successful pull_request run of this workflow on a branch of this
+      # repository (fork runs execute the fork's own workflow file, so theirs never count). Every
+      # decision is logged, so a silent loss of the skip shows up in the step log.
       - name: Skip if this exact tree already passed the gate on its pull request
         id: tested
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          skip=false
-          if tree=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA" --jq .commit.tree.sha) &&
-             runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=gate-green-$tree&per_page=100" \
-               --jq '.artifacts[] | select(.expired | not)
-                     | select(.workflow_run.head_repository_id == .workflow_run.repository_id)
-                     | .workflow_run.id'); then
-            for run in $runs; do
-              info=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" \
-                --jq '"\(.path) \(.event) \(.conclusion) \(.head_repository.full_name) \(.html_url)"') || continue
+          api() { gh api "repos/$GITHUB_REPOSITORY/$1" --jq "$2"; }
+          decide() {
+            local tree files runs run info path event conclusion repo url
+            case "$BEFORE" in ''|*[!0]*) ;; *) echo "No previous main commit to compare against."; return 1 ;; esac
+            # The compare API lists at most 300 files: a full page could hide a workflow change.
+            files=$(api "compare/$BEFORE...$SHA" '.files | length, (.[].filename)') ||
+              { echo "Compare $BEFORE...$SHA failed."; return 1; }
+            if [ "$(head -n1 <<<"$files")" -ge 300 ]; then
+              echo "The push changes 300 or more files; the workflow cannot be checked."; return 1
+            fi
+            if tail -n +2 <<<"$files" | grep -q '^\.github/workflows/'; then
+              echo "The push changes .github/workflows/; a PR run of an edited workflow is not trusted."; return 1
+            fi
+            tree=$(api "commits/$SHA" .commit.tree.sha) || { echo "Reading commit $SHA failed."; return 1; }
+            runs=$(api "actions/artifacts?name=gate-green-$tree&per_page=100" \
+              '.artifacts[] | select(.expired | not) | .workflow_run
+               | "\(.id) \(.head_repository_id == .repository_id)"') ||
+              { echo "Listing gate-green-$tree artifacts failed."; return 1; }
+            [ -n "$runs" ] || { echo "No unexpired gate-green-$tree artifact."; return 1; }
+            while read -r run same; do
+              if [ "$same" != true ]; then echo "Run $run: from a fork, not trusted."; continue; fi
+              info=$(api "actions/runs/$run" \
+                '"\(.path) \(.event) \(.conclusion) \(.head_repository.full_name) \(.html_url)"') ||
+                { echo "Run $run: reading it failed."; continue; }
               read -r path event conclusion repo url <<<"$info"
               if [ "${path%%@*}" = .github/workflows/ci.yml ] && [ "$event" = pull_request ] &&
                  [ "$conclusion" = success ] && [ "$repo" = "$GITHUB_REPOSITORY" ]; then
-                skip=true
                 echo "Tree $tree already passed the gate on its pull request ($url); skipping the gate." |
                   tee -a "$GITHUB_STEP_SUMMARY"
-                break
+                return 0
               fi
-            done
-          fi
-          [ "$skip" = true ] || echo "No green pull-request gate for this tree; running the gate."
+              echo "Run $run: path=$path event=$event conclusion=$conclusion repo=$repo; not a green PR gate."
+            done <<<"$runs"
+            return 1
+          }
+          if decide; then skip=true; else skip=false; echo "Running the gate."; fi
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
       # Full history: gate step 1 (intent freshness) and step 7 (honesty) diff against
