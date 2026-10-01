@@ -8,6 +8,13 @@ name: CI
 # shell fixture (no live Ollama or claude CLI), SQLite is vendored (`rusqlite` bundled), and the
 # HTTP client uses rustls — so a stock Ubuntu runner with a Rust toolchain is all that's needed.
 #
+# A green merge does not run the gate twice. A pull-request run that ends green uploads an artifact
+# named `gate-green-<tree sha>` (the tree of the PR merge commit it gated). A push to main whose
+# commit has that exact tree (the usual merge: main did not move under the PR) finds the artifact
+# in its first step and skips the rest: those bytes already passed the gate. Every other push to
+# main (main moved under the PR, a push that changes .github/workflows/, a fork PR, a direct push,
+# an expired artifact, an API error) runs the whole gate, so the semantic-conflict catch and the hotfix trigger stay intact.
+#
 # One job, deliberately: the gate is one fixed pipeline, and a second job would repeat the
 # checkout, toolchain install, cache restore and compile for nothing. The workflow name `CI` is
 # matched by claude-review.yml and claude-ci-hotfix.yml (`workflow_run`); keep it.
@@ -24,6 +31,8 @@ concurrency:
 
 permissions:
   contents: read
+  # A push run lists artifacts and reads runs to find a green pull-request gate for its tree.
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,11 +44,63 @@ jobs:
     timeout-minutes: 30
     steps:
       # Full history: gate step 1 (intent freshness) and step 7 (honesty) diff against
-      # merge-base(HEAD, main), and step 7 reads the base's scripts/check-invariants.sh.
+      # merge-base(HEAD, main), step 7 reads the base's scripts/check-invariants.sh, and the skip
+      # step below diffs the push locally. It runs on every event: it is cheap, and the skip
+      # decision needs it.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Push to main only, and never red: any error leaves `skip` false and the gate runs. Skips
+      # only when the push leaves .github/workflows/ untouched (a PR that edits the workflow could
+      # drop the gate from its own run and still upload a marker, so the gate's own definition is
+      # never trusted from a PR run; checked with a local git diff, which has no file cap) and an
+      # unexpired `gate-green-<tree>` artifact for this commit's tree came from a successful
+      # pull_request run of this workflow on a branch of this repository (fork runs execute the
+      # fork's own workflow file, so theirs never count). Every decision is logged, so a silent
+      # loss of the skip shows up in the step log.
+      - name: Skip if this exact tree already passed the gate on its pull request
+        id: tested
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          api() { gh api "repos/$GITHUB_REPOSITORY/$1" --jq "$2"; }
+          decide() {
+            local changed tree runs run same info path event conclusion repo url
+            case "$BEFORE" in ''|*[!0]*) ;; *) echo "No previous main commit to compare against."; return 1 ;; esac
+            changed=$(git diff --name-only "$BEFORE" HEAD -- .github/workflows/) ||
+              { echo "Diffing $BEFORE..HEAD failed."; return 1; }
+            if [ -n "$changed" ]; then
+              echo "The push changes $(tr '\n' ' ' <<<"$changed"); a PR run of an edited workflow is not trusted."
+              return 1
+            fi
+            tree=$(git rev-parse 'HEAD^{tree}') || { echo "Reading the HEAD tree failed."; return 1; }
+            runs=$(api "actions/artifacts?name=gate-green-$tree&per_page=100" \
+              '.artifacts[] | select(.expired | not) | .workflow_run
+               | "\(.id) \(.head_repository_id == .repository_id)"') ||
+              { echo "Listing gate-green-$tree artifacts failed."; return 1; }
+            [ -n "$runs" ] || { echo "No unexpired gate-green-$tree artifact."; return 1; }
+            while read -r run same; do
+              if [ "$same" != true ]; then echo "Run $run: from a fork, not trusted."; continue; fi
+              info=$(api "actions/runs/$run" \
+                '"\(.path) \(.event) \(.conclusion) \(.head_repository.full_name) \(.html_url)"') ||
+                { echo "Run $run: reading it failed."; continue; }
+              read -r path event conclusion repo url <<<"$info"
+              if [ "${path%%@*}" = .github/workflows/ci.yml ] && [ "$event" = pull_request ] &&
+                 [ "$conclusion" = success ] && [ "$repo" = "$GITHUB_REPOSITORY" ]; then
+                echo "Tree $tree already passed the gate on its pull request ($url); skipping the gate." |
+                  tee -a "$GITHUB_STEP_SUMMARY"
+                return 0
+              fi
+              echo "Run $run: path=$path event=$event conclusion=$conclusion repo=$repo; not a green PR gate."
+            done <<<"$runs"
+            return 1
+          }
+          if decide; then skip=true; else skip=false; echo "Running the gate."; fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
       # Gate step 1 needs a local `main` ref. On a pull request the checkout is the PR merge
       # commit (detached HEAD, parents: main and the PR head), so merge-base(HEAD, main) is the
@@ -52,6 +113,7 @@ jobs:
         run: git branch --no-track main origin/main
 
       - name: Install Rust toolchain
+        if: steps.tested.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
@@ -60,6 +122,7 @@ jobs:
       # The explicit shared-key replaces the default job-id key, so claude-ci-hotfix.yml's
       # `diagnose` job (restore only) hits the cache this job saves.
       - name: Cache cargo + target
+        if: steps.tested.outputs.skip != 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: gate
@@ -67,7 +130,29 @@ jobs:
       # --locked: fail if Cargo.lock is stale rather than silently resolving new versions. The
       # gate's own cargo calls then run against the locked, already fetched set.
       - name: Fetch dependencies (locked)
+        if: steps.tested.outputs.skip != 'true'
         run: cargo fetch --locked
 
       - name: Gate
+        if: steps.tested.outputs.skip != 'true'
         run: bash scripts/gate.sh
+
+      # Pull request only, and only after a green gate (steps run on success by default): record
+      # the gated tree so the push to main that merges these exact bytes can skip the gate.
+      - name: Record the gated tree
+        id: gated
+        if: github.event_name == 'pull_request'
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          mkdir -p "$RUNNER_TEMP/gate-green"
+          echo "$tree" > "$RUNNER_TEMP/gate-green/tree"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the gate-green marker
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-green-${{ steps.gated.outputs.tree }}
+          path: ${{ runner.temp }}/gate-green/tree
+          retention-days: 30
+          if-no-files-found: error
