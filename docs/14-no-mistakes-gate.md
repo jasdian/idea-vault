@@ -21,6 +21,11 @@ no `--skip`, `--from` or environment seam; the only flags are `--list` (print th
 | 7 | honesty | On a branch, every changed fixture or snapshot, rising `*_FLOOR`, and removed or downgraded catalog id since the merge-base is listed as `- <path or id>: <why>` under `## Expectation changes` in the top intent block (an item ending in `/` covers a directory) |
 | — | budget | Not a step: there is no metered spend (Ollama is local, claude runs on a subscription); the runtime cap is the workflow CallBudget (ADR-0034) |
 
+The gate is not local-only: CI (`.github/workflows/ci.yml`, docs/10 "CI, automated review and
+hotfix") runs this same script, unchanged, on every pull request and every push to main, after
+`cargo fetch --locked`. A green CI check therefore means all seven steps passed on the PR merge
+commit, with a local `main` ref for step 1.
+
 `--install-hook` writes a `pre-push` hook (marker `# idea-vault gate pre-push hook v1`, mode
 0755) into `git rev-parse --git-path hooks`, which honours `core.hooksPath` and worktrees. It
 re-installs over its own hook and refuses one without the marker. The hook runs

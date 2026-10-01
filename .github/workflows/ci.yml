@@ -1,9 +1,16 @@
 name: CI
 
-# Build, test, and lint the crate on every pull request and every push to main.
+# Runs the no-mistakes gate (`scripts/gate.sh`, ADR-0041, docs/14-no-mistakes-gate.md) on every
+# pull request and every push to main: intent (+freshness), the strict invariant catalog, build,
+# tests plus `validate` on a golden-vault copy, fmt, clippy -D warnings, and honesty (declared
+# expectation changes, parser corpus replay). A green check means the gate is green, nothing less.
 # The suite is self-contained: tests speak to an in-process mock HTTP server and a fake `claude`
 # shell fixture (no live Ollama or claude CLI), SQLite is vendored (`rusqlite` bundled), and the
 # HTTP client uses rustls — so a stock Ubuntu runner with a Rust toolchain is all that's needed.
+#
+# One job, deliberately: the gate is one fixed pipeline, and a second job would repeat the
+# checkout, toolchain install, cache restore and compile for nothing. The workflow name `CI` is
+# matched by claude-review.yml and claude-ci-hotfix.yml (`workflow_run`); keep it.
 
 on:
   push:
@@ -15,47 +22,52 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: build & test
+  gate:
+    name: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo + target
-        uses: Swatinem/rust-cache@v2
-
-      # --locked: fail if Cargo.lock is stale rather than silently resolving new versions.
-      # --all-targets: compile the lib, the binary, and the integration tests up front.
-      - name: Build
-        run: cargo build --locked --all-targets
-
-      - name: Test
-        run: cargo test --locked
-
-  lint:
-    name: fmt & clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Full history: gate step 1 (intent freshness) and step 7 (honesty) diff against
+      # merge-base(HEAD, main), and step 7 reads the base's scripts/check-invariants.sh.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Gate step 1 needs a local `main` ref. On a pull request the checkout is the PR merge
+      # commit (detached HEAD, parents: main and the PR head), so merge-base(HEAD, main) is the
+      # main side and the gate diffs the PR's changes, as it does on a local branch. On a push to
+      # main the checkout is branch `main` itself and the gate takes its on-main path (freshness
+      # skipped, honesty against HEAD). fetch-depth 0 already fetched every branch, so this is
+      # local and needs no credentials.
+      - name: Create the main ref for gate step 1
+        if: github.event_name == 'pull_request'
+        run: git branch --no-track main origin/main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
           components: rustfmt, clippy
 
+      # The explicit shared-key replaces the default job-id key, so claude-ci-hotfix.yml's
+      # `diagnose` job (restore only) hits the cache this job saves.
       - name: Cache cargo + target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: gate
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+      # --locked: fail if Cargo.lock is stale rather than silently resolving new versions. The
+      # gate's own cargo calls then run against the locked, already fetched set.
+      - name: Fetch dependencies (locked)
+        run: cargo fetch --locked
 
-      # The crate's stated bar (CLAUDE.md: "cargo fmt && cargo clippy before finishing a change").
-      - name: Clippy (deny warnings)
-        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Gate
+        run: bash scripts/gate.sh
