@@ -23,7 +23,8 @@ unversioned (ADR-0041). docs/12 and CLAUDE.md say how a session uses them.
   Where the sparse index is reachable, it uses it unchanged.
 - `bash scripts/session-up.sh` boots the app on `127.0.0.1:3000` on the claude-code backend with
   `/api/mcp` gated by a generated token kept only under the ignored `target/session/`. Run again,
-  it reuses the live instance. `--status` reports it and `--down` stops it.
+  it reuses the live instance only when that instance accepts the session's MCP token, and fails
+  with the cause otherwise. `--status` reports it. `--down` stops only the process it started.
 - `python3 scripts/session-mcp.py call <long-running tool>` returns the job's rendered result, not
   the "still running" note, with exactly one job and one exchange in `conversation.md` per call.
   An identical repeat replays that result.
