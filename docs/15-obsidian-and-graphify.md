@@ -306,19 +306,51 @@ This is the one place a graph might shrink the foil's context. Prove it before r
 Without Graphify, Layer 2's steps 1–2 still apply. A hand-written index note (an MOC) in your
 notes is the zero-dependency map.
 
-### Layer 3 — Graphify on this codebase, for Claude Code development sessions
+### Layer 3 — Graphify on a large codebase (this one or any repository you work in)
 
-This is offline and deterministic (tree-sitter only), and helps any agent that edits idea-vault
-itself:
+This is where Graphify's numbers are strongest. Code is parsed locally with tree-sitter, so a
+`--code-only` build is offline, deterministic and free. No model sees the code, and there are no
+INFERRED edges. A large repo does not fit in any context window. For scale, idea-vault's own `src/`
+is 100 Rust files and 57k lines (~2.2 MB, roughly 550k tokens), so an agent can only ever read a
+slice of it. A map tells it which slice.
+
+**What a map of a real repo looks like** (Graphify's committed case study `worked/rsl-siege-manager`,
+a Python and TypeScript monorepo, not re-run here):
+
+- **Output:** 1,886 nodes, 3,876 edges and 141 communities, built in about 10 minutes at $0.
+- **Size:** the entry map `GRAPH_REPORT.md` is **36 KB (~9k tokens)**. `graph.json` is **2 MB**
+  and is queried, never read whole.
+- **Its own review found:**
+  - test fixtures dominate "core abstractions" when tests are included;
+  - god nodes skew to entry points and utilities (a one-line `cn()` helper ranked 5th);
+  - community cohesion was uniformly low;
+  - that run still carried 10% INFERRED edges (average confidence 0.62).
+
+So exclude tests and generated code, and use `--code-only`.
 
 ```bash
-graphify extract . --code-only --out target/graphify   # target/ is already ignored
-graphify install --project                             # optional: /graphify skill in this repo's .claude/ (unversioned, ADR-0041)
+cd <repo>
+printf 'tests/\n**/*_test.*\ntarget/\nnode_modules/\ndist/\n*.min.js\n' > .graphifyignore   # gitignore syntax
+GRAPHIFY_QUERY_LOG_DISABLE=1 graphify extract . --code-only --out target/graphify   # any ignored dir works
+graphify hook install          # optional: rebuild on commit and checkout; run `graphify update .` after `git pull`
+graphify install --project     # optional: the /graphify skill for this repo (in idea-vault, .claude/ stays unversioned, ADR-0041)
 ```
 
-Ask Claude Code to read `target/graphify/GRAPH_REPORT.md` and use `/graphify path A B` before
-opening files. Rebuild after pulls (`graphify update .`). The graph is a hint: the gate, not the
-graph, decides whether a change is right.
+**How a coding session uses it:** read `GRAPH_REPORT.md` once (the god nodes and communities are
+the module map), then `/graphify path A B` or `/graphify explain X` to find the few files a change
+touches. Open only those, then grep around them. The map tells the agent where to look. The
+compiler, tests and gate decide whether the change is right.
+
+**What Obsidian adds for code:** a human view, not agent tokens.
+`graphify export obsidian --dir ~/vaults/<repo>-map` (a *separate* vault, never `vault/`) gives one
+browsable note per module or symbol and a `graph.canvas`. Keep your own architecture notes and
+decisions in that Obsidian vault. Attach them to idea-vault ideas as a source (Layer 2) when you
+brainstorm about that codebase.
+
+**Measured here: not yet.** PyPI is blocked in the environment this guide was written in, so the
+numbers above are Graphify's own committed artifacts. To measure on your repo, compare
+`wc -c target/graphify/GRAPH_REPORT.md` against what your agent reads per task today (a Claude
+Code session's `/cost`, or idea-vault's journal snippet in Layer 2).
 
 ### Layer 4 — Obsidian in your own Claude Code session (optional)
 
@@ -343,6 +375,7 @@ ideation loop.
 - [ ] Every `graphify extract` goes through a wrapper that hard-codes `--backend ollama` (or a deliberate `claude-cli`), or uses `--code-only`.
 - [ ] Graphify output lives beside a source, never inside it or inside `vault/`.
 - [ ] Layer 2's map is kept only after the step 2 baseline and the step 6 recall check.
+- [ ] A code map (Layer 3) is `--code-only` with tests and generated code in `.graphifyignore`.
 - [ ] `GRAPHIFY_QUERY_LOG_DISABLE=1` is set where queries could leak note titles into a log.
 - [ ] The vault's own `.gitignore` covers `.obsidian/workspace*.json`, `.smart-env/` and `graphify-out/`.
 
