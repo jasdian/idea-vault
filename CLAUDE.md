@@ -187,9 +187,20 @@ bash scripts/gate.sh      # the fixed 7-step shipping gate, no skip: intent (+fr
 bash scripts/gate.sh --list           # print the step table
 bash scripts/gate.sh --install-hook   # install the pre-push hook (runs check-invariants.sh --strict); use alone
 bash scripts/check-invariants.sh --list   # the invariant catalog: id|severity|ADR/D|zero-state
+bash scripts/session-up.sh [--status|--down]        # agent session: build if needed, boot on the claude-code backend with /api/mcp on
+python3 scripts/session-mcp.py call <tool> '<json>'  # drive it over MCP (tools: list them with `tools`); waits out long-running tools
 cargo run -- validate      # read-only vault check (IDEA_VAULT_VAULT_DIR): frontmatter, MEMORY.md coverage, duplicate memories; exit 1 on any finding
 cargo run -- regrade [--idea <slug>] [--parser audit|facts|contract|plan-gates] [--strict]   # replay today's parsers over vault/*/.runs (read-only; ADR-0038)
 ```
+
+**Agent sessions (Claude Code on the web).** When the owner asks to brainstorm "with idea vault" in
+a session, run the app itself; don't re-create its prompts by hand. Boot it with
+`scripts/session-up.sh` and drive it with `scripts/session-mcp.py`: `create_idea`, then the
+owner's material as `chat` messages, `run_skill`/`run_swarm`/`run_workflow`, and `store_idea`.
+Run one long call per idea at a time, in the background. If `index.crates.io` is blocked, cargo
+needs `CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git CARGO_NET_GIT_FETCH_WITH_CLI=true`;
+`scripts/session-build.sh` sets them itself. Never commit `vault/`. See
+[docs/12-deployment.md](docs/12-deployment.md) "Agent sessions".
 
 Ollama must be running locally (`ollama serve`, model pulled) for AI features to work; the app
 should detect its absence and surface a clear UI state rather than hanging.

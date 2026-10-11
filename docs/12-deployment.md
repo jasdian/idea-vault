@@ -464,6 +464,39 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
   prevent, and the Sources page's **Missing** pill pre-warns before you ever re-`up`. Recovery:
   fix the path (or remove the source on `/sources`), then `docker compose up -d` again.
 
+## Agent sessions (Claude Code on the web)
+
+A cloud agent session runs idea-vault the way the owner does on a laptop: no containers, the
+claude-code backend (the session's own authenticated `claude` CLI, under the ADR-0039 lockdown),
+and the inbound MCP server (docs/13, [ADR-0024](./adr/0024-mcp-server-inbound.md)) as the
+control surface instead of the HTMX UI. Three scripts are the whole integration. They add no route,
+no config key and no app code, and they keep `.claude/` unversioned
+([ADR-0041](./adr/0041-no-mistakes-gate.md)):
+
+| Script | Role |
+|---|---|
+| [`scripts/session-build.sh`](../scripts/session-build.sh) | `cargo fetch --locked`, then `cargo build --release --locked`. If the sparse index (`index.crates.io`) is unreachable, as a cloud environment's network policy can make it, it switches to the git index on GitHub (`CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git`, `CARGO_NET_GIT_FETCH_WITH_CLI=true`). Crate files still come from `static.crates.io`. |
+| [`scripts/session-up.sh`](../scripts/session-up.sh) | Runs the build if the binary is missing. Starts it detached on `127.0.0.1:$IDEA_VAULT_SESSION_PORT` (default 3000), with `IDEA_VAULT_LLM_BACKEND=claude-code` unless overridden, and waits for `/admin/health`. Generates the MCP token into `target/session/mcp-token` (mode 600; `target/` is ignored). `--status` and `--down` check or stop it; a healthy instance is reused. |
+| [`scripts/session-mcp.py`](../scripts/session-mcp.py) | A stdlib-only Streamable-HTTP MCP client: `tools`, and `call <tool> '<json>'`. On a long-running tool's "still running" note (ADR-0028) it repeats the identical call until the result lands. The repeat reattaches to the same job and never starts a second one (ADR-0033). It bypasses any HTTP proxy, since the endpoint is loopback. |
+
+```bash
+bash scripts/session-up.sh
+python3 scripts/session-mcp.py call create_idea '{"title": "…", "body": "…"}'
+python3 scripts/session-mcp.py call run_workflow '{"slug": "…", "name": "interrogate"}'
+python3 scripts/session-mcp.py call store_idea '{"slug": "…"}'
+```
+
+The first boot in a fresh container compiles the release build (a few minutes). To have it ready
+before the session starts, have the cloud environment's **Setup script** (environment menu → Edit)
+run `bash scripts/session-build.sh` from the checkout. Nothing breaks without it.
+
+The session's own `cargo test` or `scripts/gate.sh` needs the same index fallback. Export the two
+`CARGO_*` variables above when `index.crates.io` is unreachable. The claude child needs nothing
+beyond the fixed `CLAUDE_ENV_PASS`: a `claude -p` run with only the pass-listed variables
+authenticated in a cloud session, so `IDEA_VAULT_CLAUDE_ENV_PASS` stays unset. The vault stays the owner's gitignored content
+([ADR-0019](./adr/0019-vault-mount-verified-not-created.md)), and a cloud container is ephemeral,
+so whatever a session keeps has to leave the container through its own channel, never through git.
+
 ## Files
 
 | File | Purpose |
