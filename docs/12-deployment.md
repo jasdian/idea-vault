@@ -514,6 +514,7 @@ so whatever a session keeps has to leave the container through its own channel, 
 
 ## Related
 
+- [15-obsidian-and-graphify](./15-obsidian-and-graphify.md): Obsidian over the vault, and Graphify maps of reference sources, with setup ([ADR-0043](./adr/0043-obsidian-and-graphify-as-derived-layers.md), Proposed).
 - [ADR-0008](./adr/0008-containerized-local-deployment.md) — the containerization decision + alternatives.
 - [ADR-0003](./adr/0003-ollama-local-only-ai.md) — why Ollama; the URL is now env-driven.
 - [ADR-0013](./adr/0013-containerized-claude-code.md) — claude-code in containers + rejected alternatives.

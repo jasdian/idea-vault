@@ -68,7 +68,8 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [10-testing-strategy](./10-testing-strategy.md) | Invariants + test approach, parser corpus and regrade, the gate under test | D40 |
 | [14-no-mistakes-gate](./14-no-mistakes-gate.md) | The fixed seven-step shipping gate, the invariant catalog, the findings protocol, the checklist | D41 |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0042 | — |
+| [15-obsidian-and-graphify](./15-obsidian-and-graphify.md) | Obsidian as a view-only graph over the vault, Graphify maps of reference sources and the codebase: findings and setup | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0043 | — |
 
 ## Locked decisions (at a glance)
 
