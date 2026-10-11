@@ -18,6 +18,8 @@ Endpoint and token come from IDEA_VAULT_SESSION_URL (default http://127.0.0.1:30
 IDEA_VAULT_MCP_TOKEN, which scripts/session-up.sh writes. The token file
 target/session/mcp-token is the fallback.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os

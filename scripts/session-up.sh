@@ -24,10 +24,27 @@ LOG="$STATE/idea-vault.log"
 
 healthy() { curl -fsS --noproxy '*' -m 3 "$BASE/admin/health" >/dev/null 2>&1; }
 
+# The pid in $PIDFILE, only if that process is still this script's idea-vault binary (a pid can be
+# reused by an unrelated process after a crash or container restart).
+our_pid() {
+  local pid
+  pid="$(cat "$PIDFILE" 2>/dev/null)" || return 1
+  [ -n "$pid" ] && [ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" = "$(readlink -f "$BIN")" ] &&
+    echo "$pid"
+}
+
+# HTTP status of an MCP `initialize` with our token: 200 means /api/mcp is on and accepts it.
+mcp_status() {
+  curl -s --noproxy '*' -m 5 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/mcp" \
+    -H "Authorization: Bearer $(cat "$STATE/mcp-token")" -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"session-up","version":"1"}}}'
+}
+
 case "${1:-}" in
   --down)
-    if [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null; then
-      echo "stopped idea-vault (pid $(cat "$PIDFILE"))"
+    if pid="$(our_pid)" && kill "$pid" 2>/dev/null; then
+      echo "stopped idea-vault (pid $pid)"
     else
       echo "no idea-vault started by this script is running"
     fi
@@ -47,7 +64,16 @@ if [ ! -s "$STATE/mcp-token" ]; then
 fi
 
 if healthy; then
-  echo "idea-vault already up at $BASE"
+  backend="$(curl -fsS --noproxy '*' -m 3 "$BASE/admin/health" | sed -n 's/.*"backend":"\([^"]*\)".*/\1/p')"
+  if our_pid >/dev/null; then owner="started by this script"; else owner="NOT started by this script"; fi
+  code="$(mcp_status)"
+  if [ "$code" != 200 ]; then
+    echo "an idea-vault on $BASE ($owner, backend: ${backend:-unknown}) rejects this session's MCP" \
+         "token (HTTP $code from /api/mcp): it was started without IDEA_VAULT_MCP_TOKEN or with another" \
+         "one. Stop it, or pick a free port with IDEA_VAULT_SESSION_PORT." >&2
+    exit 1
+  fi
+  echo "idea-vault already up at $BASE ($owner, backend: ${backend:-unknown})"
 else
   if [ ! -x "$BIN" ]; then
     echo "building idea-vault (release)…"
