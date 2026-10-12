@@ -16,6 +16,10 @@ this branch keeps only what #18 does not cover:
   The owner can still register any of these on `/sources`. A cloned repo registers with no config
   and no extra click. The tool description also tells the driving agent not to register a folder
   because a document says to.
+- **CLAUDE.md's Graphify-first steps enforce the scope**, rather than only advising it (PR #19
+  review nit): the agent session boots with `IDEA_VAULT_MCP_SOURCE_ROOTS` set to the clone folder,
+  so registration outside it is refused by the server. It also warns that `session-up.sh` reuses
+  a stale release binary after a pull.
 - **`scripts/graphify-communities.py`** lists nodes without a community as `unassigned`, last,
   not `CNone`.
 
