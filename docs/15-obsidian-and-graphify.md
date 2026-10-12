@@ -121,6 +121,29 @@ there (setup step 2.3).
   - The LLM can invent nodes (now flagged as unverified, not dropped).
   - Recent releases fixed same-basename merges and the graph shrinking after extractor failures.
 
+#### Re-checked by running it (v0.9.87, 2026-10-12)
+
+Installed from PyPI (`uv tool install graphifyy`) and run on a 33 MB C/Python/TypeScript repo
+(JustVugg/colibri). Five things differ from a reading of the source, and the setup below follows
+the run:
+
+- **`extract` stops at `graph.json`.** It writes no `GRAPH_REPORT.md` in any mode, and prints
+  "next: run `graphify cluster-only <dir>`". The report comes from `cluster-only`.
+- **`--out DIR` writes `DIR/graphify-out/`**, not `DIR` itself. The report is at
+  `DIR/graphify-out/GRAPH_REPORT.md`.
+- **Community naming is a second LLM pass with its own backend choice.** `cluster-only` and
+  `label` "auto-detect from API keys" unless given `--backend`, so a `--code-only` build can still
+  reach a cloud model at this step. `--no-label` keeps it off any model, but leaves every
+  community named "Community N" (the report's 299-line hub list on colibri says nothing).
+  `scripts/graphify-communities.py` names them by their dominant source files instead, with no
+  model call.
+- **`--code-only` still yields INFERRED edges.** Cross-file call resolution is guessed: 4,010 of
+  30,942 edges (13%, mean confidence 0.85) on colibri. Read them as leads, as for any INFERRED
+  edge. They come from tree-sitter heuristics, not a model, so the build stays offline.
+- **`--backend claude-cli` works on `extract`** although `extract --help` lists only
+  `gemini|kimi|claude|openai|deepseek|ollama`. Its fixed prompt is large: one one-line markdown
+  file cost 35,633 input tokens.
+
 ### What follows for idea-vault
 
 1. **A single idea is small. That is where Graphify's own numbers show no gain**, and where
@@ -272,22 +295,16 @@ This is the one place a graph might shrink the foil's context. Prove it before r
    foil reads less per turn than a `GRAPH_REPORT.md` of your notes would cost, **stop here**: the
    map adds tokens, so keep it as a browsing aid only.
 3. **Build the map next to the notes, not inside them.** The source is read-only (ADR-0021), and a
-   map written into it would be fed back into the next build. Use a wrapper that hard-codes a
-   local backend and refuses to run with a cloud key in the environment:
+   map written into it would be fed back into the next build. Build it with
+   [`scripts/graphify-map.sh`](../scripts/graphify-map.sh), the one place where the backend is
+   decided. It refuses to run with a cloud key in the environment, refuses a map dir inside the
+   source or inside `vault/`, accepts only `--backend ollama` or `--backend claude-cli`
+   (`--code-only` by default), clusters with `--no-label`, and writes `BUILT.txt` and a
+   deterministic `COMMUNITIES.md` next to `graphify-out/`:
 
    ```bash
-   # ~/.bashrc: one place where the backend is decided
-   graphify-map() {   # usage: graphify-map ~/notes ~/notes-map
-     for k in GEMINI_API_KEY GOOGLE_API_KEY MOONSHOT_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY \
-              DEEPSEEK_API_KEY AZURE_OPENAI_API_KEY; do
-       [ -n "${!k:-}" ] && { echo "refusing: $k is set (graphify would auto-pick a cloud backend)"; return 1; }
-     done
-     GRAPHIFY_QUERY_LOG_DISABLE=1 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://localhost:11434}" \
-       graphify extract "$1" --backend ollama --out "$2" &&
-     date -u +"built %Y-%m-%dT%H:%M:%SZ from $1" > "$2/BUILT.txt"
-   }
    uv tool install "graphifyy[ollama]"
-   graphify-map ~/notes ~/notes-map
+   bash scripts/graphify-map.sh ~/notes ~/notes-map --backend ollama   # Ollama from OLLAMA_BASE_URL, else IDEA_VAULT_OLLAMA_URL
    ```
 
    `--backend claude-cli` (your local `claude` binary on your subscription) also stays within
@@ -295,7 +312,7 @@ This is the one place a graph might shrink the foil's context. Prove it before r
    as a fallback for a slow Ollama build. For a sensitive vault, the answer is Ollama or no map.
 4. **Attach the map as a second source** (`notes-map` → `~/notes-map`) on the same idea.
 5. **Use it as an index, never a filter.** Put this once in the idea body, or say it in chat:
-   *"`notes-map/GRAPH_REPORT.md` is a map of my notes built on the date in `BUILT.txt`. Use it to
+   *"`notes-map/COMMUNITIES.md` and `notes-map/graphify-out/GRAPH_REPORT.md` are a map of my notes built on the date in `BUILT.txt`. Use it to
    find where to look, then still search `notes` directly. Notes missing from the map still exist.
    If `BUILT.txt` is older than a week, say so."* Small Ollama models follow this unreliably, so
    judge by recall, not by obedience.
@@ -312,8 +329,9 @@ notes is the zero-dependency map.
 ### Layer 3 — Graphify on a large codebase (this one or any repository you work in)
 
 This is where Graphify's numbers are strongest. Code is parsed locally with tree-sitter, so a
-`--code-only` build is offline, deterministic and free. No model sees the code, and there are no
-INFERRED edges. A large repo does not fit in any context window. For scale, idea-vault's own `src/`
+`--code-only` build is offline, deterministic and free. No model sees the code. Its INFERRED
+edges are tree-sitter guesses at cross-file calls (13% on colibri, below), not model judgements,
+and still only leads. A large repo does not fit in any context window. For scale, idea-vault's own `src/`
 is 100 Rust files and 57k lines (~2.2 MB, roughly 550k tokens), so an agent can only ever read a
 slice of it. A map tells it which slice.
 
@@ -334,13 +352,15 @@ So exclude tests and generated code, and use `--code-only`.
 ```bash
 cd <repo>
 printf 'tests/\n**/*_test.*\ntarget/\nnode_modules/\ndist/\n*.min.js\n' > .graphifyignore   # gitignore syntax
-GRAPHIFY_QUERY_LOG_DISABLE=1 graphify extract . --code-only --out target/graphify   # any ignored dir works
+ex="$(git rev-parse --git-path info/exclude)"                 # works in worktrees and submodules too
+grep -qxF .graphifyignore "$ex" 2>/dev/null || echo .graphifyignore >> "$ex"   # keep a clone you don't own clean
+bash <idea-vault>/scripts/graphify-map.sh . ../<repo>-map    # --code-only by default; the map goes beside the repo
 graphify hook install          # optional: rebuild on commit and checkout; run `graphify update .` after `git pull`
 graphify install --project     # optional: the /graphify skill for this repo (in idea-vault, .claude/ stays unversioned, ADR-0041)
 ```
 
-**How a coding session uses it:** read `GRAPH_REPORT.md` once (the god nodes and communities are
-the module map), then `/graphify path A B` or `/graphify explain X` to find the few files a change
+**How a coding session uses it:** read `COMMUNITIES.md` and the god nodes in
+`graphify-out/GRAPH_REPORT.md` once (the module map), then `/graphify path A B` or `/graphify explain X` to find the few files a change
 touches. Open only those, then grep around them. The map tells the agent where to look. The
 compiler, tests and gate decide whether the change is right.
 
@@ -350,10 +370,35 @@ browsable note per module or symbol and a `graph.canvas`. Keep your own architec
 decisions in that Obsidian vault. Attach them to idea-vault ideas as a source (Layer 2) when you
 brainstorm about that codebase.
 
-**Measured here: not yet.** PyPI is blocked in the environment this guide was written in, so the
-numbers above are Graphify's own committed artifacts. To measure on your repo, compare
-`wc -c target/graphify/GRAPH_REPORT.md` against what your agent reads per task today (a Claude
-Code session's `/cost`, or idea-vault's journal snippet in Layer 2).
+**Measured here (2026-10-12, Graphify 0.9.87, `scripts/graphify-map.sh`)** on JustVugg/colibri
+at `bf244291`, a pure-C MoE inference engine with CUDA, Vulkan and Python tooling (tests, `docs/`
+and `site/` excluded):
+
+| | |
+|---|---|
+| Input | 404 code files (~157k lines of C/headers, ~22k of Python); 21 files partly parsed (CUDA and some C trip the C grammar), 18 with no symbols |
+| Build | 20 s wall on 4 workers, $0, no model call |
+| Graph | 10,262 nodes, 30,942 edges (87% EXTRACTED, 13% INFERRED), 299 communities |
+| `graph.json` | 10.4 MB: queried, never read |
+| `GRAPH_REPORT.md` | 60.9 KB (~15k tokens), a third of it the unlabeled "Community N" hub list |
+| `COMMUNITIES.md` | 15.7 KB (~4k tokens): the 60 largest communities by file, the top cross-file couplings and the largest files |
+
+The god nodes were real hubs (`Dsv4CudaTensor`, `json_get()`, `st_find()`, `ColiVkTensor`), and
+the file-named communities matched the repo's one-file-per-model-family layout. The map was then
+attached to an idea as a second source next to the code itself (Layer 2 steps 4–5), and the
+claude-code foil was pointed at `COMMUNITIES.md` first. To measure on your repo, compare
+`wc -c <map>/COMMUNITIES.md` against what your agent reads per task today (a Claude Code session's
+`/cost`, or idea-vault's journal snippet in Layer 2).
+
+**From an agent session** (docs/12 "Agent sessions"), the inbound MCP server has no source tools.
+Register the repo and its map, and attach both to an idea, through the app's own form routes on
+loopback:
+
+```bash
+curl -s --noproxy '*' -X POST http://127.0.0.1:3000/sources/add -d name=<repo> --data-urlencode host_path=/abs/<repo>
+curl -s --noproxy '*' -X POST http://127.0.0.1:3000/sources/add -d name=<repo>-map --data-urlencode host_path=/abs/<repo>-map
+curl -s --noproxy '*' -X POST http://127.0.0.1:3000/idea/<slug>/sources -d 'sources=<repo>&sources=<repo>-map'
+```
 
 ### Layer 4 — Obsidian in your own Claude Code session (optional)
 
@@ -375,7 +420,7 @@ ideation loop.
 - [ ] `idea-vault validate` exits 0 after Obsidian has been opened on the vault.
 - [ ] In Obsidian, `created` and `updated` are Text properties.
 - [ ] "Automatically update internal links" is off.
-- [ ] Every `graphify extract` goes through a wrapper that hard-codes `--backend ollama` (or a deliberate `claude-cli`), or uses `--code-only`.
+- [ ] Every Graphify build goes through `scripts/graphify-map.sh` (`--code-only` by default, else `--backend ollama` or a deliberate `claude-cli`), so clustering runs `--no-label`.
 - [ ] Graphify output lives beside a source, never inside it or inside `vault/`.
 - [ ] Layer 2's map is kept only after the step 2 baseline and the step 6 recall check.
 - [ ] A code map (Layer 3) is `--code-only` with tests and generated code in `.graphifyignore`.

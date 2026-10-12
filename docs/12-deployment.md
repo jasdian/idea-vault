@@ -469,7 +469,7 @@ then set `IDEA_VAULT_OLLAMA_MODEL=my-local` in `.env` and `docker compose up -d`
 A cloud agent session runs idea-vault the way the owner does on a laptop: no containers, the
 claude-code backend (the session's own authenticated `claude` CLI, under the ADR-0039 lockdown),
 and the inbound MCP server (docs/13, [ADR-0024](./adr/0024-mcp-server-inbound.md)) as the
-control surface instead of the HTMX UI. Three scripts are the whole integration. They add no route,
+control surface instead of the HTMX UI. Three scripts are the whole integration (a fourth, optional one maps a codebase). They add no route,
 no config key and no app code, and they keep `.claude/` unversioned
 ([ADR-0041](./adr/0041-no-mistakes-gate.md)):
 
@@ -478,6 +478,7 @@ no config key and no app code, and they keep `.claude/` unversioned
 | [`scripts/session-build.sh`](../scripts/session-build.sh) | `cargo fetch --locked`, then `cargo build --release --locked`. If the sparse index (`index.crates.io`) is unreachable, as a cloud environment's network policy can make it, it switches to the git index on GitHub (`CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git`, `CARGO_NET_GIT_FETCH_WITH_CLI=true`). Crate files still come from `static.crates.io`. |
 | [`scripts/session-up.sh`](../scripts/session-up.sh) | Runs the build if the binary is missing. Starts it detached on `127.0.0.1:$IDEA_VAULT_SESSION_PORT` (default 3000), with `IDEA_VAULT_LLM_BACKEND=claude-code` unless overridden, and waits for `/admin/health`. Generates the MCP token into `target/session/mcp-token` (mode 600; `target/` is ignored). A healthy instance on the port is reused only if its `/api/mcp` accepts this session's token. Otherwise the script fails, naming the instance as not its own and showing its backend. `--status` checks it. `--down` stops only a pid whose binary is this checkout's `target/release/idea-vault`. |
 | [`scripts/session-mcp.py`](../scripts/session-mcp.py) | A stdlib-only Streamable-HTTP MCP client: `tools`, and `call <tool> '<json>'`. On a long-running tool's "still running" note (ADR-0028) it repeats the identical call until the result lands. The repeat reattaches to the same job and never starts a second one (ADR-0033). It bypasses any HTTP proxy, since the endpoint is loopback. |
+| [`scripts/graphify-map.sh`](../scripts/graphify-map.sh) | Optional, not part of the boot. Builds a Graphify map of a codebase or notes folder beside it (`--code-only` by default, no model call), for attaching as a second reference source. See [15-obsidian-and-graphify](./15-obsidian-and-graphify.md) Layer 3. |
 
 ```bash
 bash scripts/session-up.sh
