@@ -768,6 +768,23 @@ fn overlaps_vault(vault_dir: &std::path::Path, path: &std::path::Path) -> bool {
     }
 }
 
+/// `register_source`'s path refusals, in order: the registry's own host-path checks first
+/// (absolute, no `..`, not the root, as `SourceRegistry::add` makes them), then the vault
+/// overlap. The order matters for the message only: `overlaps_vault` reads a relative path
+/// against the working directory, so `.` run from a checkout holding `./vault` would otherwise be
+/// refused as overlapping instead of as not absolute.
+fn check_source_path(vault_dir: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    crate::sources::validate_host_path(path)?;
+    if overlaps_vault(vault_dir, path) {
+        return Err(format!(
+            "'{}' overlaps the vault — a source must be a directory that is neither in the \
+             vault nor contains it",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// `register_source` (docs/adr/0044): R-sources-add's validation (`SourceRegistry::add`: the
 /// name alphabet, an absolute `..`-free non-root path, no duplicate name or path) plus a refusal
 /// of a path that overlaps the vault. Every refusal is the caller's input, so `invalid_params`.
@@ -783,16 +800,8 @@ fn register_source(state: &AppState, args: &Value) -> Result<CallToolResult, Mcp
             None,
         )
     })?;
-    if overlaps_vault(&state.config.vault_dir, &path) {
-        return Err(McpError::invalid_params(
-            format!(
-                "'{}' overlaps the vault — a source must be a directory that is neither in the \
-                 vault nor contains it",
-                path.display()
-            ),
-            None,
-        ));
-    }
+    check_source_path(&state.config.vault_dir, &path)
+        .map_err(|e| McpError::invalid_params(e, None))?;
     let cfg = SourceConfig {
         name,
         host_path: path,
@@ -1104,6 +1113,21 @@ mod tests {
         assert!(!overlaps_vault(&vault, &tmp.path().join("vault-notes")));
         let other = tempfile::tempdir().unwrap();
         assert!(!overlaps_vault(&vault, other.path()));
+    }
+
+    #[test]
+    fn check_source_path_reports_a_relative_path_as_not_absolute_before_any_overlap() {
+        // The default layout: a relative `./vault` under the working directory, so `.` and `..`
+        // both contain it; the path check must speak first.
+        let vault = std::path::Path::new("./vault");
+        for rel in [".", "..", "vault/sub"] {
+            let err = check_source_path(vault, std::path::Path::new(rel)).unwrap_err();
+            assert!(err.contains("must be an absolute path"), "{rel}: {err}");
+        }
+        let cwd = std::env::current_dir().unwrap();
+        let err = check_source_path(vault, &cwd).unwrap_err();
+        assert!(err.contains("overlaps the vault"), "{err}");
+        assert!(check_source_path(vault, &cwd.join("elsewhere")).is_ok());
     }
 
     #[test]

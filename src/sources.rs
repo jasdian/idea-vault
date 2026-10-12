@@ -494,7 +494,7 @@ fn fingerprint_of(sources: &[SourceConfig]) -> String {
 /// component, and no newline/CR/NUL anywhere (a newline inside a YAML scalar is the classic
 /// compose-injection vector; serde escaping would survive it, but there is no legitimate reason
 /// to allow it at all).
-fn validate_host_path(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_host_path(path: &Path) -> Result<(), String> {
     let raw = path.as_os_str().as_encoded_bytes();
     if raw.iter().any(|b| matches!(b, b'\n' | b'\r' | 0)) {
         return Err(format!(

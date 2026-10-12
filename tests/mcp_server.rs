@@ -2495,6 +2495,9 @@ async fn register_attach_and_detach_sources_over_mcp() {
             "overlaps the vault",
         ),
         (json!({ "name": "rel", "path": "relative/dir" }), "absolute"),
+        // Relative paths fail on the path check, before the vault check can read them.
+        (json!({ "name": "dot", "path": "." }), "absolute"),
+        (json!({ "name": "dotdot", "path": ".." }), "absolute"),
     ] {
         let msg = error_of(call_tool_body(&app, &session, "register_source", args.clone()).await);
         assert!(msg.contains(needle), "{args}: {msg}");
