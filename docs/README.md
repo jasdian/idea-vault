@@ -69,7 +69,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [14-no-mistakes-gate](./14-no-mistakes-gate.md) | The fixed seven-step shipping gate, the invariant catalog, the findings protocol, the checklist | D41 |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
 | [15-obsidian-and-graphify](./15-obsidian-and-graphify.md) | Obsidian as a view-only graph over the vault, Graphify maps of reference sources and the codebase: findings and setup | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0043 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0044 | — |
 
 ## Locked decisions (at a glance)
 
@@ -112,6 +112,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 - **Recipe provenance and audit re-ask:** every AI-written artifact carries a `recipe:` (skill or workflow digest, parse-coupled template refs, build id, off-contract lenses), shown on R19 with a "recipe changed since" badge and "provenance unknown" for old artifacts; parse-coupled prompts are pinned by goldens; a malformed or partial audit gets at most one targeted re-ask ([ADR-0040](./adr/0040-recipe-provenance-and-audit-re-ask.md), amends ADR-0023).
 - **No-mistakes gate:** `scripts/gate.sh` is a fixed seven-step pipeline with no skip (intent incl. freshness, strict invariants, build, tests, fmt, clippy, honesty); `check-invariants.sh` collects every finding with an id and severity, and every rule has a seeded test; undeclared fixture, snapshot, floor or rule changes are red; findings are acted on by what a fix would change (no-op, auto-fix, ask-user), and `RUN_PROTOCOL` in every `PROMPT.md` says the same ([ADR-0041](./adr/0041-no-mistakes-gate.md), amends ADR-0030, D41).
 - **Make skill:** a button on the idea page and the stored panel distils the move that worked in a discussion into a draft owner skill as a background job (≤ 2 model calls, `distill-skill` under the `skill_draft` contract, a code-built move trace, never the run journal); the draft is a `skill_draft` artifact, never a turn, with each evidence quote marked ✓ owner / ✓ / ✗; the owner edits and saves it into `vault/.skills/` synchronously, never over a built-in, with a diff and a stale check on an update; an ungrounded quote warns but never blocks; MCP `make_skill` drafts only ([ADR-0042](./adr/0042-make-skill-distil-owner-skills.md), amends ADR-0022, ADR-0023, ADR-0010, D42, R51–R52).
+- **MCP source tools:** `list_sources`, `register_source` and `attach_sources` let an agent session register a reference source and attach it to an idea without the HTMX forms; `register_source` refuses a path that is in the vault or contains it, `attach_sources` merges into the idea's set through R43's own write path rather than replacing it, and edit and removal stay on `/sources` ([ADR-0044](./adr/0044-mcp-source-tools.md), amends ADR-0024, ADR-0029, ADR-0036).
 
 ## Beyond these docs
 

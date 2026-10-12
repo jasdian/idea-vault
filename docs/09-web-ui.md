@@ -200,7 +200,9 @@ missing idea) so the idea never reads as stuck busy. R42 slugifies each comma-se
 (dropping junk silently, capping at `MAX_IDEA_TAGS`); R43 reads the raw urlencoded body by hand
 (`axum::Form` can't collect a repeated `sources=` key) and only checks a newly-checked name against
 the registry — an already-attached name the registry no longer knows may persist, since frontmatter
-is truth. R44 (`cancel_job`) aborts the in-flight detached task (dropping the model future so
+is truth. Its write path, `ideas::update_idea_sources`, is shared with MCP `attach_sources`
+([ADR-0044](./adr/0044-mcp-source-tools.md)) and writes nothing, reindex included, when the set is
+unchanged. R44 (`cancel_job`) aborts the in-flight detached task (dropping the model future so
 nothing partial persists) and is idempotent: cancelling an idle idea just re-renders current state
 through the same `respond_discussion_or_stored` the R9b poll uses, including widening to the stored
 view if a store job won the race first. R45 (`delete_idea`) removes the whole idea folder and then
