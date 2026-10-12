@@ -12,6 +12,9 @@ with a review nit on `scripts/graphify-communities.py`.
 
   Editing and removing a source stay owner-only on the Sources page.
 - `graphify-communities.py` lists nodes without a community as `unassigned`, last, not `CNone`.
+- CLAUDE.md's agent-session guidance makes Graphify the first step of any brainstorm about a
+  codebase: map it with `scripts/graphify-map.sh`, attach the repo and its map over MCP, and start the
+  foil from the map.
 - docs/13, docs/15 and the server instructions name the new tools. docs/15's curl recipe becomes
   MCP calls. CLAUDE.md and docs/README name ADRs 0001–0044.
 

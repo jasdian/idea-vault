@@ -202,6 +202,26 @@ needs `CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git CARGO_NET_GIT_FETCH_WITH_CLI=true
 `scripts/session-build.sh` sets them itself. Never commit `vault/`. See
 [docs/12-deployment.md](docs/12-deployment.md) "Agent sessions".
 
+**Brainstorming about a codebase: map it with Graphify first.** When the idea is about a
+repository (port it, extend it, judge its design), build its knowledge graph before the first
+`chat`. Even a large repo can then be read by its map and not by blind greps.
+
+1. Clone it outside this checkout, e.g. `../ref/<repo>`. Install Graphify once with
+   `uv tool install graphifyy`.
+2. Run `bash scripts/graphify-map.sh ../ref/<repo> ../ref/<repo>-map`. The default is
+   `--code-only`: offline, with no model call. Put tests and generated code in the repo's
+   `.graphifyignore` first (docs/15 Layer 3). Pass `--backend ollama` or `--backend claude-cli`
+   only when the owner asks for the docs too.
+3. Over MCP, run `register_source` for `<repo>` and for `<repo>-map`, then `attach_sources` on
+   the idea ([ADR-0044](docs/adr/0044-mcp-reference-source-tools.md)).
+4. Open the discussion by pointing the foil at `<repo>-map/COMMUNITIES.md` and the god nodes in
+   `graphify-out/GRAPH_REPORT.md`, then at the files they name. Tell it to say where the map
+   misleads.
+
+The map is an index, never a filter or truth. INFERRED edges are leads, and a claim cites the
+code, not the graph. A map built for an earlier session is reused only while `BUILT.txt` names
+the repo's current commit. Skip Graphify only for a repo small enough to read whole, and say so.
+
 **Obsidian and Graphify** are optional derived layers ([docs/15](docs/15-obsidian-and-graphify.md),
 [ADR-0043](docs/adr/0043-obsidian-and-graphify-as-derived-layers.md), Proposed). Obsidian is a
 view-only second reader over `vault/`, and it must keep `created`/`updated` typed as Text. Graphify
