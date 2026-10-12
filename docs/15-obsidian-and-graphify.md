@@ -255,11 +255,14 @@ This is the one place a graph might shrink the foil's context. Prove it before r
    prompt, tools = [], []
    for f in pathlib.Path(sys.argv[1]).glob("*/.runs/*.jsonl"):
        for line in f.open():
-           r = json.loads(line)
-           if r["type"] == "llm_call":
-               prompt.append(r["meta"]["usage"]["prompt_tokens"] or 0)
-           elif r["type"] == "tool_call" and r["name"].startswith("source_"):
-               tools.append(len(r["result_text"]))   # Ollama path; capped at 12,000 chars per call
+           try:
+               r = json.loads(line)
+           except json.JSONDecodeError:
+               continue                              # a run killed mid-write leaves a torn last line
+           if r.get("type") == "llm_call":
+               prompt.append(r.get("meta", {}).get("usage", {}).get("prompt_tokens") or 0)
+           elif r.get("type") == "tool_call" and r.get("name", "").startswith("source_"):
+               tools.append(len(r.get("result_text", "")))   # Ollama path; capped at 12,000 chars per call
    print("median prompt tokens/call:", statistics.median(prompt or [0]))
    print("source_* calls:", len(tools), "median result chars:", statistics.median(tools or [0]))
    PY

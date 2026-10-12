@@ -22,7 +22,27 @@ BIN="$ROOT/target/release/idea-vault"
 PIDFILE="$STATE/idea-vault.pid"
 LOG="$STATE/idea-vault.log"
 
-healthy() { curl -fsS --noproxy '*' -m 3 "$BASE/admin/health" >/dev/null 2>&1; }
+# HTTP status of /admin/health, or 000 if nothing answers. The handler probes the LLM backend
+# before replying (the claude-code probe may take up to 5s) and returns 503 when the vault is
+# unusable, so any status other than 000 means an idea-vault is listening on the port.
+health_status() {
+  curl -s --noproxy '*' -m 10 -o /dev/null -w '%{http_code}' "$BASE/admin/health" 2>/dev/null || true
+}
+listening() { [ "$(health_status)" != 000 ]; }
+
+# The idea-vault this checkout started on $PORT: its exe is $BIN and its environment binds this
+# port. Looked up from /proc rather than taken from `$!`, which is setsid's own pid whenever
+# setsid has to fork.
+pid_on_port() {
+  local p bin
+  bin="$(readlink -f "$BIN")"
+  for p in /proc/[0-9]*; do
+    [ "$(readlink -f "$p/exe" 2>/dev/null)" = "$bin" ] || continue
+    tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -qx "IDEA_VAULT_BIND=127.0.0.1:$PORT" &&
+      { echo "${p#/proc/}"; return 0; }
+  done
+  return 1
+}
 
 # The pid in $PIDFILE, only if that process is still this script's idea-vault binary (a pid can be
 # reused by an unrelated process after a crash or container restart).
@@ -51,7 +71,8 @@ case "${1:-}" in
     rm -f "$PIDFILE"
     exit 0 ;;
   --status)
-    if healthy; then echo "up: $BASE"; else echo "down"; exit 1; fi
+    code="$(health_status)"
+    if [ "$code" != 000 ]; then echo "up: $BASE (health HTTP $code)"; else echo "down"; exit 1; fi
     exit 0 ;;
   "") ;;
   *) echo "usage: $0 [--down|--status]" >&2; exit 2 ;;
@@ -63,14 +84,18 @@ if [ ! -s "$STATE/mcp-token" ]; then
   (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$STATE/mcp-token")
 fi
 
-if healthy; then
-  backend="$(curl -fsS --noproxy '*' -m 3 "$BASE/admin/health" | sed -n 's/.*"backend":"\([^"]*\)".*/\1/p')"
+if listening; then
+  backend="$(curl -sS --noproxy '*' -m 10 "$BASE/admin/health" | sed -n 's/.*"backend":"\([^"]*\)".*/\1/p')"
   if our_pid >/dev/null; then owner="started by this script"; else owner="NOT started by this script"; fi
   code="$(mcp_status)"
   if [ "$code" != 200 ]; then
-    echo "an idea-vault on $BASE ($owner, backend: ${backend:-unknown}) rejects this session's MCP" \
-         "token (HTTP $code from /api/mcp): it was started without IDEA_VAULT_MCP_TOKEN or with another" \
-         "one. Stop it, or pick a free port with IDEA_VAULT_SESSION_PORT." >&2
+    case "$code" in
+      404) why="its /api/mcp is off (started without IDEA_VAULT_MCP_TOKEN)" ;;
+      401) why="it was started with a different IDEA_VAULT_MCP_TOKEN" ;;
+      *)   why="/api/mcp answered HTTP $code (health HTTP $(health_status))" ;;
+    esac
+    echo "an idea-vault on $BASE ($owner, backend: ${backend:-unknown}) can't be used by this session:" \
+         "$why. Stop it, or pick a free port with IDEA_VAULT_SESSION_PORT." >&2
     exit 1
   fi
   echo "idea-vault already up at $BASE ($owner, backend: ${backend:-unknown})"
@@ -88,18 +113,21 @@ else
   export IDEA_VAULT_MCP_TOKEN
   # setsid detaches it from this shell so it outlives the command that started it.
   setsid nohup "$BIN" >>"$LOG" 2>&1 < /dev/null &
-  echo $! > "$PIDFILE"
+  spawned=$!
   for _ in $(seq 1 60); do
-    healthy && break
-    if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    listening && break
+    if ! kill -0 "$spawned" 2>/dev/null && ! pid_on_port >/dev/null; then
       echo "idea-vault exited during boot; last log lines:" >&2
       tail -n 20 "$LOG" >&2
       exit 1
     fi
     sleep 0.5
   done
-  healthy || { echo "idea-vault did not answer $BASE/admin/health within 30s; see $LOG" >&2; exit 1; }
-  echo "idea-vault up at $BASE (backend: $IDEA_VAULT_LLM_BACKEND, pid $(cat "$PIDFILE"), log $LOG)"
+  listening || { echo "idea-vault did not answer $BASE/admin/health within 30s; see $LOG" >&2; exit 1; }
+  # Recorded only once the server answers, so a failed boot never overwrites a good pid file.
+  pid="$(pid_on_port)" || { echo "idea-vault answers on $BASE but its pid was not found; see $LOG" >&2; exit 1; }
+  echo "$pid" > "$PIDFILE"
+  echo "idea-vault up at $BASE (backend: $IDEA_VAULT_LLM_BACKEND, pid $pid, log $LOG)"
 fi
 
 cat <<EOF
