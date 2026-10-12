@@ -21,8 +21,8 @@ removing a source stay on `/sources`.
   `updated`.
 - `tests/mcp_server.rs` covers register → list → attach → `get_idea` → detach and every refusal.
   Unit tests cover the merge, the argument parsing, the status words and the vault check.
-- ADR-0044 is Accepted. docs/13, docs/12, docs/README, CLAUDE.md and the server instructions name
-  the tools. CLAUDE.md and docs/README name ADRs 0001–0044.
+- ADR-0044 is Accepted. docs/13, docs/12, docs/15 (its curl calls replaced), docs/README, CLAUDE.md
+  and the server instructions name the tools. CLAUDE.md and docs/README name ADRs 0001–0044.
 - `bash scripts/gate.sh` is green.
 
 ## Expectation changes
