@@ -289,7 +289,7 @@ defaulting to open.
 | `list_skills` | sync | The visible skill book (name, stage, role, use/avoid guidance, source) |
 | `list_workflows` | sync | The visible workflow book, in chip order: name, description, use/avoid guidance, stage kinds, `call_ceiling` (worst-case model calls, ADR-0034), `needs_sources`, `capstone`, source (ADR-0036) |
 | `list_sources` | sync | The reference-source registry: name, host path, `status` (`readable`/`mounted` with `entries`, `needs_reup`, `missing`) (ADR-0044) |
-| `register_source` | sync | Register a name for an absolute host directory via `SourceRegistry::add` (R37's checks), and never a path in the vault; edit and removal stay on `/sources` (ADR-0044) |
+| `register_source` | sync | Register a name for an absolute host directory via `SourceRegistry::add` (R37's checks), and never a path that is in the vault or contains it; edit and removal stay on `/sources` (ADR-0044) |
 | `attach_sources` | sync | Merge `attach`/`detach` name lists into an idea's frontmatter `sources:` through R43's write path (job-slot claim, a newly added name must be registered); returns the attached set with statuses (ADR-0044) |
 | `create_idea` | sync | New Draft |
 | `reopen_idea` | sync | Stored → Reopened |

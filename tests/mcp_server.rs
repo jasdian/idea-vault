@@ -2488,7 +2488,11 @@ async fn register_attach_and_detach_sources_over_mcp() {
         ),
         (
             json!({ "name": "inside", "path": vault_dir.to_str().unwrap() }),
-            "inside the vault",
+            "overlaps the vault",
+        ),
+        (
+            json!({ "name": "holder", "path": vault_dir.parent().unwrap().to_str().unwrap() }),
+            "overlaps the vault",
         ),
         (json!({ "name": "rel", "path": "relative/dir" }), "absolute"),
     ] {

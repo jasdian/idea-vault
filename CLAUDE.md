@@ -269,7 +269,7 @@ source dirs on `/sources`; the app regenerates `vault/.docker-compose.sources.ym
 last when combined with other overrides) and apply each registry change yourself with
 `docker compose up -d`. Sources are attached per-idea via frontmatter `sources: [name]` and reach
 the model as deterministic `source_*` tools (Ollama) / `--add-dir` (claude-code) — never as
-model-authored paths. Over MCP, `list_sources`, `register_source` (never a path in the vault) and
+model-authored paths. Over MCP, `list_sources`, `register_source` (never a path in or containing the vault) and
 `attach_sources` (merge, not replace) do the same without the forms; edit and removal stay on
 `/sources` ([ADR-0044](docs/adr/0044-mcp-source-tools.md)).
 

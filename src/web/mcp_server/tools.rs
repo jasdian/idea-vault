@@ -333,9 +333,10 @@ pub(super) fn catalog() -> Vec<Tool> {
             "register_source",
             "Register a read-only reference source: a name (lowercase letters, digits, '-') \
              for an absolute host directory. Refused for a duplicate name or path, a relative \
-             or '..' path, the filesystem root, or a path in the vault. Editing and removing \
-             a source stay on the owner's /sources page. In a container the bind mount needs \
-             the owner's docker compose up -d before the source reads.",
+             or '..' path, the filesystem root, or a path that is in the vault or contains \
+             it. Editing and removing a source stay on the owner's /sources page. In a \
+             container the bind mount needs the owner's docker compose up -d before the source \
+             reads.",
             to_schema(json!({
                 "type": "object",
                 "properties": {
@@ -742,21 +743,34 @@ fn list_sources(state: &AppState) -> CallToolResult {
     CallToolResult::success(vec![Content::text(Value::Array(payload).to_string())])
 }
 
-/// Whether `path` is the vault or lies inside it, compared lexically and, when both resolve,
-/// canonically (a symlink into the vault counts). A source there would hand the foil every
-/// idea's notes and run journals, which ADR-0037 keeps out of any prompt.
-fn is_in_vault(vault_dir: &std::path::Path, path: &std::path::Path) -> bool {
-    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
-    path.starts_with(vault_dir)
-        || matches!(
-            (canonical(vault_dir), canonical(path)),
-            (Some(vault), Some(p)) if p.starts_with(&vault)
-        )
+/// `p` made absolute against the working directory (the default vault dir is the relative
+/// `./vault`), then resolved through its longest existing ancestor, so a symlink is followed and
+/// a directory not created yet still resolves to where it would land.
+fn resolved(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let abs = std::path::absolute(p).ok()?;
+    abs.ancestors().find_map(|ancestor| {
+        let base = std::fs::canonicalize(ancestor).ok()?;
+        Some(base.join(abs.strip_prefix(ancestor).ok()?))
+    })
+}
+
+/// Whether `path` and the vault overlap: `path` is the vault, lies inside it, or contains it.
+/// Compared on the absolute paths and again on the resolved ones; a path that cannot be made
+/// absolute counts as overlapping (fail closed). Any overlap would hand the foil every idea's
+/// notes and run journals, which ADR-0037 keeps out of any prompt.
+fn overlaps_vault(vault_dir: &std::path::Path, path: &std::path::Path) -> bool {
+    let overlap = |a: &std::path::Path, b: &std::path::Path| a.starts_with(b) || b.starts_with(a);
+    let pair = |f: fn(&std::path::Path) -> Option<std::path::PathBuf>| f(vault_dir).zip(f(path));
+    let absolute = |p: &std::path::Path| std::path::absolute(p).ok();
+    match (pair(absolute), pair(resolved)) {
+        (Some((v, p)), Some((rv, rp))) => overlap(&v, &p) || overlap(&rv, &rp),
+        _ => true,
+    }
 }
 
 /// `register_source` (docs/adr/0044): R-sources-add's validation (`SourceRegistry::add`: the
 /// name alphabet, an absolute `..`-free non-root path, no duplicate name or path) plus a refusal
-/// of a path in the vault. Every refusal is the caller's input, so `invalid_params`.
+/// of a path that overlaps the vault. Every refusal is the caller's input, so `invalid_params`.
 fn register_source(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
     let raw_name = required_str(args, "name")?;
     let path = std::path::PathBuf::from(required_str(args, "path")?);
@@ -769,10 +783,11 @@ fn register_source(state: &AppState, args: &Value) -> Result<CallToolResult, Mcp
             None,
         )
     })?;
-    if is_in_vault(&state.config.vault_dir, &path) {
+    if overlaps_vault(&state.config.vault_dir, &path) {
         return Err(McpError::invalid_params(
             format!(
-                "'{}' is inside the vault — a source must be a directory outside it",
+                "'{}' overlaps the vault — a source must be a directory that is neither in the \
+                 vault nor contains it",
                 path.display()
             ),
             None,
@@ -1076,13 +1091,31 @@ mod tests {
     }
 
     #[test]
-    fn is_in_vault_catches_the_vault_itself_and_paths_under_it() {
+    fn overlaps_vault_refuses_the_vault_inside_it_and_containing_it() {
         let tmp = tempfile::tempdir().unwrap();
         let vault = tmp.path().join("vault");
         std::fs::create_dir_all(vault.join("idea")).unwrap();
-        assert!(is_in_vault(&vault, &vault));
-        assert!(is_in_vault(&vault, &vault.join("idea")));
-        assert!(!is_in_vault(&vault, tmp.path()));
-        assert!(!is_in_vault(&vault, &tmp.path().join("vault-notes")));
+        assert!(overlaps_vault(&vault, &vault));
+        assert!(overlaps_vault(&vault, &vault.join("idea")));
+        // Not created yet: resolved through its existing ancestor.
+        assert!(overlaps_vault(&vault, &vault.join("new/deeper")));
+        // A checkout that holds the vault (the agent-session layout).
+        assert!(overlaps_vault(&vault, tmp.path()));
+        assert!(!overlaps_vault(&vault, &tmp.path().join("vault-notes")));
+        let other = tempfile::tempdir().unwrap();
+        assert!(!overlaps_vault(&vault, other.path()));
+    }
+
+    #[test]
+    fn overlaps_vault_reads_a_relative_vault_dir_against_the_working_directory() {
+        // The default vault dir is the relative `./vault`; it need not exist for the check.
+        let rel = std::path::Path::new("./no-such-vault-for-overlap-test");
+        let cwd = std::env::current_dir().unwrap();
+        assert!(overlaps_vault(
+            rel,
+            &cwd.join("no-such-vault-for-overlap-test/sub")
+        ));
+        assert!(overlaps_vault(rel, &cwd));
+        assert!(!overlaps_vault(rel, &cwd.join("elsewhere")));
     }
 }

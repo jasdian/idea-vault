@@ -31,9 +31,14 @@ We will add three synchronous tools (task support `Forbidden`, no model call, no
    ghost-bind signal), `needs_reup` (the owner must run `docker compose up -d`), or `missing`.
 2. **`register_source`** (`name`, `path`): R37's validation through the same
    `SourceRegistry::add` (the name alphabet; an absolute, `..`-free, non-root path; no duplicate
-   name or path), plus one refusal R37 does not make: a path that is the vault or lies inside it,
-   compared lexically and canonically. Such a source would hand the foil every idea's notes and
-   run journals (ADR-0037). The result is the new entry with its status. Every refusal is
+   name or path), plus one refusal R37 does not make: a path that overlaps the vault, meaning it is
+   the vault, lies inside it, or contains it. The check compares the paths made absolute against
+   the working directory (the default vault dir is the relative `./vault`), and again resolved
+   through each one's longest existing ancestor (so a symlink, or a directory not created yet,
+   cannot slip past). A path it cannot make absolute is refused. An overlapping source would hand
+   the foil every idea's notes and run journals (ADR-0037). In an agent session the vault sits
+   inside the checkout, so the checkout root itself is refused; register a subdirectory, or a
+   checkout that holds no vault. The result is the new entry with its status. Every refusal is
    `invalid_params`.
 3. **`attach_sources`** (`slug`, optional `attach`, optional `detach`, at least one non-empty):
    a **merge**, not R43's replace. The new set is the current frontmatter set without `detach`,
@@ -56,7 +61,7 @@ We will add three synchronous tools (task support `Forbidden`, no model call, no
   detach a source by naming only the one it wanted.
 - Harder: an MCP token now lets its holder point the foil at any host directory the app's user
   can read, as the localhost `/sources` form already did. The foil still reads sources only
-  through the ADR-0021 tools and the ADR-0039 lockdown, and never inside the vault.
+  through the ADR-0021 tools and the ADR-0039 lockdown, and never over a path that overlaps the vault.
 - Invariants: frontmatter `sources:` stays the truth; MCP adds no second write path for it, and
   the app still never runs docker (ADR-0020). A container registration reads `needs_reup` until
   the owner re-ups.
