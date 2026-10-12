@@ -68,12 +68,21 @@ We will add three synchronous tools (task support `Forbidden`, no model call, no
      limit. The paths are the app's own, so in a container they are container paths. Compose
      forwards the key from `.env`.
 
+   **The always-on checks are best-effort; the roots are the real guard.** Without roots, a plain
+   directory such as `/var` or `/usr` (or another user's readable home) still registers.
+   `IDEA_VAULT_MCP_SOURCE_ROOTS` is the setting that bounds what MCP can expose, and agent sessions
+   set it (CLAUDE.md).
+
    **Not covered:**
    - A directory outside `$HOME` that holds someone's secrets without hiding them (e.g. a
      `/srv/keys` with no dot-folder). Setting the roots closes this.
    - A symlink *inside* a registered source that points elsewhere. The Ollama `source_*` leaves
      refuse it (ADR-0021's canonical-root check). On claude-code, `--add-dir` gives no such
      guarantee. Setting the roots does not change this.
+   - A registered directory swapped for a symlink after registration. The registry keeps the path
+     as given and checks it once. Re-checking at attach would also refuse sources the owner
+     registered on purpose on `/sources`, which is allowed to register hidden paths. Exploiting it
+     needs filesystem access that already reads the target.
 
    The refusal names the reason and says the owner can still register the path on `/sources`,
    which neither check limits. A cloned repository or a map built beside it registers with no
