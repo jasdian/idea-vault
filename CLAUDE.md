@@ -206,14 +206,17 @@ needs `CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git CARGO_NET_GIT_FETCH_WITH_CLI=true
 repository (port it, extend it, judge its design), build its knowledge graph before the first
 `chat`. Even a large repo can then be read by its map and not by blind greps.
 
-1. Clone it outside this checkout, e.g. `../ref/<repo>`. Install Graphify once with
+1. Clone it outside this checkout, e.g. `../ref/<repo>`: `register_source` refuses a path that
+   overlaps the vault, and this checkout holds it. Install Graphify once with
    `uv tool install graphifyy`.
 2. Run `bash scripts/graphify-map.sh ../ref/<repo> ../ref/<repo>-map`. The default is
    `--code-only`: offline, with no model call. Put tests and generated code in the repo's
    `.graphifyignore` first (docs/15 Layer 3). Pass `--backend ollama` or `--backend claude-cli`
    only when the owner asks for the docs too.
-3. Over MCP, run `register_source` for `<repo>` and for `<repo>-map`, then `attach_sources` on
-   the idea ([ADR-0044](docs/adr/0044-mcp-reference-source-tools.md)).
+3. Over MCP, run `register_source` for `<repo>` and for `<repo>-map`, then
+   `attach_sources {"slug": …, "attach": ["<repo>", "<repo>-map"]}`
+   ([ADR-0044](docs/adr/0044-mcp-source-tools.md)). Register only what the owner asked for. The
+   token lets the foil read any directory the app's user can read.
 4. Open the discussion by pointing the foil at `<repo>-map/COMMUNITIES.md` and the god nodes in
    `graphify-out/GRAPH_REPORT.md`, then at the files they name. Tell it to say where the map
    misleads.
@@ -289,7 +292,9 @@ source dirs on `/sources`; the app regenerates `vault/.docker-compose.sources.ym
 last when combined with other overrides) and apply each registry change yourself with
 `docker compose up -d`. Sources are attached per-idea via frontmatter `sources: [name]` and reach
 the model as deterministic `source_*` tools (Ollama) / `--add-dir` (claude-code) — never as
-model-authored paths.
+model-authored paths. Over MCP, `list_sources`, `register_source` (never a path in or containing the vault) and
+`attach_sources` (merge, not replace) do the same without the forms; edit and removal stay on
+`/sources` ([ADR-0044](docs/adr/0044-mcp-source-tools.md)).
 
 ## Conventions
 

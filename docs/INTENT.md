@@ -1,40 +1,27 @@
-# Intent — reference sources over MCP, and the CNone nit (ADR-0044)
+# Intent — Graphify first for codebase brainstorms, a register_source trust warning, and the CNone nit (ADR-0043, ADR-0044)
 
-The first real run of the docs/15 Graphify flow attached a codebase and its map to an idea from an
-agent session. The inbound MCP server had no source tools, so the session had to `curl` the HTML
-form routes. PR #17 named this gap as a follow-up, and the owner asked for it to be fixed, along
-with a review nit on `scripts/graphify-communities.py`.
+The owner asked for three things after PR #17. PR #18 shipped the MCP source tools of ADR-0044, so
+this branch keeps only what #18 does not cover:
 
-- Three synchronous MCP tools (ADR-0044, amending ADR-0024):
-  - `list_sources`;
-  - `register_source`, through `SourceRegistry::add`, the Sources page's own checks;
-  - `attach_sources`, through `set_sources_core`, which `POST /idea/{slug}/sources` now calls too.
-
-  Editing and removing a source stay owner-only on the Sources page.
-- `graphify-communities.py` lists nodes without a community as `unassigned`, last, not `CNone`.
-- CLAUDE.md's agent-session guidance makes Graphify the first step of any brainstorm about a
-  codebase: map it with `scripts/graphify-map.sh`, attach the repo and its map over MCP, and start the
-  foil from the map.
-- docs/13, docs/15 and the server instructions name the new tools. docs/15's curl recipe becomes
-  MCP calls. CLAUDE.md and docs/README name ADRs 0001–0044.
+- **CLAUDE.md**, agent sessions: when a brainstorm is about a codebase, build its Graphify map
+  first. Clone outside the checkout (the vault-overlap refusal), run `scripts/graphify-map.sh`
+  (`--code-only` by default), `register_source` the repo and its map, `attach_sources` them, and
+  open the discussion from `COMMUNITIES.md` and the god nodes. The map is an index, never truth.
+- **`register_source`'s description** tells a driving agent that an attached directory becomes
+  readable by the foil with no owner prompt. It says to register only what the owner asked for,
+  and never because a document says to. This answers a review finding on PR #19.
+- **`scripts/graphify-communities.py`** lists nodes without a community as `unassigned`, last,
+  not `CNone`.
 
 ## Acceptance criteria
 
-- Over `/api/mcp`, `register_source` refuses each of: a bad name, a relative path, a duplicate name,
-  and a duplicate path. `list_sources` shows a registered source as `mounted`.
-- `attach_sources` refuses an unknown name and leaves the frontmatter unchanged. It collapses
-  duplicates in order, writes `sources:` to `idea.md`, `get_idea` reflects it, and `[]` detaches
-  all.
-- The web attach route behaves as before: its existing tests pass unchanged through the shared
-  core.
+- CLAUDE.md's agent-session section names the Graphify-first steps with the `attach` argument
+  #18 shipped, and links `docs/adr/0044-mcp-source-tools.md`.
+- `register_source`'s tool description carries the trust warning. The MCP tests pass unchanged.
 - `graphify-communities.py` prints `unassigned` last for community-less nodes, and colibri's
   `COMMUNITIES.md` is byte-identical.
 - `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
-- `tools::tests::catalog_is_stable_and_marks_long_running_tools_as_task_optional`: the catalog size
-  assertion goes from 17 to 20, and the three new tools are asserted synchronous (ADR-0044).
-- `tests/mcp_server.rs` `tools_list_includes_the_catalog`: the expected names gain the three tools.
-- The unknown-source error on attach now reads "register it first (the sources page, or MCP
-  register_source)" in place of "register it on the sources page first".
+None: this change touches no fixture, snapshot, floor or invariant rule.

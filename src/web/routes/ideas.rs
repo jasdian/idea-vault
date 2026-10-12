@@ -1328,26 +1328,22 @@ pub async fn set_sources(
         }
     }
 
-    set_sources_core(&state, &slug, &submitted)?;
-    Ok(render_idea_sources(&state, &slug, &submitted))
+    let attached = update_idea_sources(&state, &slug, |_| submitted)?;
+    Ok(render_idea_sources(&state, &slug, &attached))
 }
 
-/// The attach sequence with no HTTP-specific parsing or rendering, shared by `POST
-/// /idea/{slug}/sources` and the inbound MCP `attach_sources` tool (docs/adr/0044): replace the
-/// idea's attached-source set with `names` (duplicates dropped, order kept), under the per-idea
-/// job slot, then reindex. A newly attached name must be registered; an already-attached one the
-/// registry no longer knows may stay (frontmatter is truth). Returns the set that was written.
-pub(crate) fn set_sources_core(
+/// The one write path for an idea's attached-source set, shared by R-sources
+/// ([`set_sources`], replace semantics) and the MCP `attach_sources` tool (merge semantics,
+/// ADR-0044): `next` maps the current frontmatter list to the wanted one. Names must be
+/// slug-alphabet; a name `next` *adds* must be registered, while an already-attached name the
+/// registry no longer knows may persist (frontmatter is truth). A whole-file read-modify-write,
+/// so it claims the per-idea job slot; an unchanged set writes nothing and skips the reindex.
+/// Returns the set now in frontmatter.
+pub(crate) fn update_idea_sources(
     state: &AppState,
     slug: &str,
-    names: &[String],
+    next: impl FnOnce(&[String]) -> Vec<String>,
 ) -> Result<Vec<String>, WebError> {
-    let submitted: Vec<String> = names.iter().fold(Vec::new(), |mut kept, name| {
-        if !name.is_empty() && !kept.contains(name) {
-            kept.push(name.clone());
-        }
-        kept
-    });
     if !crate::web::jobs::try_claim(&state.jobs, slug) {
         return Err(WebError::BadRequest(
             "a run is in progress for this idea — wait for it to finish (or cancel it) before editing sources"
@@ -1357,7 +1353,8 @@ pub(crate) fn set_sources_core(
     let result = (|| {
         let vault_dir = &state.config.vault_dir;
         let mut idea = store::read_idea(vault_dir, slug)?; // 404 if missing
-        for name in &submitted {
+        let wanted = next(&idea.frontmatter.sources);
+        for name in &wanted {
             if !domain_slug::is_valid(name) {
                 return Err(WebError::BadRequest(format!(
                     "invalid source name '{name}': use lowercase letters, digits and '-' only"
@@ -1366,20 +1363,24 @@ pub(crate) fn set_sources_core(
             let already_attached = idea.frontmatter.sources.iter().any(|s| s == name);
             if !already_attached && state.sources.get(name).is_none() {
                 return Err(WebError::BadRequest(format!(
-                    "no source named '{name}' — register it first (the sources page, or MCP register_source)"
+                    "no source named '{name}' — register it on the sources page first"
                 )));
             }
         }
-        idea.frontmatter.sources = submitted.clone();
+        if wanted == idea.frontmatter.sources {
+            return Ok((wanted, false));
+        }
+        idea.frontmatter.sources = wanted.clone();
         idea.frontmatter.updated = Utc::now();
         store::write_idea(vault_dir, &idea)?;
-        Ok::<_, WebError>(())
+        Ok::<_, WebError>((wanted, true))
     })();
     crate::web::jobs::mark_done(&state.jobs, slug);
-    result?;
-
-    crate::web::routes::reindex_logged(state);
-    Ok(submitted)
+    let (attached, changed) = result?;
+    if changed {
+        crate::web::routes::reindex_logged(state);
+    }
+    Ok(attached)
 }
 
 /// Form body for R3 (the `list.html` new-idea form posts `title`; a seed body is optional).
