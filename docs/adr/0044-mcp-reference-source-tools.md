@@ -40,8 +40,10 @@ task or an `idempotency_key`.
 
   Duplicates collapse, order is kept, and `[]` detaches all.
 
-Editing a source's path and removing a source stay off MCP. They change what other ideas' turns can
-read, and they are the owner's actions on the Sources page.
+Editing a source's path and removing a source stay off MCP. Both silently change what *other* ideas'
+turns read: every idea that already attaches the source sees the new path, or loses it. Registering
+changes no idea's reads until an `attach_sources` call names that idea. Editing and removing stay the
+owner's actions on the Sources page.
 
 ## Consequences
 
@@ -52,11 +54,20 @@ read, and they are the owner's actions on the Sources page.
   4. `chat`/`run_workflow`
 
   `session-mcp.py` needs no change.
-- **Harder:** An MCP token holder can now point the foil at any absolute host directory the app's
-  user can read. The Sources page already gives that power to anyone who can reach the web UI, and
-  the token is the stronger gate. Registration doesn't widen the foil by itself: a source is read only
-  by turns on an idea that attaches it, under the ADR-0039 lockdown (`source_*` leaves or
-  `--add-dir`).
+- **Harder (trust):** **The MCP token is trusted to grant the foil read access to any host
+  directory the app's user can read.** The only path check is `validate_host_path`: absolute, not
+  `/`, no `..`. So `register_source {path: "~/.ssh"}` followed by `attach_sources` lets the next turn
+  on that idea read it, with no owner prompt. That holds whoever calls, a prompt-injected agent
+  session included.
+  - This grants the token holder nothing new. The foil's output comes back to the same client.
+  - The foil has no network unless the owner turns web access on (ADR-0039).
+  - Anyone who can reach the unauthenticated Sources page can already do the same.
+  - An agent session that holds the token can read those files with its own shell anyway.
+
+  The tool description says so, so a driving agent can't miss it. Guard the token like a
+  shell credential. A narrower grant can come later without changing this decision, as either an
+  allow-listed root for MCP registration (a new config key) or MCP-registered sources held as
+  pending until the owner confirms them on `/sources`.
 - **Invariants kept:**
   - Frontmatter is the truth for attachment.
   - The registry stays app config, not vault content.

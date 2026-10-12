@@ -290,7 +290,7 @@ defaulting to open.
 | `list_workflows` | sync | The visible workflow book, in chip order: name, description, use/avoid guidance, stage kinds, `call_ceiling` (worst-case model calls, ADR-0034), `needs_sources`, `capstone`, source (ADR-0036) |
 | `create_idea` | sync | New Draft |
 | `list_sources` | sync | Registered reference sources: name, host path, status (`mounted` + `entries`, `needs_reup`, `missing`) (ADR-0044) |
-| `register_source` | sync | Register a read-only source (`name`, absolute `path`) through `SourceRegistry::add`, the Sources page's checks; replies `readable` (ADR-0044) |
+| `register_source` | sync | Register a read-only source (`name`, absolute `path`) through `SourceRegistry::add`, the Sources page's checks; replies `readable`. Trust: the token can grant the foil read access to any directory the app's user can read (ADR-0044) |
 | `attach_sources` | sync | Replace an idea's attached sources through `set_sources_core`, the idea editor's sequence (job-slot claim, name checks, frontmatter write, reindex); `[]` detaches all (ADR-0044) |
 | `reopen_idea` | sync | Stored → Reopened |
 | `chat` | long-running | One owner turn; the foil's reply is returned |
