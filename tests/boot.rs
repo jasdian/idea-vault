@@ -60,6 +60,7 @@ fn test_state() -> AppState {
         skills_dir: vault_dir.join(".skills"),
         workflows_dir: vault_dir.join(".workflows"),
         mcp_server_token: None,
+        mcp_source_roots: Vec::new(),
     };
 
     let conn = index::schema::open_or_create(&index_path).expect("open index");

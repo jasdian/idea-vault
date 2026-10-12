@@ -215,8 +215,9 @@ repository (port it, extend it, judge its design), build its knowledge graph bef
    only when the owner asks for the docs too.
 3. Over MCP, run `register_source` for `<repo>` and for `<repo>-map`, then
    `attach_sources {"slug": …, "attach": ["<repo>", "<repo>-map"]}`
-   ([ADR-0044](docs/adr/0044-mcp-source-tools.md)). Register only what the owner asked for. The
-   token lets the foil read any directory the app's user can read.
+   ([ADR-0044](docs/adr/0044-mcp-source-tools.md)). Register only what the owner asked for. MCP
+   refuses hidden and system paths, and anything outside `IDEA_VAULT_MCP_SOURCE_ROOTS` when that
+   is set.
 4. Open the discussion by pointing the foil at `<repo>-map/COMMUNITIES.md` and the god nodes in
    `graphify-out/GRAPH_REPORT.md`, then at the files they name. Tell it to say where the map
    misleads.
@@ -265,7 +266,9 @@ flag), and the dynamic-context-budget overrides `IDEA_VAULT_OLLAMA_CTX_TOKENS` /
 `IDEA_VAULT_CLAUDE_TURN_TIMEOUT_SECS` (default `1800`, the wall-clock ceiling on one whole claude-code
 turn) and `IDEA_VAULT_CLAUDE_ENV_PASS` (comma-separated extra env names the claude child may inherit,
 on top of a fixed pass-list; `IDEA_VAULT_*` keys are never passed;
-[ADR-0039](docs/adr/0039-foil-hygiene-and-lockdown.md)), and
+[ADR-0039](docs/adr/0039-foil-hygiene-and-lockdown.md)),
+`IDEA_VAULT_MCP_SOURCE_ROOTS` (unset = no root limit; `:`-separated dirs an MCP `register_source`
+path must lie under, on top of its always-on refusal of hidden and system paths; ADR-0044), and
 `IDEA_VAULT_WORKFLOWS_DIR` (default `<vault>/.workflows`, owner workflow files, app config not vault
 truth; [ADR-0035](docs/adr/0035-workflows-as-markdown-and-the-workflow-book.md)). All of the above
 are only the **initial** values — the live Settings page (`GET`/`POST /settings`,

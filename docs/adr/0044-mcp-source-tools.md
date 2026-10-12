@@ -54,14 +54,31 @@ We will add three synchronous tools (task support `Forbidden`, no model call, no
 5. **R43 changes in one respect:** an unchanged submission writes nothing and skips the reindex,
    so `updated` is no longer bumped by a no-op save. That is the shared write path's rule, and it
    makes a repeated `attach_sources` idempotent from the vault itself.
+6. **MCP registration is narrower than the Sources page** (amended once, 2026-10-12, right after
+   release, from a review finding on PR #19). After the checks above, `register_source` also
+   refuses two kinds of path. Both checks run on the absolute path and again on the resolved one,
+   so a symlink can't pass, and a path that cannot be resolved is refused.
+   - **A hidden or system path:** any component that starts with `.` (`~/.ssh`, `~/.aws`,
+     `~/.config`, a repo's `.git`), or a path under `/etc`, `/proc`, `/sys`, `/dev` or `/boot`.
+   - **A path outside `IDEA_VAULT_MCP_SOURCE_ROOTS`**, when that is set. It is a `:`-separated
+     list of directories (e.g. `~/ref`), compared resolved on both sides. Unset means no root
+     limit.
+
+   The refusal names the reason and says the owner can still register the path on `/sources`,
+   which neither check limits. A cloned repository or a map built beside it registers with no
+   config and no extra click. The bar for MCP is higher than the form's because an agent session
+   driving MCP reads untrusted repository text and can be prompt-injected. The owner at the form
+   cannot be.
 
 ## Consequences
 
 - Easier: a session grounds an idea in a repository or its map entirely over MCP, and cannot
   detach a source by naming only the one it wanted.
-- Harder: an MCP token now lets its holder point the foil at any host directory the app's user
-  can read, as the localhost `/sources` form already did. The foil still reads sources only
-  through the ADR-0021 tools and the ADR-0039 lockdown, and never over a path that overlaps the vault.
+- Harder: an MCP token now lets its holder point the foil at a host directory the app's user can
+  read, as the localhost `/sources` form already did, though not at the vault, a hidden or system
+  path, or (when set) anything outside `IDEA_VAULT_MCP_SOURCE_ROOTS` (decision 6). The foil still
+  reads sources only through the ADR-0021 tools and the ADR-0039 lockdown. An owner who wants
+  agent sessions to register only under one folder sets the roots once.
 - Invariants: frontmatter `sources:` stays the truth; MCP adds no second write path for it, and
   the app still never runs docker (ADR-0020). A container registration reads `needs_reup` until
   the owner re-ups.

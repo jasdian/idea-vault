@@ -260,6 +260,7 @@ test — building a fresh router per request would mint a fresh, empty `LocalSes
 | Var | Default | Purpose |
 |---|---|---|
 | `IDEA_VAULT_MCP_TOKEN` | unset (feature off) | Bearer token gating `/api/mcp`. Unset/blank: not mounted. No live retuning — a restart is needed to change it, since the route is mounted once at boot. |
+| `IDEA_VAULT_MCP_SOURCE_ROOTS` | unset (no root limit) | `:`-separated directories an MCP `register_source` path must lie under, e.g. `/home/me/ref`. Hidden and system paths are refused either way. The `/sources` page is not limited (ADR-0044 decision 6). Read at boot. |
 
 The token is a server secret and the claude-code foil never sees it: the child's environment is a
 fixed pass-list that always excludes every `IDEA_VAULT_*` key
@@ -289,7 +290,7 @@ defaulting to open.
 | `list_skills` | sync | The visible skill book (name, stage, role, use/avoid guidance, source) |
 | `list_workflows` | sync | The visible workflow book, in chip order: name, description, use/avoid guidance, stage kinds, `call_ceiling` (worst-case model calls, ADR-0034), `needs_sources`, `capstone`, source (ADR-0036) |
 | `list_sources` | sync | The reference-source registry: name, host path, `status` (`readable`/`mounted` with `entries`, `needs_reup`, `missing`) (ADR-0044) |
-| `register_source` | sync | Register a name for an absolute host directory via `SourceRegistry::add` (R37's checks), and never a path that is in the vault or contains it; edit and removal stay on `/sources` (ADR-0044) |
+| `register_source` | sync | Register a name for an absolute host directory via `SourceRegistry::add` (R37's checks), and never a path that is in the vault or contains it, a hidden (`.`-component) or system (`/etc`, `/proc`, `/sys`, `/dev`, `/boot`) path, or (when set) one outside `IDEA_VAULT_MCP_SOURCE_ROOTS`; edit and removal stay on `/sources` (ADR-0044) |
 | `attach_sources` | sync | Merge `attach`/`detach` name lists into an idea's frontmatter `sources:` through R43's write path (job-slot claim, a newly added name must be registered); returns the attached set with statuses (ADR-0044) |
 | `create_idea` | sync | New Draft |
 | `reopen_idea` | sync | Stored → Reopened |
