@@ -80,7 +80,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D42), and ADRs 0001–0042. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D42), and ADRs 0001–0043. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -187,9 +187,27 @@ bash scripts/gate.sh      # the fixed 7-step shipping gate, no skip: intent (+fr
 bash scripts/gate.sh --list           # print the step table
 bash scripts/gate.sh --install-hook   # install the pre-push hook (runs check-invariants.sh --strict); use alone
 bash scripts/check-invariants.sh --list   # the invariant catalog: id|severity|ADR/D|zero-state
+bash scripts/session-up.sh [--status|--down]        # agent session: build if needed, boot on the claude-code backend with /api/mcp on
+python3 scripts/session-mcp.py call <tool> '<json>'  # drive it over MCP (tools: list them with `tools`); waits out long-running tools
 cargo run -- validate      # read-only vault check (IDEA_VAULT_VAULT_DIR): frontmatter, MEMORY.md coverage, duplicate memories; exit 1 on any finding
 cargo run -- regrade [--idea <slug>] [--parser audit|facts|contract|plan-gates] [--strict]   # replay today's parsers over vault/*/.runs (read-only; ADR-0038)
 ```
+
+**Agent sessions (Claude Code on the web).** When the owner asks to brainstorm "with idea vault" in
+a session, run the app itself; don't re-create its prompts by hand. Boot it with
+`scripts/session-up.sh` and drive it with `scripts/session-mcp.py`: `create_idea`, then the
+owner's material as `chat` messages, `run_skill`/`run_swarm`/`run_workflow`, and `store_idea`.
+Run one long call per idea at a time, in the background. If `index.crates.io` is blocked, cargo
+needs `CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git CARGO_NET_GIT_FETCH_WITH_CLI=true`;
+`scripts/session-build.sh` sets them itself. Never commit `vault/`. See
+[docs/12-deployment.md](docs/12-deployment.md) "Agent sessions".
+
+**Obsidian and Graphify** are optional derived layers ([docs/15](docs/15-obsidian-and-graphify.md),
+[ADR-0043](docs/adr/0043-obsidian-and-graphify-as-derived-layers.md), Proposed). Obsidian is a
+view-only second reader over `vault/`, and it must keep `created`/`updated` typed as Text. Graphify
+runs only on reference sources or this codebase, never into `vault/`, never as truth or memory, and
+never on an auto-picked cloud backend. Don't add Obsidian or Graphify code paths unless the owner
+accepts an ADR-0043 option.
 
 Ollama must be running locally (`ollama serve`, model pulled) for AI features to work; the app
 should detect its absence and surface a clear UI state rather than hanging.

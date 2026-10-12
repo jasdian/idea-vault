@@ -1,27 +1,33 @@
-# Intent — a green merge does not run the CI gate again (issue #12, ADR-0041, D41)
+# Intent — Obsidian and Graphify as derived layers: findings and setup (ADR-0043)
 
-A pull request's CI runs the whole no-mistakes gate on its merge commit, and the push to main that
-merges it ran the same gate again on byte-identical files whenever main had not moved under the
-PR: one full compile and test run per merge, for nothing. This change keeps the push-to-main run
-(it is the hotfix trigger and catches a semantic conflict when main moved) but lets it skip the
-gate when its commit's tree already passed the gate on a pull request. A green pull-request run
-uploads a `gate-green-<tree sha>` artifact; the push run's first step looks for that artifact and,
-if a successful same-repository `pull_request` run of `ci.yml` uploaded it and the push leaves
-`.github/workflows/` untouched, skips the remaining steps. docs/10, docs/14 and CLAUDE.md describe the skip. The gate script itself is not edited.
+The owner wants Obsidian (graph browsing over markdown) and Graphify (knowledge-graph builder)
+working with idea-vault, to cut model context and improve output. This change records what was
+found and how to set it up today, and changes no code:
+
+- `docs/15-obsidian-and-graphify.md` holds research findings on Obsidian 1.12+ and Graphify
+  0.9.85, checked against their sources. It also records what idea-vault tolerates (tested with
+  `validate`), and a four-layer setup guide:
+  - Obsidian over the vault, view-only by default
+  - your notes as a reference source with a measured, opt-in Graphify map
+  - Graphify `--code-only` on this repo
+  - Obsidian MCP in your own Claude Code session, never the foil
+- `docs/adr/0043` is **Proposed**. It lists options A–G that need code or a format change, each
+  for the owner to accept or reject.
+
+The design was stress-tested through idea-vault's own `interrogate` workflow, and the guide carries
+its corrections. The ADR range in CLAUDE.md and docs/README moves to 0043, and docs/12 links the
+guide.
 
 ## Acceptance criteria
 
-- A pull request whose gate is green uploads one artifact named `gate-green-<tree>`, where `<tree>`
-  is `git rev-parse 'HEAD^{tree}'` of the PR merge commit; a red gate uploads none.
-- A push to main whose commit tree equals a green, unexpired, same-repository `pull_request` run's
-  marker finishes CI green after only the checkout (no toolchain, cache, fetch or gate), and its
-  step summary links the pull-request run.
-- Any other push to main (one that changes `.github/workflows/`, since a PR that edits the
-  workflow could drop the gate from its own run; no marker, an expired marker, a marker from a fork
-  run or a run that is not a successful `pull_request` run of `ci.yml`; or any API error) runs the
-  whole gate as before. The skip step itself never fails and logs why it did not skip.
-- `actionlint` (with shellcheck) is clean on `.github/workflows/`, the new action is pinned to a
-  commit, and `bash scripts/gate.sh` is green locally.
+- `docs/15` states every external fact with its source. It marks the Graphify token claim as
+  self-measured, and lists as tested only what was run: the `validate` tolerance table, the
+  journal measurement snippet, and the wrapper's refusal with a cloud key set.
+- Every setup step works with the code on this branch. No step needs an ADR-0043 option.
+- `docs/adr/0043` has status Proposed and lists each option with its cost and gate.
+- CLAUDE.md and docs/README name ADRs 0001–0043, and `scripts/check-invariants.sh --strict` is
+  clean.
+- `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
