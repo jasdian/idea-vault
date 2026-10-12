@@ -97,6 +97,10 @@ pub struct Config {
     /// (mirrors the "detect absence, surface a clear state" discipline applied elsewhere, e.g.
     /// Ollama's own absence).
     pub mcp_server_token: Option<String>,
+    /// `IDEA_VAULT_MCP_SOURCE_ROOTS` (docs/adr/0044): `:`-separated directories an MCP
+    /// `register_source` path must lie under. Empty (unset) means no root limit; MCP registration
+    /// still refuses hidden and system paths. The Sources page is not limited by it.
+    pub mcp_source_roots: Vec<PathBuf>,
 }
 
 /// Settings for the claude-code backend. `cwd` deliberately defaults to the vault dir (never the
@@ -305,6 +309,7 @@ impl Config {
 
         // Inbound MCP server gate (docs/adr/0024): unset or blank leaves the feature unmounted.
         let mcp_server_token = lookup("IDEA_VAULT_MCP_TOKEN").filter(|s| !s.trim().is_empty());
+        let mcp_source_roots = split_paths(lookup("IDEA_VAULT_MCP_SOURCE_ROOTS"));
 
         let claude = ClaudeSettings {
             binary: lookup("IDEA_VAULT_CLAUDE_BIN")
@@ -346,6 +351,7 @@ impl Config {
             skills_dir,
             workflows_dir,
             mcp_server_token,
+            mcp_source_roots,
         }
     }
 }
@@ -698,6 +704,20 @@ mod tests {
         map.insert("IDEA_VAULT_AI_CONCURRENCY", "not-a-number");
         let cfg = Config::from_lookup(lookup_from(map));
         assert_eq!(cfg.ai_concurrency, DEFAULT_AI_CONCURRENCY);
+    }
+
+    #[test]
+    fn mcp_source_roots_split_on_colons_and_default_to_no_limit() {
+        let cfg = Config::from_lookup(lookup_from(HashMap::new()));
+        assert!(cfg.mcp_source_roots.is_empty());
+        let cfg = Config::from_lookup(lookup_from(HashMap::from([(
+            "IDEA_VAULT_MCP_SOURCE_ROOTS",
+            "/home/me/ref: /srv/maps:",
+        )])));
+        assert_eq!(
+            cfg.mcp_source_roots,
+            vec![PathBuf::from("/home/me/ref"), PathBuf::from("/srv/maps")]
+        );
     }
 
     #[test]

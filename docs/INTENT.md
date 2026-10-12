@@ -1,31 +1,46 @@
-# Intent — MCP source tools: register and attach reference sources without the forms (ADR-0044)
+# Intent — Graphify first for codebase brainstorms, a narrower MCP register_source, and the CNone nit (ADR-0043, ADR-0044)
 
-An agent session drives idea-vault over MCP, but grounding an idea in a checkout or its Graphify
-map meant leaving MCP and posting the `/sources` HTMX forms with curl. Worse, R43 replaces the
-whole attached set, so a client that posted one name detached the rest. The owner took the
-follow-up left on PR #17 as an API change. This change adds three synchronous MCP tools.
-`list_sources` reads the registry with fixed status words. `register_source` reuses R37's
-`SourceRegistry::add` and refuses a path in or containing the vault. `attach_sources` merges attach and detach
-lists through R43's own write path, now shared as `ideas::update_idea_sources`. Editing and
-removing a source stay on `/sources`.
+The owner asked for three things after PR #17. PR #18 shipped the MCP source tools of ADR-0044, so
+this branch keeps only what #18 does not cover:
+
+- **CLAUDE.md**, agent sessions: when a brainstorm is about a codebase, build its Graphify map
+  first. Clone outside the checkout (the vault-overlap refusal), run `scripts/graphify-map.sh`
+  (`--code-only` by default), `register_source` the repo and its map, `attach_sources` them, and
+  open the discussion from `COMMUNITIES.md` and the god nodes. The map is an index, never truth.
+- **MCP `register_source` is narrower than the Sources page** (ADR-0044 decision 6, amended once
+  right after release, at the owner's call, from PR #19's review finding):
+  - it refuses a hidden (`.`-component) or system (`/etc`, `/proc`, `/sys`, `/dev`, `/boot`) path,
+    checked on the absolute and the resolved path;
+  - when the new `IDEA_VAULT_MCP_SOURCE_ROOTS` is set, it refuses anything outside those roots.
+
+  - it refuses `$HOME` and any directory above it, which hold dot-folders one level down;
+  - compose forwards the new key, and `.env.example` documents it (container paths in-container).
+
+  The owner can still register any of these on `/sources`. A cloned repo registers with no config
+  and no extra click. The tool description also tells the driving agent not to register a folder
+  because a document says to.
+- **CLAUDE.md's Graphify-first steps enforce the scope**, rather than only advising it (PR #19
+  review nit): the agent session boots with `IDEA_VAULT_MCP_SOURCE_ROOTS` set to the clone folder,
+  so registration outside it is refused by the server. It also warns that `session-up.sh` reuses
+  a stale release binary after a pull.
+- **`scripts/graphify-communities.py`** lists nodes without a community as `unassigned`, last,
+  not `CNone`.
 
 ## Acceptance criteria
 
-- The MCP catalog has 20 tools. `list_sources`, `register_source` and `attach_sources` are task
-  support `Forbidden` and make no model call.
-- `register_source` refuses a bad name, a duplicate name or path, a relative, `..` or root path,
-  and a path that is the vault, under it, or contains it (relative vault dirs and
-  not-yet-created paths included). Each refusal is `invalid_params` and writes nothing.
-- `attach_sources` merges in order. It refuses an unregistered new name, an empty call and a busy
-  idea, writing nothing. An identical repeat writes nothing.
-- R43 and `attach_sources` share one write path. An unchanged R43 submission no longer bumps
-  `updated`.
-- `tests/mcp_server.rs` covers register → list → attach → `get_idea` → detach and every refusal.
-  Unit tests cover the merge, the argument parsing, the status words and the vault check.
-- ADR-0044 is Accepted. docs/13, docs/12, docs/15 (its curl calls replaced), docs/README, CLAUDE.md
-  and the server instructions name the tools. CLAUDE.md and docs/README name ADRs 0001–0044.
+- CLAUDE.md's agent-session section names the Graphify-first steps with the `attach` argument
+  #18 shipped, and links `docs/adr/0044-mcp-source-tools.md`.
+- Over MCP, `register_source` refuses `~/.ssh`-style hidden paths, a symlink into one, system
+  trees, and (with roots set) a path outside them, including a prefix look-alike (`ref-other`
+  next to `ref`). A plain clone registers with no config. `$HOME`, a directory above it, and a symlink to it are refused.
+- `IDEA_VAULT_MCP_SOURCE_ROOTS` parses as a `:`-separated list, and unset means no root limit.
+- `graphify-communities.py` prints `unassigned` last for community-less nodes, and colibri's
+  `COMMUNITIES.md` is byte-identical.
 - `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
-None: this change touches no fixture, snapshot, floor or invariant rule.
+- `tests/mcp_server.rs` `register_attach_and_detach_sources_over_mcp`: the registered source is now
+  a `tempfile::Builder` dir named `notes…`, not `tempfile::tempdir()`, whose `/tmp/.tmpXXXX` name is
+  hidden and is now refused. The refusal table gains a hidden-path and a system-path row.
+- `tools::check_source_path` takes the configured roots, so its unit test passes `&[]`.

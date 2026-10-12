@@ -2458,7 +2458,9 @@ async fn register_attach_and_detach_sources_over_mcp() {
     let jobs = state.jobs.clone();
     let app = build_router(state);
     let session = handshake(&app).await;
-    let outside = tempfile::tempdir().unwrap();
+    // Not `tempfile::tempdir()`: its `.tmpXXXX` name is hidden, which MCP registration refuses
+    // (docs/adr/0044 decision 6).
+    let outside = tempfile::Builder::new().prefix("notes").tempdir().unwrap();
     std::fs::write(outside.path().join("README.md"), "hello").unwrap();
     let path = outside.path().to_str().unwrap();
 
@@ -2498,6 +2500,20 @@ async fn register_attach_and_detach_sources_over_mcp() {
         // Relative paths fail on the path check, before the vault check can read them.
         (json!({ "name": "dot", "path": "." }), "absolute"),
         (json!({ "name": "dotdot", "path": ".." }), "absolute"),
+        // Hidden and system paths stay owner-only (docs/adr/0044 decision 6).
+        (
+            json!({ "name": "ssh", "path": "/home/someone/.ssh" }),
+            "hidden directory",
+        ),
+        (
+            json!({ "name": "etc", "path": "/etc/ssl" }),
+            "system directory",
+        ),
+        // `$HOME` itself has no hidden component, but holds them one level down.
+        (
+            json!({ "name": "home", "path": std::env::var("HOME").expect("HOME is set") }),
+            "home directory",
+        ),
     ] {
         let msg = error_of(call_tool_body(&app, &session, "register_source", args.clone()).await);
         assert!(msg.contains(needle), "{args}: {msg}");

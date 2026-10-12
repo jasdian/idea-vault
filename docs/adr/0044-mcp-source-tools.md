@@ -54,14 +54,51 @@ We will add three synchronous tools (task support `Forbidden`, no model call, no
 5. **R43 changes in one respect:** an unchanged submission writes nothing and skips the reindex,
    so `updated` is no longer bumped by a no-op save. That is the shared write path's rule, and it
    makes a repeated `attach_sources` idempotent from the vault itself.
+6. **MCP registration is narrower than the Sources page** (amended once, 2026-10-12, right after
+   release, from a review finding on PR #19). After the checks above, `register_source` also
+   refuses two kinds of path. Both checks run on the absolute path and again on the resolved one,
+   so a symlink can't pass, and a path that cannot be resolved is refused.
+   - **A hidden or system path:** any component that starts with `.` (`~/.ssh`, `~/.aws`,
+     `~/.config`, a repo's `.git`), or a path under `/etc`, `/proc`, `/sys`, `/dev` or `/boot`.
+   - **`$HOME`, or any directory above it**, as the app sees `$HOME` (in a container, the
+     container's). It has no hidden component itself, but it holds every dot-folder one level
+     down.
+   - **A path outside `IDEA_VAULT_MCP_SOURCE_ROOTS`**, when that is set. It is a `:`-separated
+     list of directories (e.g. `~/ref`), compared resolved on both sides. Unset means no root
+     limit. The paths are the app's own, so in a container they are container paths. Compose
+     forwards the key from `.env`.
+
+   **The always-on checks are best-effort; the roots are the real guard.** Without roots, a plain
+   directory such as `/var` or `/usr` (or another user's readable home) still registers.
+   `IDEA_VAULT_MCP_SOURCE_ROOTS` is the setting that bounds what MCP can expose, and agent sessions
+   set it (CLAUDE.md).
+
+   **Not covered:**
+   - A directory outside `$HOME` that holds someone's secrets without hiding them (e.g. a
+     `/srv/keys` with no dot-folder). Setting the roots closes this.
+   - A symlink *inside* a registered source that points elsewhere. The Ollama `source_*` leaves
+     refuse it (ADR-0021's canonical-root check). On claude-code, `--add-dir` gives no such
+     guarantee. Setting the roots does not change this.
+   - A registered directory swapped for a symlink after registration. The registry keeps the path
+     as given and checks it once. Re-checking at attach would also refuse sources the owner
+     registered on purpose on `/sources`, which is allowed to register hidden paths. Exploiting it
+     needs filesystem access that already reads the target.
+
+   The refusal names the reason and says the owner can still register the path on `/sources`,
+   which neither check limits. A cloned repository or a map built beside it registers with no
+   config and no extra click. The bar for MCP is higher than the form's because an agent session
+   driving MCP reads untrusted repository text and can be prompt-injected. The owner at the form
+   cannot be.
 
 ## Consequences
 
 - Easier: a session grounds an idea in a repository or its map entirely over MCP, and cannot
   detach a source by naming only the one it wanted.
-- Harder: an MCP token now lets its holder point the foil at any host directory the app's user
-  can read, as the localhost `/sources` form already did. The foil still reads sources only
-  through the ADR-0021 tools and the ADR-0039 lockdown, and never over a path that overlaps the vault.
+- Harder: an MCP token now lets its holder point the foil at a host directory the app's user can
+  read, as the localhost `/sources` form already did, though not at the vault, a hidden or system
+  path, or (when set) anything outside `IDEA_VAULT_MCP_SOURCE_ROOTS` (decision 6). The foil still
+  reads sources only through the ADR-0021 tools and the ADR-0039 lockdown. An owner who wants
+  agent sessions to register only under one folder sets the roots once.
 - Invariants: frontmatter `sources:` stays the truth; MCP adds no second write path for it, and
   the app still never runs docker (ADR-0020). A container registration reads `needs_reup` until
   the owner re-ups.
