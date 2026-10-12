@@ -18,8 +18,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 die() { echo "graphify-map: $*" >&2; exit 1; }
 
 [ $# -ge 2 ] || die "usage: $0 <source-dir> <map-dir> [--backend ollama|claude-cli] [--viz]"
-SRC="$(realpath -e "$1" 2>/dev/null)" || die "no such source dir: $1"
-MAP="$(realpath -m "$2")"
+# Portable absolute path with symlinks resolved, for a path that may not exist yet (GNU realpath's
+# -e/-m flags are missing on macOS; python3 is already needed for the community index).
+abspath() { python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+[ -e "$1" ] || die "no such source dir: $1"
+SRC="$(abspath "$1")"
+MAP="$(abspath "$2")"
 shift 2
 MODE=code-only
 VIZ=--no-viz
@@ -47,7 +51,7 @@ done
 # Placement: the map is derived and rebuildable. Inside the source it would be fed back into the
 # next build (and the source is read-only, ADR-0021); inside the vault it would sit next to truth.
 inside() { case "$1/" in "$2"/*) return 0 ;; *) return 1 ;; esac; }
-VAULT="$(realpath -m "${IDEA_VAULT_VAULT_DIR:-$ROOT/vault}")"
+VAULT="$(abspath "${IDEA_VAULT_VAULT_DIR:-$ROOT/vault}")"
 inside "$MAP" "$SRC" && die "map dir $MAP is inside the source; put it beside it (e.g. ${SRC}-map)"
 inside "$SRC" "$MAP" && die "source $SRC is inside the map dir"
 inside "$MAP" "$VAULT" && die "map dir $MAP is inside the vault ($VAULT); Graphify output is never vault content"

@@ -352,7 +352,8 @@ So exclude tests and generated code, and use `--code-only`.
 ```bash
 cd <repo>
 printf 'tests/\n**/*_test.*\ntarget/\nnode_modules/\ndist/\n*.min.js\n' > .graphifyignore   # gitignore syntax
-echo .graphifyignore >> .git/info/exclude                    # keep a clone you don't own clean
+ex="$(git rev-parse --git-path info/exclude)"                 # works in worktrees and submodules too
+grep -qxF .graphifyignore "$ex" 2>/dev/null || echo .graphifyignore >> "$ex"   # keep a clone you don't own clean
 bash <idea-vault>/scripts/graphify-map.sh . ../<repo>-map    # --code-only by default; the map goes beside the repo
 graphify hook install          # optional: rebuild on commit and checkout; run `graphify update .` after `git pull`
 graphify install --project     # optional: the /graphify skill for this repo (in idea-vault, .claude/ stays unversioned, ADR-0041)
