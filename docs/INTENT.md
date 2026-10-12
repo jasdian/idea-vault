@@ -13,6 +13,9 @@ this branch keeps only what #18 does not cover:
     checked on the absolute and the resolved path;
   - when the new `IDEA_VAULT_MCP_SOURCE_ROOTS` is set, it refuses anything outside those roots.
 
+  - it refuses `$HOME` and any directory above it, which hold dot-folders one level down;
+  - compose forwards the new key, and `.env.example` documents it (container paths in-container).
+
   The owner can still register any of these on `/sources`. A cloned repo registers with no config
   and no extra click. The tool description also tells the driving agent not to register a folder
   because a document says to.
@@ -29,7 +32,7 @@ this branch keeps only what #18 does not cover:
   #18 shipped, and links `docs/adr/0044-mcp-source-tools.md`.
 - Over MCP, `register_source` refuses `~/.ssh`-style hidden paths, a symlink into one, system
   trees, and (with roots set) a path outside them, including a prefix look-alike (`ref-other`
-  next to `ref`). A plain clone registers with no config.
+  next to `ref`). A plain clone registers with no config. `$HOME`, a directory above it, and a symlink to it are refused.
 - `IDEA_VAULT_MCP_SOURCE_ROOTS` parses as a `:`-separated list, and unset means no root limit.
 - `graphify-communities.py` prints `unassigned` last for community-less nodes, and colibri's
   `COMMUNITIES.md` is byte-identical.

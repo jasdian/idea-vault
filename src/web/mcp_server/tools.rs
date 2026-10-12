@@ -777,9 +777,10 @@ fn overlaps_vault(vault_dir: &std::path::Path, path: &std::path::Path) -> bool {
 const MCP_SOURCE_SYSTEM_TREES: [&str; 5] = ["/etc", "/proc", "/sys", "/dev", "/boot"];
 
 /// Why an MCP registration of `path` is refused as sensitive, if it is (docs/adr/0044): a hidden
-/// component (`~/.ssh`, `~/.aws`, `~/.config`, a repo's `.git`) or a system tree. Checked on the
-/// absolute and on the resolved path; a path that cannot be resolved fails closed.
-fn sensitive_source_path(path: &std::path::Path) -> Option<String> {
+/// component (`~/.ssh`, `~/.aws`, `~/.config`, a repo's `.git`), a system tree, or `home` itself
+/// or any directory above it (registering `~` would expose every dot-folder one level down).
+/// Checked on the absolute and on the resolved path; a path that cannot be resolved fails closed.
+fn sensitive_source_path(path: &std::path::Path, home: Option<&std::path::Path>) -> Option<String> {
     let hidden = |p: &std::path::Path| {
         p.components().any(|c| {
             matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.'))
@@ -799,6 +800,14 @@ fn sensitive_source_path(path: &std::path::Path) -> Option<String> {
     }
     if system(&abs) || system(&real) {
         return Some("it is in a system directory".to_string());
+    }
+    let holds = |h: Option<std::path::PathBuf>| {
+        h.is_some_and(|h| h.starts_with(&abs) || h.starts_with(&real))
+    };
+    if home.is_some_and(|h| holds(std::path::absolute(h).ok()) || holds(resolved(h))) {
+        return Some(
+            "it is the home directory or contains it, which holds its dot-folders".to_string(),
+        );
     }
     None
 }
@@ -824,6 +833,7 @@ fn under_source_roots(roots: &[std::path::PathBuf], path: &std::path::Path) -> b
 fn check_source_path(
     vault_dir: &std::path::Path,
     roots: &[std::path::PathBuf],
+    home: Option<&std::path::Path>,
     path: &std::path::Path,
 ) -> Result<(), String> {
     crate::sources::validate_host_path(path)?;
@@ -834,7 +844,7 @@ fn check_source_path(
             path.display()
         ));
     }
-    if let Some(why) = sensitive_source_path(path) {
+    if let Some(why) = sensitive_source_path(path, home) {
         return Err(format!(
             "'{}' is not registered over MCP: {why}. Only the owner can register it, on the \
              /sources page",
@@ -868,9 +878,12 @@ fn register_source(state: &AppState, args: &Value) -> Result<CallToolResult, Mcp
             None,
         )
     })?;
+    // `$HOME` as the app sees it (in a container, the container's): its tree is off limits.
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     check_source_path(
         &state.config.vault_dir,
         &state.config.mcp_source_roots,
+        home.as_deref(),
         &path,
     )
     .map_err(|e| McpError::invalid_params(e, None))?;
@@ -1192,18 +1205,18 @@ mod tests {
         let home = tempfile::Builder::new().prefix("home").tempdir().unwrap();
         let clone = home.path().join("ref/colibri");
         std::fs::create_dir_all(&clone).unwrap();
-        assert_eq!(sensitive_source_path(&clone), None);
+        assert_eq!(sensitive_source_path(&clone, None), None);
         // Not created yet: still plain.
         assert_eq!(
-            sensitive_source_path(&home.path().join("ref/new-map")),
+            sensitive_source_path(&home.path().join("ref/new-map"), None),
             None
         );
         for hidden in [".ssh", ".aws/creds", ".config/x", "ref/colibri/.git"] {
-            let why = sensitive_source_path(&home.path().join(hidden));
+            let why = sensitive_source_path(&home.path().join(hidden), None);
             assert!(why.is_some_and(|w| w.contains("hidden")), "{hidden}");
         }
         for system in ["/etc", "/etc/ssl", "/proc/self", "/sys", "/dev", "/boot"] {
-            let why = sensitive_source_path(std::path::Path::new(system));
+            let why = sensitive_source_path(std::path::Path::new(system), None);
             assert!(why.is_some_and(|w| w.contains("system")), "{system}");
         }
         // A symlink that looks plain but lands in a hidden directory is caught on the resolved form.
@@ -1213,7 +1226,43 @@ mod tests {
             std::fs::create_dir_all(&secret).unwrap();
             let link = home.path().join("innocent");
             std::os::unix::fs::symlink(&secret, &link).unwrap();
-            assert!(sensitive_source_path(&link).is_some());
+            assert!(sensitive_source_path(&link, None).is_some());
+        }
+    }
+
+    #[test]
+    fn mcp_registration_refuses_home_and_every_directory_above_it_but_not_below() {
+        let base = tempfile::Builder::new().prefix("base").tempdir().unwrap();
+        let home = base.path().join("users/me");
+        std::fs::create_dir_all(home.join("ref/colibri")).unwrap();
+        for holds in [
+            home.clone(),
+            base.path().join("users"),
+            base.path().to_path_buf(),
+        ] {
+            let why = sensitive_source_path(&holds, Some(&home));
+            assert!(
+                why.is_some_and(|w| w.contains("home")),
+                "{}",
+                holds.display()
+            );
+        }
+        assert!(sensitive_source_path(std::path::Path::new("/"), Some(&home)).is_some());
+        // Below home, and beside it, are fine.
+        assert_eq!(
+            sensitive_source_path(&home.join("ref/colibri"), Some(&home)),
+            None
+        );
+        assert_eq!(
+            sensitive_source_path(&base.path().join("users/other"), Some(&home)),
+            None
+        );
+        // A symlink to home is caught on the resolved form.
+        #[cfg(unix)]
+        {
+            let link = base.path().join("shortcut");
+            std::os::unix::fs::symlink(&home, &link).unwrap();
+            assert!(sensitive_source_path(&link, Some(&home)).is_some());
         }
     }
 
@@ -1232,9 +1281,9 @@ mod tests {
         // `ref-other` shares a prefix string with `ref` but is not under it.
         assert!(!under_source_roots(&roots, &home.path().join("ref-other")));
         let vault = home.path().join("vault");
-        let err = check_source_path(&vault, &roots, &elsewhere).unwrap_err();
+        let err = check_source_path(&vault, &roots, None, &elsewhere).unwrap_err();
         assert!(err.contains("IDEA_VAULT_MCP_SOURCE_ROOTS"), "{err}");
-        assert!(check_source_path(&vault, &roots, &root.join("colibri")).is_ok());
+        assert!(check_source_path(&vault, &roots, None, &root.join("colibri")).is_ok());
     }
 
     #[test]
@@ -1243,13 +1292,13 @@ mod tests {
         // both contain it; the path check must speak first.
         let vault = std::path::Path::new("./vault");
         for rel in [".", "..", "vault/sub"] {
-            let err = check_source_path(vault, &[], std::path::Path::new(rel)).unwrap_err();
+            let err = check_source_path(vault, &[], None, std::path::Path::new(rel)).unwrap_err();
             assert!(err.contains("must be an absolute path"), "{rel}: {err}");
         }
         let cwd = std::env::current_dir().unwrap();
-        let err = check_source_path(vault, &[], &cwd).unwrap_err();
+        let err = check_source_path(vault, &[], None, &cwd).unwrap_err();
         assert!(err.contains("overlaps the vault"), "{err}");
-        assert!(check_source_path(vault, &[], &cwd.join("elsewhere")).is_ok());
+        assert!(check_source_path(vault, &[], None, &cwd.join("elsewhere")).is_ok());
     }
 
     #[test]

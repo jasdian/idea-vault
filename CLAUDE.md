@@ -273,7 +273,8 @@ turn) and `IDEA_VAULT_CLAUDE_ENV_PASS` (comma-separated extra env names the clau
 on top of a fixed pass-list; `IDEA_VAULT_*` keys are never passed;
 [ADR-0039](docs/adr/0039-foil-hygiene-and-lockdown.md)),
 `IDEA_VAULT_MCP_SOURCE_ROOTS` (unset = no root limit; `:`-separated dirs an MCP `register_source`
-path must lie under, on top of its always-on refusal of hidden and system paths; ADR-0044), and
+path must lie under, on top of its always-on refusal of hidden, system and `$HOME`-holding paths;
+container paths in-container; ADR-0044), and
 `IDEA_VAULT_WORKFLOWS_DIR` (default `<vault>/.workflows`, owner workflow files, app config not vault
 truth; [ADR-0035](docs/adr/0035-workflows-as-markdown-and-the-workflow-book.md)). All of the above
 are only the **initial** values — the live Settings page (`GET`/`POST /settings`,

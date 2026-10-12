@@ -60,9 +60,20 @@ We will add three synchronous tools (task support `Forbidden`, no model call, no
    so a symlink can't pass, and a path that cannot be resolved is refused.
    - **A hidden or system path:** any component that starts with `.` (`~/.ssh`, `~/.aws`,
      `~/.config`, a repo's `.git`), or a path under `/etc`, `/proc`, `/sys`, `/dev` or `/boot`.
+   - **`$HOME`, or any directory above it**, as the app sees `$HOME` (in a container, the
+     container's). It has no hidden component itself, but it holds every dot-folder one level
+     down.
    - **A path outside `IDEA_VAULT_MCP_SOURCE_ROOTS`**, when that is set. It is a `:`-separated
      list of directories (e.g. `~/ref`), compared resolved on both sides. Unset means no root
-     limit.
+     limit. The paths are the app's own, so in a container they are container paths. Compose
+     forwards the key from `.env`.
+
+   **Not covered:**
+   - A directory outside `$HOME` that holds someone's secrets without hiding them (e.g. a
+     `/srv/keys` with no dot-folder). Setting the roots closes this.
+   - A symlink *inside* a registered source that points elsewhere. The Ollama `source_*` leaves
+     refuse it (ADR-0021's canonical-root check). On claude-code, `--add-dir` gives no such
+     guarantee. Setting the roots does not change this.
 
    The refusal names the reason and says the owner can still register the path on `/sources`,
    which neither check limits. A cloned repository or a map built beside it registers with no

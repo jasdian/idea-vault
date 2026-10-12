@@ -2509,6 +2509,11 @@ async fn register_attach_and_detach_sources_over_mcp() {
             json!({ "name": "etc", "path": "/etc/ssl" }),
             "system directory",
         ),
+        // `$HOME` itself has no hidden component, but holds them one level down.
+        (
+            json!({ "name": "home", "path": std::env::var("HOME").expect("HOME is set") }),
+            "home directory",
+        ),
     ] {
         let msg = error_of(call_tool_body(&app, &session, "register_source", args.clone()).await);
         assert!(msg.contains(needle), "{args}: {msg}");
