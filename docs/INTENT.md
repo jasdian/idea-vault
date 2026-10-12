@@ -1,32 +1,28 @@
-# Intent — Obsidian and Graphify as derived layers: findings and setup (ADR-0043)
+# Intent — MCP source tools: register and attach reference sources without the forms (ADR-0044)
 
-The owner wants Obsidian (graph browsing over markdown) and Graphify (knowledge-graph builder)
-working with idea-vault, to cut model context and improve output. This change records what was
-found and how to set it up today, and changes no code:
-
-- `docs/15-obsidian-and-graphify.md` holds research findings on Obsidian 1.12+ and Graphify
-  0.9.85, checked against their sources. It also records what idea-vault tolerates (tested with
-  `validate`), and a four-layer setup guide:
-  - Obsidian over the vault, view-only by default
-  - your notes as a reference source with a measured, opt-in Graphify map
-  - Graphify `--code-only` on this repo
-  - Obsidian MCP in your own Claude Code session, never the foil
-- `docs/adr/0043` is **Proposed**. It lists options A–G that need code or a format change, each
-  for the owner to accept or reject.
-
-The design was stress-tested through idea-vault's own `interrogate` workflow, and the guide carries
-its corrections. The ADR range in CLAUDE.md and docs/README moves to 0043, and docs/12 links the
-guide.
+An agent session drives idea-vault over MCP, but grounding an idea in a checkout or its Graphify
+map meant leaving MCP and posting the `/sources` HTMX forms with curl. Worse, R43 replaces the
+whole attached set, so a client that posted one name detached the rest. The owner took the
+follow-up left on PR #17 as an API change. This change adds three synchronous MCP tools.
+`list_sources` reads the registry with fixed status words. `register_source` reuses R37's
+`SourceRegistry::add` and refuses a path in the vault. `attach_sources` merges attach and detach
+lists through R43's own write path, now shared as `ideas::update_idea_sources`. Editing and
+removing a source stay on `/sources`.
 
 ## Acceptance criteria
 
-- `docs/15` states every external fact with its source. It marks the Graphify token claim as
-  self-measured, and lists as tested only what was run: the `validate` tolerance table, the
-  journal measurement snippet, and the wrapper's refusal with a cloud key set.
-- Every setup step works with the code on this branch. No step needs an ADR-0043 option.
-- `docs/adr/0043` has status Proposed and lists each option with its cost and gate.
-- CLAUDE.md and docs/README name ADRs 0001–0043, and `scripts/check-invariants.sh --strict` is
-  clean.
+- The MCP catalog has 20 tools. `list_sources`, `register_source` and `attach_sources` are task
+  support `Forbidden` and make no model call.
+- `register_source` refuses a bad name, a duplicate name or path, a relative, `..` or root path,
+  and a path that is the vault or under it. Each refusal is `invalid_params` and writes nothing.
+- `attach_sources` merges in order. It refuses an unregistered new name, an empty call and a busy
+  idea, writing nothing. An identical repeat writes nothing.
+- R43 and `attach_sources` share one write path. An unchanged R43 submission no longer bumps
+  `updated`.
+- `tests/mcp_server.rs` covers register → list → attach → `get_idea` → detach and every refusal.
+  Unit tests cover the merge, the argument parsing, the status words and the vault check.
+- ADR-0044 is Accepted. docs/13, docs/12, docs/README, CLAUDE.md and the server instructions name
+  the tools. CLAUDE.md and docs/README name ADRs 0001–0044.
 - `bash scripts/gate.sh` is green.
 
 ## Expectation changes

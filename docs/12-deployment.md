@@ -486,6 +486,15 @@ python3 scripts/session-mcp.py call run_workflow '{"slug": "…", "name": "inter
 python3 scripts/session-mcp.py call store_idea '{"slug": "…"}'
 ```
 
+To ground an idea in a checkout (or a Graphify map of one, [docs/15](./15-obsidian-and-graphify.md)),
+register it and attach it over MCP too ([ADR-0044](./adr/0044-mcp-source-tools.md)). A bare run
+reads the host path directly, so the source is `readable` at once:
+
+```bash
+python3 scripts/session-mcp.py call register_source '{"name": "repo", "path": "/abs/path/to/checkout"}'
+python3 scripts/session-mcp.py call attach_sources '{"slug": "…", "attach": ["repo"]}'
+```
+
 The first boot in a fresh container compiles the release build (a few minutes). To have it ready
 before the session starts, have the cloud environment's **Setup script** (environment menu → Edit)
 run `bash scripts/session-build.sh` from the checkout. Nothing breaks without it.

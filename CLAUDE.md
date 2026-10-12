@@ -80,7 +80,7 @@ The state must be persisted in the idea's markdown frontmatter, not only in SQLi
 The full design foundation lives in [`docs/`](docs/README.md): architecture (C4), the
 single-crate module graph, the vault/SQLite data model, the lifecycle state machine, AI backend
 integration (Ollama + claude-code), the five harness concepts (memory/skills/agents/workflows/swarm),
-the web-UI routes, a Mermaid diagram catalog (D1–D42), and ADRs 0001–0043. Start at
+the web-UI routes, a Mermaid diagram catalog (D1–D42), and ADRs 0001–0044. Start at
 [docs/README.md](docs/README.md). The code is built against these docs; when a doc and the code
 disagree, treat it as drift to fix (in whichever direction is correct), not as license to ignore
 either.
@@ -269,7 +269,9 @@ source dirs on `/sources`; the app regenerates `vault/.docker-compose.sources.ym
 last when combined with other overrides) and apply each registry change yourself with
 `docker compose up -d`. Sources are attached per-idea via frontmatter `sources: [name]` and reach
 the model as deterministic `source_*` tools (Ollama) / `--add-dir` (claude-code) — never as
-model-authored paths.
+model-authored paths. Over MCP, `list_sources`, `register_source` (never a path in the vault) and
+`attach_sources` (merge, not replace) do the same without the forms; edit and removal stay on
+`/sources` ([ADR-0044](docs/adr/0044-mcp-source-tools.md)).
 
 ## Conventions
 

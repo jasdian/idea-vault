@@ -167,6 +167,9 @@ async fn tools_list_includes_the_catalog() {
         "list_workflows",
         "run_workflow",
         "get_artifact",
+        "list_sources",
+        "register_source",
+        "attach_sources",
     ] {
         assert!(
             names.contains(&expected),
@@ -2443,4 +2446,125 @@ async fn make_skill_refuses_a_draft_idea_and_an_undistillable_one_before_any_cal
     let body = call_tool_body(&app, &session, "make_skill", json!({ "slug": slug })).await;
     assert!(body["error"].is_object(), "a draft idea: {body}");
     assert!(mock.chat_bodies().is_empty());
+}
+
+/// ADR-0044: an agent session registers a directory, attaches it to an idea and detaches it again
+/// over MCP alone. Frontmatter is the truth `get_idea` reads back, and the refusals are
+/// `invalid_params` that write nothing.
+#[tokio::test]
+async fn register_attach_and_detach_sources_over_mcp() {
+    let (state, vault_dir) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let jobs = state.jobs.clone();
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("README.md"), "hello").unwrap();
+    let path = outside.path().to_str().unwrap();
+
+    let registered = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "register_source",
+            json!({ "name": "notes", "path": path }),
+        )
+        .await,
+    );
+    assert_eq!(registered["name"], "notes");
+    assert_eq!(registered["status"], "readable");
+    assert_eq!(registered["entries"], 1);
+
+    let error_of = |body: Value| body["error"]["message"].as_str().unwrap_or("").to_string();
+    // Duplicate name, bad name, a path in the vault, a relative path.
+    for (args, needle) in [
+        (
+            json!({ "name": "notes", "path": "/srv/other" }),
+            "already exists",
+        ),
+        (
+            json!({ "name": "Bad Name", "path": "/srv/other" }),
+            "invalid source name",
+        ),
+        (
+            json!({ "name": "inside", "path": vault_dir.to_str().unwrap() }),
+            "inside the vault",
+        ),
+        (json!({ "name": "rel", "path": "relative/dir" }), "absolute"),
+    ] {
+        let msg = error_of(call_tool_body(&app, &session, "register_source", args.clone()).await);
+        assert!(msg.contains(needle), "{args}: {msg}");
+    }
+
+    let listed = tool_json(&call_tool(&app, &session, "list_sources", json!({})).await);
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["path"], path);
+
+    let slug =
+        tool_json(&call_tool(&app, &session, "create_idea", json!({ "title": "Src" })).await)
+            ["slug"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let sources_of = |vault_dir: &std::path::Path| {
+        idea_vault::vault::store::read_idea(vault_dir, &slug)
+            .unwrap()
+            .frontmatter
+            .sources
+    };
+
+    let attached = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "attach_sources",
+            json!({ "slug": slug, "attach": ["notes"] }),
+        )
+        .await,
+    );
+    assert_eq!(attached["sources"][0]["name"], "notes");
+    assert_eq!(attached["sources"][0]["status"], "readable");
+    assert_eq!(sources_of(&vault_dir), ["notes"]);
+    let idea = tool_json(&call_tool(&app, &session, "get_idea", json!({ "slug": slug })).await);
+    assert_eq!(idea["sources"], json!(["notes"]));
+
+    // An unregistered name, an empty call, and a busy idea are refused and write nothing.
+    let msg = error_of(
+        call_tool_body(
+            &app,
+            &session,
+            "attach_sources",
+            json!({ "slug": slug, "attach": ["nope"] }),
+        )
+        .await,
+    );
+    assert!(msg.contains("no source named 'nope'"), "{msg}");
+    let msg =
+        error_of(call_tool_body(&app, &session, "attach_sources", json!({ "slug": slug })).await);
+    assert!(msg.contains("at least one source"), "{msg}");
+    assert!(idea_vault::web::jobs::try_claim(&jobs, &slug));
+    let msg = error_of(
+        call_tool_body(
+            &app,
+            &session,
+            "attach_sources",
+            json!({ "slug": slug, "detach": ["notes"] }),
+        )
+        .await,
+    );
+    assert!(msg.contains("in progress"), "{msg}");
+    idea_vault::web::jobs::mark_done(&jobs, &slug);
+    assert_eq!(sources_of(&vault_dir), ["notes"]);
+
+    let detached = tool_json(
+        &call_tool(
+            &app,
+            &session,
+            "attach_sources",
+            json!({ "slug": slug, "detach": ["notes"] }),
+        )
+        .await,
+    );
+    assert_eq!(detached["sources"], json!([]));
+    assert!(sources_of(&vault_dir).is_empty());
 }

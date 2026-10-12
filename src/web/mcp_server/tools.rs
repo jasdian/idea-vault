@@ -23,13 +23,16 @@ use serde_json::{json, Value};
 use chrono::Utc;
 
 use crate::concepts::build_plan::workbench::{self, AnswerChannel, AnswerRequest, WorkbenchError};
+use crate::domain::Name;
 use crate::index::{self, queries};
+use crate::sources::{SourceConfig, SourceStatus};
 use crate::vault::{store, VaultError};
 use crate::web::jobs;
-use crate::web::routes::ideas::create_idea_core;
+use crate::web::routes::ideas::{create_idea_core, update_idea_sources};
 use crate::web::routes::memory::{guard_discussion_state, reopen_idea_core};
 use crate::web::routes::{reindex_logged, scoped_llm};
 use crate::web::state::AppState;
+use crate::web::WebError;
 
 use super::tasks::TaskRegistry;
 
@@ -320,6 +323,54 @@ pub(super) fn catalog() -> Vec<Tool> {
             })),
         ),
         Tool::new(
+            "list_sources",
+            "List the registered reference sources (read-only directories the foil may read \
+             once attached to an idea): name, host path, and status — readable/mounted (with \
+             entries), needs_reup (the owner must run docker compose up -d), or missing.",
+            to_schema(schema_empty()),
+        ),
+        Tool::new(
+            "register_source",
+            "Register a read-only reference source: a name (lowercase letters, digits, '-') \
+             for an absolute host directory. Refused for a duplicate name or path, a relative \
+             or '..' path, the filesystem root, or a path in the vault. Editing and removing \
+             a source stay on the owner's /sources page. In a container the bind mount needs \
+             the owner's docker compose up -d before the source reads.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "source name, e.g. my-repo" },
+                    "path": { "type": "string", "description": "absolute host directory" },
+                },
+                "required": ["name", "path"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "attach_sources",
+            "Attach registered sources to an idea, or detach them, so the foil's turns can \
+             read them. Merges into the idea's current set (attach adds, detach removes); \
+             returns the set now attached. Refused while a run is in progress for the idea.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string", "description": "idea slug" },
+                    "attach": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "source names to add (from list_sources)",
+                    },
+                    "detach": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "source names to remove",
+                    },
+                },
+                "required": ["slug"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
             "get_artifact",
             "Read one markdown artifact of an idea (a swarm/extract finding or synthesis, a \
              build plan version, or quarantined memory facts) by its slug from get_idea's \
@@ -369,6 +420,9 @@ pub(super) async fn call_sync(
         "get_artifact" => get_artifact(state, &args),
         "get_plan" => get_plan(state, &args),
         "answer_plan" => answer_plan(state, &args).await,
+        "list_sources" => Ok(list_sources(state)),
+        "register_source" => register_source(state, &args),
+        "attach_sources" => attach_sources(state, &args),
         _ => Err(McpError::invalid_params(
             format!("unknown tool '{name}'"),
             None,
@@ -653,6 +707,174 @@ async fn answer_plan(state: &AppState, args: &Value) -> Result<CallToolResult, M
     }
 }
 
+/// One source's status as a stable machine word plus its entry count (docs/adr/0044). The words
+/// track `SourceStatus`, not the Sources page's prose: `readable` is a bare-mode host path,
+/// `mounted` a container bind (`entries: 0` is the ADR-0020 ghost-bind signal).
+fn source_status_json(bare_mode: bool, status: &SourceStatus) -> Value {
+    match status {
+        SourceStatus::Mounted { entries } if bare_mode => {
+            json!({ "status": "readable", "entries": entries })
+        }
+        SourceStatus::Mounted { entries } => json!({ "status": "mounted", "entries": entries }),
+        SourceStatus::NeedsReup => {
+            json!({ "status": "needs_reup", "hint": "the owner runs docker compose up -d" })
+        }
+        SourceStatus::Missing => json!({ "status": "missing" }),
+    }
+}
+
+fn source_json(bare_mode: bool, cfg: &SourceConfig, status: &SourceStatus) -> Value {
+    let mut v = source_status_json(bare_mode, status);
+    v["name"] = json!(cfg.name.as_str());
+    v["path"] = json!(cfg.host_path.display().to_string());
+    v
+}
+
+/// `list_sources` (docs/adr/0044): the registry with fresh statuses, in registry order.
+fn list_sources(state: &AppState) -> CallToolResult {
+    let bare_mode = state.config.sources_dir.is_none();
+    let payload: Vec<Value> = state
+        .sources
+        .statuses()
+        .iter()
+        .map(|(cfg, status)| source_json(bare_mode, cfg, status))
+        .collect();
+    CallToolResult::success(vec![Content::text(Value::Array(payload).to_string())])
+}
+
+/// Whether `path` is the vault or lies inside it, compared lexically and, when both resolve,
+/// canonically (a symlink into the vault counts). A source there would hand the foil every
+/// idea's notes and run journals, which ADR-0037 keeps out of any prompt.
+fn is_in_vault(vault_dir: &std::path::Path, path: &std::path::Path) -> bool {
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+    path.starts_with(vault_dir)
+        || matches!(
+            (canonical(vault_dir), canonical(path)),
+            (Some(vault), Some(p)) if p.starts_with(&vault)
+        )
+}
+
+/// `register_source` (docs/adr/0044): R-sources-add's validation (`SourceRegistry::add`: the
+/// name alphabet, an absolute `..`-free non-root path, no duplicate name or path) plus a refusal
+/// of a path in the vault. Every refusal is the caller's input, so `invalid_params`.
+fn register_source(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
+    let raw_name = required_str(args, "name")?;
+    let path = std::path::PathBuf::from(required_str(args, "path")?);
+    let name = Name::try_from(raw_name).map_err(|e| {
+        McpError::invalid_params(
+            format!(
+                "invalid source name '{}': use lowercase letters, digits and '-' only",
+                e.0
+            ),
+            None,
+        )
+    })?;
+    if is_in_vault(&state.config.vault_dir, &path) {
+        return Err(McpError::invalid_params(
+            format!(
+                "'{}' is inside the vault — a source must be a directory outside it",
+                path.display()
+            ),
+            None,
+        ));
+    }
+    let cfg = SourceConfig {
+        name,
+        host_path: path,
+    };
+    state
+        .sources
+        .add(cfg.clone())
+        .map_err(|e| McpError::invalid_params(e, None))?;
+    let bare_mode = state.config.sources_dir.is_none();
+    let status = state
+        .sources
+        .status(&cfg.name)
+        .unwrap_or(SourceStatus::Missing);
+    Ok(CallToolResult::success(vec![Content::text(
+        source_json(bare_mode, &cfg, &status).to_string(),
+    )]))
+}
+
+/// An optional array-of-strings argument, trimmed, blanks dropped; absent reads as empty.
+fn string_list(args: &Value, key: &str) -> Result<Vec<String>, McpError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str().map(|s| s.trim().to_string()).ok_or_else(|| {
+                    McpError::invalid_params(format!("'{key}' must be an array of strings"), None)
+                })
+            })
+            .filter(|r| !matches!(r, Ok(s) if s.is_empty()))
+            .collect(),
+        Some(_) => Err(McpError::invalid_params(
+            format!("'{key}' must be an array of strings"),
+            None,
+        )),
+    }
+}
+
+/// The attach merge: `current` without `detach`, then each `attach` name not already present, in
+/// order. Pure, so the order a client sees is the frontmatter order. A name in both lists ends
+/// attached (detach applies first).
+fn merge_sources(current: &[String], attach: &[String], detach: &[String]) -> Vec<String> {
+    let kept = current.iter().filter(|s| !detach.contains(s));
+    let added = attach
+        .iter()
+        .filter(|s| !current.contains(s) || detach.contains(s));
+    kept.chain(added).fold(Vec::new(), |mut acc, s| {
+        if !acc.contains(s) {
+            acc.push(s.clone());
+        }
+        acc
+    })
+}
+
+/// `attach_sources` (docs/adr/0044): the merge above through the web editor's own write path
+/// (`update_idea_sources`: job-slot claim, name checks, frontmatter write, reindex), so MCP adds
+/// no second way to edit `sources:`. Returns the attached set with each name's status.
+fn attach_sources(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
+    let slug = required_str(args, "slug")?;
+    let attach = string_list(args, "attach")?;
+    let detach = string_list(args, "detach")?;
+    if attach.is_empty() && detach.is_empty() {
+        return Err(McpError::invalid_params(
+            "name at least one source in 'attach' or 'detach'",
+            None,
+        ));
+    }
+    let attached = update_idea_sources(state, slug, |current| {
+        merge_sources(current, &attach, &detach)
+    })
+    .map_err(|e| match e {
+        WebError::BadRequest(m) | WebError::NotFound(m) | WebError::Conflict(m) => {
+            McpError::invalid_params(m, None)
+        }
+        WebError::Vault(VaultError::IdeaNotFound(_)) => {
+            McpError::invalid_params(format!("no idea '{slug}'"), None)
+        }
+        other => McpError::internal_error(other.to_string(), None),
+    })?;
+    let bare_mode = state.config.sources_dir.is_none();
+    let sources: Vec<Value> = attached
+        .iter()
+        .map(|name| {
+            let mut v = state
+                .sources
+                .status(name)
+                .map(|st| source_status_json(bare_mode, &st))
+                .unwrap_or_else(|| json!({ "status": "not_registered" }));
+            v["name"] = json!(name);
+            v
+        })
+        .collect();
+    Ok(CallToolResult::success(vec![Content::text(
+        json!({ "slug": slug, "sources": sources }).to_string(),
+    )]))
+}
+
 fn search(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
     let query = required_str(args, "query")?;
     let conn = state
@@ -723,7 +945,7 @@ mod tests {
     #[test]
     fn catalog_is_stable_and_marks_long_running_tools_as_task_optional() {
         let tools = catalog();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 20);
         let mut seen = std::collections::HashSet::new();
         for t in &tools {
             assert!(
@@ -769,6 +991,10 @@ mod tests {
             // Deterministic plan workbench (docs/adr/0032): no model call, so no task.
             "get_plan",
             "answer_plan",
+            // Registry and frontmatter edits, no model call (docs/adr/0044).
+            "list_sources",
+            "register_source",
+            "attach_sources",
         ] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(
@@ -800,5 +1026,63 @@ mod tests {
             required_str(&json!({"slug": "my-idea"}), "slug").unwrap(),
             "my-idea"
         );
+    }
+
+    #[test]
+    fn merge_sources_keeps_order_adds_new_and_detaches() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let current = v(&["repo", "notes"]);
+        assert_eq!(
+            merge_sources(&current, &v(&["map", "repo"]), &[]),
+            v(&["repo", "notes", "map"])
+        );
+        assert_eq!(merge_sources(&current, &[], &v(&["repo"])), v(&["notes"]));
+        // Detach applies first, so a name in both lists ends attached.
+        assert_eq!(
+            merge_sources(&current, &v(&["repo"]), &v(&["repo"])),
+            v(&["notes", "repo"])
+        );
+        assert_eq!(
+            merge_sources(&[], &v(&["map", "map"]), &v(&["gone"])),
+            v(&["map"])
+        );
+    }
+
+    #[test]
+    fn string_list_trims_drops_blanks_and_rejects_non_strings() {
+        assert_eq!(
+            string_list(&json!({"a": [" x ", "", "y"]}), "a").unwrap(),
+            ["x", "y"]
+        );
+        assert!(string_list(&json!({}), "a").unwrap().is_empty());
+        assert!(string_list(&json!({"a": "x"}), "a").is_err());
+        assert!(string_list(&json!({"a": [1]}), "a").is_err());
+    }
+
+    #[test]
+    fn source_status_words_track_the_mode() {
+        let ok = SourceStatus::Mounted { entries: 2 };
+        assert_eq!(source_status_json(true, &ok)["status"], "readable");
+        assert_eq!(source_status_json(false, &ok)["status"], "mounted");
+        assert_eq!(source_status_json(false, &ok)["entries"], 2);
+        assert_eq!(
+            source_status_json(false, &SourceStatus::NeedsReup)["status"],
+            "needs_reup"
+        );
+        assert_eq!(
+            source_status_json(true, &SourceStatus::Missing)["status"],
+            "missing"
+        );
+    }
+
+    #[test]
+    fn is_in_vault_catches_the_vault_itself_and_paths_under_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(vault.join("idea")).unwrap();
+        assert!(is_in_vault(&vault, &vault));
+        assert!(is_in_vault(&vault, &vault.join("idea")));
+        assert!(!is_in_vault(&vault, tmp.path()));
+        assert!(!is_in_vault(&vault, &tmp.path().join("vault-notes")));
     }
 }
