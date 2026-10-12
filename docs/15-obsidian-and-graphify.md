@@ -390,14 +390,13 @@ claude-code foil was pointed at `COMMUNITIES.md` first. To measure on your repo,
 `wc -c <map>/COMMUNITIES.md` against what your agent reads per task today (a Claude Code session's
 `/cost`, or idea-vault's journal snippet in Layer 2).
 
-**From an agent session** (docs/12 "Agent sessions"), the inbound MCP server has no source tools.
-Register the repo and its map, and attach both to an idea, through the app's own form routes on
-loopback:
+**From an agent session** (docs/12 "Agent sessions"), register the repo and its map and attach both
+to an idea over MCP ([ADR-0044](./adr/0044-mcp-reference-source-tools.md)):
 
 ```bash
-curl -s --noproxy '*' -X POST http://127.0.0.1:3000/sources/add -d name=<repo> --data-urlencode host_path=/abs/<repo>
-curl -s --noproxy '*' -X POST http://127.0.0.1:3000/sources/add -d name=<repo>-map --data-urlencode host_path=/abs/<repo>-map
-curl -s --noproxy '*' -X POST http://127.0.0.1:3000/idea/<slug>/sources -d 'sources=<repo>&sources=<repo>-map'
+python3 scripts/session-mcp.py call register_source '{"name": "<repo>", "path": "/abs/<repo>"}'
+python3 scripts/session-mcp.py call register_source '{"name": "<repo>-map", "path": "/abs/<repo>-map"}'
+python3 scripts/session-mcp.py call attach_sources '{"slug": "<slug>", "sources": ["<repo>", "<repo>-map"]}'
 ```
 
 ### Layer 4 — Obsidian in your own Claude Code session (optional)

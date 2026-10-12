@@ -167,6 +167,9 @@ async fn tools_list_includes_the_catalog() {
         "list_workflows",
         "run_workflow",
         "get_artifact",
+        "list_sources",
+        "register_source",
+        "attach_sources",
     ] {
         assert!(
             names.contains(&expected),
@@ -2443,4 +2446,96 @@ async fn make_skill_refuses_a_draft_idea_and_an_undistillable_one_before_any_cal
     let body = call_tool_body(&app, &session, "make_skill", json!({ "slug": slug })).await;
     assert!(body["error"].is_object(), "a draft idea: {body}");
     assert!(mock.chat_bodies().is_empty());
+}
+
+/// docs/adr/0044: an agent session registers a codebase and its Graphify map as sources and
+/// attaches them to an idea over MCP, with the Sources page's and the idea editor's own checks.
+/// The attached set lands in `idea.md` frontmatter (truth), and `get_idea` reflects it.
+#[tokio::test]
+async fn register_list_and_attach_sources_round_trip_and_reject_what_the_ui_rejects() {
+    let (state, vault_dir) = test_state();
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let src = tempfile::tempdir().unwrap();
+    let map = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    for (name, dir) in [("colibri", src.path()), ("colibri-map", map.path())] {
+        let reg = call_tool(
+            &app,
+            &session,
+            "register_source",
+            json!({ "name": name, "path": dir.to_str().unwrap() }),
+        )
+        .await;
+        assert_ne!(reg["isError"], true, "{reg}");
+        assert_eq!(tool_json(&reg)["name"], name);
+        assert_eq!(tool_json(&reg)["readable"], true, "{reg}");
+    }
+
+    // Same refusals as POST /sources/add: bad name, relative path, duplicate name, duplicate path.
+    for args in [
+        json!({ "name": "Bad Name", "path": src.path().to_str().unwrap() }),
+        json!({ "name": "rel", "path": "relative/dir" }),
+        json!({ "name": "colibri", "path": "/srv/other" }),
+        json!({ "name": "alias", "path": src.path().to_str().unwrap() }),
+    ] {
+        let r = call_tool(&app, &session, "register_source", args.clone()).await;
+        assert_eq!(r["isError"], true, "{args} must be refused: {r}");
+    }
+
+    let listed = tool_json(&call_tool(&app, &session, "list_sources", json!({})).await);
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["colibri", "colibri-map"]);
+    assert_eq!(listed[0]["status"], "mounted");
+    assert_eq!(listed[0]["entries"], 1);
+
+    let created =
+        tool_json(&call_tool(&app, &session, "create_idea", json!({ "title": "Port it" })).await);
+    let slug = created["slug"].as_str().unwrap();
+
+    // Unknown names are refused and leave the frontmatter untouched.
+    let bad = call_tool(
+        &app,
+        &session,
+        "attach_sources",
+        json!({ "slug": slug, "sources": ["colibri", "nope"] }),
+    )
+    .await;
+    assert_eq!(bad["isError"], true, "{bad}");
+
+    // Duplicates collapse; order is kept.
+    let ok = call_tool(
+        &app,
+        &session,
+        "attach_sources",
+        json!({ "slug": slug, "sources": ["colibri", "colibri-map", "colibri"] }),
+    )
+    .await;
+    assert_ne!(ok["isError"], true, "{ok}");
+    assert_eq!(tool_json(&ok)["sources"], json!(["colibri", "colibri-map"]));
+
+    let idea_md = std::fs::read_to_string(vault_dir.join(slug).join("idea.md")).unwrap();
+    assert!(
+        idea_md.contains("sources:\n- colibri\n- colibri-map\n"),
+        "{idea_md}"
+    );
+    let got = tool_json(&call_tool(&app, &session, "get_idea", json!({ "slug": slug })).await);
+    assert_eq!(got["sources"], json!(["colibri", "colibri-map"]));
+
+    // [] detaches everything.
+    let none = call_tool(
+        &app,
+        &session,
+        "attach_sources",
+        json!({ "slug": slug, "sources": [] }),
+    )
+    .await;
+    assert_eq!(tool_json(&none)["sources"], json!([]));
 }

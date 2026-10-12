@@ -1,37 +1,37 @@
-# Intent — run Graphify the way docs/15 says, and say what it really does (ADR-0043)
+# Intent — reference sources over MCP, and the CNone nit (ADR-0044)
 
-The owner asked to use Graphify to map a large codebase (JustVugg/colibri) before brainstorming it
-in idea-vault, and to fix whatever idea-vault was missing to run it. Running Graphify 0.9.87 for
-real showed that docs/15's commands do not produce what the guide says:
+The first real run of the docs/15 Graphify flow attached a codebase and its map to an idea from an
+agent session. The inbound MCP server had no source tools, so the session had to `curl` the HTML
+form routes. PR #17 named this gap as a follow-up, and the owner asked for it to be fixed, along
+with a review nit on `scripts/graphify-communities.py`.
 
-- `graphify extract` writes no `GRAPH_REPORT.md`; `cluster-only` does.
-- `--out DIR` writes `DIR/graphify-out/`.
-- Community naming in `cluster-only` is a second LLM pass that auto-picks a backend from API keys,
-  even after a `--code-only` extract.
-- `--code-only` still yields INFERRED edges (13% on colibri).
+- Three synchronous MCP tools (ADR-0044, amending ADR-0024):
+  - `list_sources`;
+  - `register_source`, through `SourceRegistry::add`, the Sources page's own checks;
+  - `attach_sources`, through `set_sources_core`, which `POST /idea/{slug}/sources` now calls too.
 
-This change adds the missing pieces as scripts and docs, with no app code and no ADR-0043 option:
-
-- `scripts/graphify-map.sh` is the checked-in wrapper that docs/15 described as a `~/.bashrc`
-  function. It refuses cloud keys, refuses a map inside the source or the vault, allows only
-  `--code-only` (default), `ollama` or `claude-cli`, clusters with `--no-label`, and writes
-  `BUILT.txt`.
-- `scripts/graphify-communities.py` names communities by their dominant files (stdlib, no model
-  call), since `--no-label` leaves them "Community N".
-- docs/15 records the re-check, points Layers 2 and 3 at the wrapper, and replaces "Measured here:
-  not yet" with the colibri numbers. It also shows how an agent session attaches a repo and its
-  map as sources, which the MCP server has no tool for.
+  Editing and removing a source stay owner-only on the Sources page.
+- `graphify-communities.py` lists nodes without a community as `unassigned`, last, not `CNone`.
+- docs/13, docs/15 and the server instructions name the new tools. docs/15's curl recipe becomes
+  MCP calls. CLAUDE.md and docs/README name ADRs 0001–0044.
 
 ## Acceptance criteria
 
-- `scripts/graphify-map.sh` refuses, with exit 1, each of: a cloud API key in the environment, a
-  map dir inside the source, a map dir inside the vault, a source inside the vault, and a backend
-  other than `ollama` or `claude-cli`.
-- On a real repo it writes `graphify-out/graph.json`, `graphify-out/GRAPH_REPORT.md`,
-  `COMMUNITIES.md` and `BUILT.txt` in the map dir and leaves the source's git status clean.
-- docs/15 states only what was run for each 0.9.87 claim, and no step needs an ADR-0043 option.
+- Over `/api/mcp`, `register_source` refuses each of: a bad name, a relative path, a duplicate name,
+  and a duplicate path. `list_sources` shows a registered source as `mounted`.
+- `attach_sources` refuses an unknown name and leaves the frontmatter unchanged. It collapses
+  duplicates in order, writes `sources:` to `idea.md`, `get_idea` reflects it, and `[]` detaches
+  all.
+- The web attach route behaves as before: its existing tests pass unchanged through the shared
+  core.
+- `graphify-communities.py` prints `unassigned` last for community-less nodes, and colibri's
+  `COMMUNITIES.md` is byte-identical.
 - `bash scripts/gate.sh` is green.
 
 ## Expectation changes
 
-None: this change touches no fixture, snapshot, floor or invariant rule.
+- `tools::tests::catalog_is_stable_and_marks_long_running_tools_as_task_optional`: the catalog size
+  assertion goes from 17 to 20, and the three new tools are asserted synchronous (ADR-0044).
+- `tests/mcp_server.rs` `tools_list_includes_the_catalog`: the expected names gain the three tools.
+- The unknown-source error on attach now reads "register it first (the sources page, or MCP
+  register_source)" in place of "register it on the sources page first".

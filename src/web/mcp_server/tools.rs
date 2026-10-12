@@ -23,10 +23,12 @@ use serde_json::{json, Value};
 use chrono::Utc;
 
 use crate::concepts::build_plan::workbench::{self, AnswerChannel, AnswerRequest, WorkbenchError};
+use crate::domain::Name;
 use crate::index::{self, queries};
+use crate::sources::{SourceConfig, SourceStatus};
 use crate::vault::{store, VaultError};
 use crate::web::jobs;
-use crate::web::routes::ideas::create_idea_core;
+use crate::web::routes::ideas::{create_idea_core, set_sources_core};
 use crate::web::routes::memory::{guard_discussion_state, reopen_idea_core};
 use crate::web::routes::{reindex_logged, scoped_llm};
 use crate::web::state::AppState;
@@ -334,6 +336,51 @@ pub(super) fn catalog() -> Vec<Tool> {
                 "additionalProperties": false,
             })),
         ),
+        // Reference-source management (docs/adr/0044): list, register and attach only. Editing a
+        // source's path and removing one stay on the Sources page, as owner actions.
+        Tool::new(
+            "list_sources",
+            "List the registered reference sources (read-only folders the foil may search when \
+             an idea attaches them): name, host path, and status (mounted with its entry count, \
+             needs_reup in container mode until the owner re-ups, or missing).",
+            to_schema(schema_empty()),
+        ),
+        Tool::new(
+            "register_source",
+            "Register a read-only reference source: a name (lowercase letters, digits, '-') for \
+             an absolute host directory, e.g. a codebase or a Graphify map built beside it \
+             (scripts/graphify-map.sh). Same checks as the Sources page: an unsafe path, or a \
+             name or path already registered, is refused. In container mode the owner must still \
+             apply the generated compose override before the source is readable.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "source name, [a-z0-9-]" },
+                    "path": { "type": "string", "description": "absolute host directory" },
+                },
+                "required": ["name", "path"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "attach_sources",
+            "Set which registered sources an idea's turns may search, replacing its current set \
+             (pass [] to detach all). Refused while a run is in progress for the idea. Returns \
+             the attached set.",
+            to_schema(json!({
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string", "description": "idea slug" },
+                    "sources": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "source names from list_sources",
+                    },
+                },
+                "required": ["slug", "sources"],
+                "additionalProperties": false,
+            })),
+        ),
     ]
 }
 
@@ -369,6 +416,9 @@ pub(super) async fn call_sync(
         "get_artifact" => get_artifact(state, &args),
         "get_plan" => get_plan(state, &args),
         "answer_plan" => answer_plan(state, &args).await,
+        "list_sources" => Ok(list_sources(state)),
+        "register_source" => register_source(state, &args),
+        "attach_sources" => attach_sources(state, &args),
         _ => Err(McpError::invalid_params(
             format!("unknown tool '{name}'"),
             None,
@@ -702,6 +752,82 @@ fn create_idea(state: &AppState, args: &Value) -> Result<CallToolResult, McpErro
     }
 }
 
+/// `list_sources` (docs/adr/0044): the Sources page's row model, as JSON.
+fn list_sources(state: &AppState) -> CallToolResult {
+    let payload: Vec<Value> = state
+        .sources
+        .statuses()
+        .into_iter()
+        .map(|(cfg, status)| {
+            let (status, entries) = match status {
+                SourceStatus::Mounted { entries } => ("mounted", Some(entries)),
+                SourceStatus::NeedsReup => ("needs_reup", None),
+                SourceStatus::Missing => ("missing", None),
+            };
+            json!({
+                "name": cfg.name.as_str(),
+                "path": cfg.host_path.display().to_string(),
+                "status": status,
+                "entries": entries,
+            })
+        })
+        .collect();
+    CallToolResult::success(vec![Content::text(Value::Array(payload).to_string())])
+}
+
+/// `register_source` (docs/adr/0044): `POST /sources/add`'s checks, through the same
+/// `SourceRegistry::add` (unsafe path, duplicate name or path), with the reason as a tool error.
+fn register_source(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
+    let raw_name = required_str(args, "name")?;
+    let path = required_str(args, "path")?;
+    let Ok(name) = Name::try_from(raw_name) else {
+        return Ok(CallToolResult::error(vec![Content::text(format!(
+            "invalid source name '{raw_name}': use lowercase letters, digits and '-' only"
+        ))]));
+    };
+    let cfg = SourceConfig {
+        name,
+        host_path: std::path::PathBuf::from(path),
+    };
+    // `add` takes the config by value; the reply borrows the already-validated argument strings.
+    match state.sources.add(cfg) {
+        Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+            json!({
+                "name": raw_name,
+                "path": path,
+                "readable": matches!(
+                    state.sources.status(raw_name),
+                    Some(SourceStatus::Mounted { .. })
+                ),
+            })
+            .to_string(),
+        )])),
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+    }
+}
+
+/// `attach_sources` (docs/adr/0044): `POST /idea/{slug}/sources` through the shared core.
+fn attach_sources(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
+    let slug = required_str(args, "slug")?;
+    let names: Vec<String> = args
+        .get("sources")
+        .and_then(Value::as_array)
+        .ok_or_else(|| McpError::invalid_params("'sources' must be an array of names", None))?
+        .iter()
+        .map(|v| {
+            v.as_str().map(|n| n.trim().to_string()).ok_or_else(|| {
+                McpError::invalid_params("'sources' must be an array of names", None)
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    match set_sources_core(state, slug, &names) {
+        Ok(attached) => Ok(CallToolResult::success(vec![Content::text(
+            json!({ "slug": slug, "sources": attached }).to_string(),
+        )])),
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+    }
+}
+
 async fn reopen_idea(state: &AppState, args: &Value) -> Result<CallToolResult, McpError> {
     let slug = required_str(args, "slug")?;
     match reopen_idea_core(state, slug).await {
@@ -723,7 +849,7 @@ mod tests {
     #[test]
     fn catalog_is_stable_and_marks_long_running_tools_as_task_optional() {
         let tools = catalog();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 20);
         let mut seen = std::collections::HashSet::new();
         for t in &tools {
             assert!(
@@ -769,6 +895,10 @@ mod tests {
             // Deterministic plan workbench (docs/adr/0032): no model call, so no task.
             "get_plan",
             "answer_plan",
+            // Reference-source management (docs/adr/0044): registry and frontmatter writes only.
+            "list_sources",
+            "register_source",
+            "attach_sources",
         ] {
             let t = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
             assert_eq!(

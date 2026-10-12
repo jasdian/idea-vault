@@ -69,7 +69,7 @@ Decision records are in [adr/](./adr/) — read these for the *why* behind any c
 | [14-no-mistakes-gate](./14-no-mistakes-gate.md) | The fixed seven-step shipping gate, the invariant catalog, the findings protocol, the checklist | D41 |
 | [11-glossary](./11-glossary.md) | Canonical vocabulary | — |
 | [15-obsidian-and-graphify](./15-obsidian-and-graphify.md) | Obsidian as a view-only graph over the vault, Graphify maps of reference sources and the codebase: findings and setup | — |
-| [adr/](./adr/) | Architecture Decision Records 0001–0043 | — |
+| [adr/](./adr/) | Architecture Decision Records 0001–0044 | — |
 
 ## Locked decisions (at a glance)
 

@@ -50,7 +50,8 @@ impl ServerHandler for IdeaVaultMcpServer {
         .with_instructions(
             "idea-vault: a localhost ideation vault. list_ideas/get_idea/get_artifact/search \
              read the vault; list_skills and list_workflows read the skill and workflow books; \
-             create_idea starts a new Draft. \
+             create_idea starts a new Draft. list_sources, register_source and attach_sources \
+             register read-only reference folders and attach them to an idea. \
              The foil is idea-vault's own model: a chat message is saved as the owner's turn and \
              the foil answers it, so relay the owner's words rather than arguing in their place. \
              chat, run_skill, run_swarm, run_workflow, store_idea, build_plan and make_skill \

@@ -34,7 +34,7 @@ web::mcp_server
 ├── handler.rs   — IdeaVaultMcpServer : the rmcp::ServerHandler impl
 ├── tools.rs     — the tool catalog + synchronous tool dispatch (list_ideas, get_idea, search,
 │                   create_idea, reopen_idea, list_skills, list_workflows, get_artifact, get_plan,
-│                   answer_plan)
+│                   answer_plan, list_sources, register_source, attach_sources)
 ├── tasks.rs     — TaskRegistry : the Task↔Job bridge for chat/store_idea/run_skill/run_swarm/build_plan/run_workflow/make_skill
 ├── idempotency.rs — ReplayCache + args_hash : replay of a served result (ADR-0033, D34)
 └── prompts.rs   — a small canned prompt catalog
@@ -289,6 +289,9 @@ defaulting to open.
 | `list_skills` | sync | The visible skill book (name, stage, role, use/avoid guidance, source) |
 | `list_workflows` | sync | The visible workflow book, in chip order: name, description, use/avoid guidance, stage kinds, `call_ceiling` (worst-case model calls, ADR-0034), `needs_sources`, `capstone`, source (ADR-0036) |
 | `create_idea` | sync | New Draft |
+| `list_sources` | sync | Registered reference sources: name, host path, status (`mounted` + `entries`, `needs_reup`, `missing`) (ADR-0044) |
+| `register_source` | sync | Register a read-only source (`name`, absolute `path`) through `SourceRegistry::add`, the Sources page's checks; replies `readable` (ADR-0044) |
+| `attach_sources` | sync | Replace an idea's attached sources through `set_sources_core`, the idea editor's sequence (job-slot claim, name checks, frontmatter write, reindex); `[]` detaches all (ADR-0044) |
 | `reopen_idea` | sync | Stored → Reopened |
 | `chat` | long-running | One owner turn; the foil's reply is returned |
 | `run_skill` | long-running | One named move (R6's guards); its turn is returned |
@@ -318,7 +321,7 @@ result replays it and starts no second run; a run can cost up to the workflow's 
 what `list_workflows` reports before the client calls.
 
 **Deferred:** extract/compact tools, chat queueing on a busy idea (MCP refuses instead),
-fork/tags/rename/sources-management/delete-* tools, MCP `resources` (idea.md/conversation.md as
+fork/tags/rename/delete-* tools, editing or removing a reference source (owner-only on the Sources page, ADR-0044), MCP `resources` (idea.md/conversation.md as
 `resources/read` + `resources/subscribe` push-on-update — `rmcp` supports this; it's additive and
 independent of the current tool set), a stdio transport variant, a client-as-foil mode (a no-model
 `append_turn` and a client-authored store — ADR-0029's first rejected alternative), and

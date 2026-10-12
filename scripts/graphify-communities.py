@@ -59,11 +59,14 @@ def main(path: str) -> str:
         f"## Communities (largest {TOP_COMMUNITIES})",
         "",
     ]
-    ranked = sorted(communities.items(), key=lambda kv: (-len(kv[1]), str(kv[0])))
+    # Nodes Graphify left without a community (none on a clustered graph, but an unclustered
+    # extract has them) are listed once, last, as "unassigned" rather than "CNone".
+    ranked = sorted(communities.items(), key=lambda kv: (kv[0] is None, -len(kv[1]), str(kv[0])))
     for cid, members in ranked[:TOP_COMMUNITIES]:
         files = ", ".join(f"`{f}`×{c}" for f, c in files_of(members))
         hubs = ", ".join(f"`{n.get('label', n['id'])}`" for n in hubs_of(members))
-        out.append(f"- **C{cid}** ({len(members)} nodes): {files} · hubs: {hubs}")
+        label = "unassigned" if cid is None else f"C{cid}"
+        out.append(f"- **{label}** ({len(members)} nodes): {files} · hubs: {hubs}")
 
     out += ["", f"## Strongest cross-file coupling (EXTRACTED edges, top {TOP_COUPLINGS})", ""]
     out += [f"- `{a}` ↔ `{b}`: {c}" for (a, b), c in coupling.most_common(TOP_COUPLINGS)]

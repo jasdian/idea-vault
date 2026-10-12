@@ -1328,7 +1328,27 @@ pub async fn set_sources(
         }
     }
 
-    if !crate::web::jobs::try_claim(&state.jobs, &slug) {
+    set_sources_core(&state, &slug, &submitted)?;
+    Ok(render_idea_sources(&state, &slug, &submitted))
+}
+
+/// The attach sequence with no HTTP-specific parsing or rendering, shared by `POST
+/// /idea/{slug}/sources` and the inbound MCP `attach_sources` tool (docs/adr/0044): replace the
+/// idea's attached-source set with `names` (duplicates dropped, order kept), under the per-idea
+/// job slot, then reindex. A newly attached name must be registered; an already-attached one the
+/// registry no longer knows may stay (frontmatter is truth). Returns the set that was written.
+pub(crate) fn set_sources_core(
+    state: &AppState,
+    slug: &str,
+    names: &[String],
+) -> Result<Vec<String>, WebError> {
+    let submitted: Vec<String> = names.iter().fold(Vec::new(), |mut kept, name| {
+        if !name.is_empty() && !kept.contains(name) {
+            kept.push(name.clone());
+        }
+        kept
+    });
+    if !crate::web::jobs::try_claim(&state.jobs, slug) {
         return Err(WebError::BadRequest(
             "a run is in progress for this idea — wait for it to finish (or cancel it) before editing sources"
                 .into(),
@@ -1336,7 +1356,7 @@ pub async fn set_sources(
     }
     let result = (|| {
         let vault_dir = &state.config.vault_dir;
-        let mut idea = store::read_idea(vault_dir, &slug)?; // 404 if missing
+        let mut idea = store::read_idea(vault_dir, slug)?; // 404 if missing
         for name in &submitted {
             if !domain_slug::is_valid(name) {
                 return Err(WebError::BadRequest(format!(
@@ -1346,7 +1366,7 @@ pub async fn set_sources(
             let already_attached = idea.frontmatter.sources.iter().any(|s| s == name);
             if !already_attached && state.sources.get(name).is_none() {
                 return Err(WebError::BadRequest(format!(
-                    "no source named '{name}' — register it on the sources page first"
+                    "no source named '{name}' — register it first (the sources page, or MCP register_source)"
                 )));
             }
         }
@@ -1355,11 +1375,11 @@ pub async fn set_sources(
         store::write_idea(vault_dir, &idea)?;
         Ok::<_, WebError>(())
     })();
-    crate::web::jobs::mark_done(&state.jobs, &slug);
+    crate::web::jobs::mark_done(&state.jobs, slug);
     result?;
 
-    crate::web::routes::reindex_logged(&state);
-    Ok(render_idea_sources(&state, &slug, &submitted))
+    crate::web::routes::reindex_logged(state);
+    Ok(submitted)
 }
 
 /// Form body for R3 (the `list.html` new-idea form posts `title`; a seed body is optional).
