@@ -347,7 +347,13 @@ a Python and TypeScript monorepo, not re-run here):
   - community cohesion was uniformly low;
   - that run still carried 10% INFERRED edges (average confidence 0.62).
 
-So exclude tests and generated code, and use `--code-only`.
+So exclude tests and generated code, and use `--code-only`. `graphify-map.sh` checks the result.
+It warns when the source has no `.graphifyignore`. `COMMUNITIES.md` then ends with a **Map
+hygiene** list: files that hold 5% or more of the nodes, and files whose header marks them
+generated (bindgen, `@generated`, `DO NOT EDIT`). The script repeats the list on stderr. Ignore
+what is generated, vendored or test code, then rebuild. Keep a dominating file that is
+hand-written: it is the core. On FalkorDB's Rust engine, one bindgen file held 35% of the nodes
+and led the god nodes until it was ignored.
 
 ```bash
 cd <repo>
@@ -381,7 +387,7 @@ and `site/` excluded):
 | Graph | 10,262 nodes, 30,942 edges (87% EXTRACTED, 13% INFERRED), 299 communities |
 | `graph.json` | 10.4 MB: queried, never read |
 | `GRAPH_REPORT.md` | 60.9 KB (~15k tokens), a third of it the unlabeled "Community N" hub list |
-| `COMMUNITIES.md` | 15.7 KB (~4k tokens): the 60 largest communities by file, the top cross-file couplings and the largest files |
+| `COMMUNITIES.md` | 15.7 KB (~4k tokens): the 60 largest communities by file, the top cross-file couplings and the largest files (the Map hygiene list came later) |
 
 The god nodes were real hubs (`Dsv4CudaTensor`, `json_get()`, `st_find()`, `ColiVkTensor`), and
 the file-named communities matched the repo's one-file-per-model-family layout. The map was then

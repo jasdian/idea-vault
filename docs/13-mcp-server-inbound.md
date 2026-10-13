@@ -102,6 +102,11 @@ only ever one caller.
 - `list_tools` / `call_tool` — the synchronous surface, delegated to `tools.rs`.
 - `enqueue_task` / `get_task_info` / `get_task_result` / `cancel_task` — the Task lifecycle,
   delegated to `tasks::TaskRegistry`.
+- Both `call_tool` and `enqueue_task` first run `tools::check_arguments`. Every schema declares
+  `additionalProperties: false`, and the check enforces it: an undeclared key is `invalid_params`,
+  `unknown argument 'skill' for run_skill (accepted: idempotency_key, name, slug)`, before any
+  claim or model call. Before this check a misspelled key was dropped silently, and the caller
+  heard only about the required key it had not sent.
 - `list_prompts` / `get_prompt` — delegated to `prompts.rs`.
 
 ## Marking a tool long-running (`tools.rs`)

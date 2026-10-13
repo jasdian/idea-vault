@@ -4,7 +4,7 @@
 Meant for agent sessions (Claude Code on the web, CI, a terminal) that cannot or should not drive
 the HTMX UI. Standard library only. One MCP session per invocation:
 
-    scripts/session-mcp.py tools                       # the tool catalog: name + one-line summary
+    scripts/session-mcp.py tools                       # the tool catalog: name, one-line summary, args (* = required)
     scripts/session-mcp.py call list_ideas
     scripts/session-mcp.py call create_idea '{"title": "…", "body": "…"}'
     scripts/session-mcp.py call chat '{"slug": "…", "message": "…"}'
@@ -143,6 +143,12 @@ def main() -> int:
     if ns.cmd == "tools":
         for t in session.request("tools/list", {})["tools"]:
             print(f"{t['name']:<16} {(t.get('description') or '').split('.')[0]}")
+            # The argument keys, required ones marked with *, so a call never guesses them.
+            schema = t.get("inputSchema") or {}
+            need = set(schema.get("required") or [])
+            keys = [k + ("*" if k in need else "") for k in (schema.get("properties") or {})]
+            if keys:
+                print(f"{'':<16}   args: {', '.join(keys)}")
         return 0
     raw = pathlib.Path(ns.args[1:]).read_text() if ns.args.startswith("@") else ns.args
     return call(session, ns.tool, json.loads(raw), ns.wait, ns.poll)
