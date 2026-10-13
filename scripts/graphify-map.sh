@@ -9,7 +9,8 @@
 #   add --viz to also write graph.html (slow and large past ~5,000 nodes)
 #
 # Writes <map-dir>/graphify-out/{graph.json,GRAPH_REPORT.md}, <map-dir>/COMMUNITIES.md (communities
-# named by their files, deterministic; scripts/graphify-communities.py) and <map-dir>/BUILT.txt.
+# named by their files, deterministic; scripts/graphify-communities.py, with a "Map hygiene" list of
+# generated or dominating files to consider for .graphifyignore) and <map-dir>/BUILT.txt.
 # Register <map-dir> on /sources next to the source to let the foil read it (docs/15 Layer 2/3).
 # Needs `graphify` on PATH (uv tool install graphifyy). Read-only on <source-dir>.
 set -euo pipefail
@@ -63,6 +64,10 @@ if inside "$VAULT" "$SRC" && [ -e "$VAULT" ]; then
     die "the vault $VAULT is under the source and not git-ignored there; graphify would read it"
 fi
 
+# Tests, generated bindings and vendored code otherwise become the god nodes (docs/15 Layer 3).
+[ -f "$SRC/.graphifyignore" ] ||
+  echo "graphify-map: no $SRC/.graphifyignore; tests and generated code will crowd the map (docs/15 Layer 3)" >&2
+
 export GRAPHIFY_QUERY_LOG_DISABLE=1
 mkdir -p "$MAP"
 case "$MODE" in
@@ -79,7 +84,7 @@ graphify extract "$SRC" "${extract[@]}" --out "$MAP"
 # extract stops at graph.json; the report comes from cluster-only. --no-label keeps community
 # naming off any model (it would auto-pick a backend too); COMMUNITIES.md names them instead.
 graphify cluster-only "$MAP" --no-label ${VIZ:+"$VIZ"}
-python3 -I "$ROOT/scripts/graphify-communities.py" "$MAP/graphify-out/graph.json" > "$MAP/COMMUNITIES.md"
+python3 -I "$ROOT/scripts/graphify-communities.py" "$MAP/graphify-out/graph.json" --source "$SRC" > "$MAP/COMMUNITIES.md"
 
 rev="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo "not a git checkout")"
 {
@@ -87,6 +92,10 @@ rev="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo "not a git check
   echo "source $SRC @ $rev"
   echo "mode $MODE, $(graphify --version 2>/dev/null | head -1)"
 } > "$MAP/BUILT.txt"
+
+# Surface the hygiene findings, not only in the file: a map led by bindings reads as the codebase.
+hyg="$(sed -n '/^## Map hygiene$/,$p' "$MAP/COMMUNITIES.md" | grep '^- ' || true)"
+[ -z "$hyg" ] || printf 'graphify-map: check these for .graphifyignore (COMMUNITIES.md "Map hygiene"):\n%s\n' "$hyg" >&2
 
 report="$MAP/graphify-out/GRAPH_REPORT.md"
 echo "graphify-map: $(wc -c < "$report") B report, $(wc -c < "$MAP/COMMUNITIES.md") B community index in $MAP"
