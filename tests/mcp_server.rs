@@ -1062,6 +1062,44 @@ async fn run_skill_refuses_unknown_skill_draft_stored_and_busy_ideas() {
 }
 
 #[tokio::test]
+async fn a_misspelled_argument_is_refused_naming_the_accepted_keys_before_any_model_call() {
+    let mock = spawn(&["llama3.2"], ChatScript::Tokens(vec!["move".into()])).await;
+    let (state, vault_dir) = test_state_with_ollama(&mock.url, 1);
+    let state = with_mcp_token(state, TOKEN);
+    let app = build_router(state);
+    let session = handshake(&app).await;
+    let slug = create_in_discussion(&app, &session, &vault_dir).await;
+
+    // `skill` for `name`: the schema says additionalProperties: false, so the key is refused
+    // rather than dropped (the caller used to hear only "missing required argument 'name'").
+    let body = call_tool_body(
+        &app,
+        &session,
+        "run_skill",
+        json!({ "slug": slug, "skill": "premortem" }),
+    )
+    .await;
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("unknown argument 'skill' for run_skill")
+            && message.contains("accepted: idempotency_key, name, slug"),
+        "{body}"
+    );
+    // Synchronous tools get the same refusal.
+    let body = call_tool_body(&app, &session, "get_idea", json!({ "slug": slug, "id": 1 })).await;
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("unknown argument 'id' for get_idea (accepted: slug)")),
+        "{body}"
+    );
+    assert!(
+        mock.chat_bodies().is_empty(),
+        "a refused call must not reach the model"
+    );
+}
+
+#[tokio::test]
 async fn run_swarm_as_a_task_persists_exactly_one_synthesis_turn() {
     let mock = spawn(
         &["llama3.2"],

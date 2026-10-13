@@ -63,6 +63,52 @@ pub(super) fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Mc
         .ok_or_else(|| McpError::invalid_params(format!("missing required argument '{key}'"), None))
 }
 
+/// Refuse a call that passes an argument its tool's schema does not declare, naming the accepted
+/// ones. Every schema says `additionalProperties: false`; without this check a misspelled key
+/// (`skill` for `run_skill`'s `name`) was dropped silently and the caller only heard about the
+/// key it had not sent. An unknown tool passes here and is refused by dispatch as before.
+pub(super) fn check_arguments(name: &str, args: Option<&JsonObject>) -> Result<(), McpError> {
+    let Some(tool) = catalog().into_iter().find(|t| t.name.as_ref() == name) else {
+        return Ok(());
+    };
+    if tool.input_schema.get("additionalProperties") != Some(&Value::Bool(false)) {
+        return Ok(());
+    }
+    let declared = tool
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object);
+    let known = |key: &str| declared.is_some_and(|p| p.contains_key(key));
+    let unknown: Vec<&str> = args
+        .into_iter()
+        .flat_map(|a| a.keys())
+        .map(String::as_str)
+        .filter(|k| !known(k))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let mut accepted: Vec<&str> = declared
+        .into_iter()
+        .flat_map(|p| p.keys())
+        .map(String::as_str)
+        .collect();
+    accepted.sort_unstable();
+    let quoted: Vec<String> = unknown.iter().map(|k| format!("'{k}'")).collect();
+    let accepted = if accepted.is_empty() {
+        "none".to_string()
+    } else {
+        accepted.join(", ")
+    };
+    Err(McpError::invalid_params(
+        format!(
+            "unknown argument {} for {name} (accepted: {accepted})",
+            quoted.join(", ")
+        ),
+        None,
+    ))
+}
+
 fn optional_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
@@ -1111,6 +1157,44 @@ mod tests {
                 TaskSupport::Forbidden,
                 "{name} must stay synchronous"
             );
+        }
+    }
+
+    #[test]
+    fn check_arguments_refuses_undeclared_keys_and_names_the_accepted_ones() {
+        let args = |v: Value| v.as_object().cloned();
+        let err = check_arguments(
+            "run_skill",
+            args(json!({"slug": "a", "skill": "b"})).as_ref(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "unknown argument 'skill' for run_skill (accepted: idempotency_key, name, slug)"
+        );
+        let err =
+            check_arguments("list_ideas", args(json!({"x": 1, "y": 2})).as_ref()).unwrap_err();
+        assert_eq!(
+            err.message,
+            "unknown argument 'x', 'y' for list_ideas (accepted: none)"
+        );
+        assert!(check_arguments(
+            "run_skill",
+            args(json!({"slug": "a", "name": "b"})).as_ref()
+        )
+        .is_ok());
+        assert!(check_arguments("list_ideas", None).is_ok());
+        assert!(check_arguments("no_such_tool", args(json!({"x": 1})).as_ref()).is_ok());
+        // Every declared key of every tool is accepted, so the check can never refuse a call
+        // that follows the advertised schema.
+        for t in catalog() {
+            let all: JsonObject = t.input_schema["properties"]
+                .as_object()
+                .into_iter()
+                .flat_map(|p| p.keys())
+                .map(|k| (k.clone(), Value::Null))
+                .collect();
+            assert!(check_arguments(&t.name, Some(&all)).is_ok(), "{}", t.name);
         }
     }
 

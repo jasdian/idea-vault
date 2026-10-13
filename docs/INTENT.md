@@ -1,4 +1,4 @@
-# Intent — Graphify map hygiene: flag generated and dominating files (ADR-0043, docs/15 Layer 3)
+# Intent — Graphify map hygiene, and MCP refuses undeclared arguments (ADR-0043, ADR-0024, docs/15 Layer 3)
 
 Mapping FalkorDB (a trending C graph database mid-port to Rust) for an idea-vault brainstorm hit a
 gap in `scripts/graphify-map.sh`. docs/15 says to keep generated code out of a code map, but
@@ -15,6 +15,14 @@ engine's real core (`Value`, `Graph`, `IR`). The map read as the codebase but de
 - **`scripts/graphify-map.sh`** passes the source. It warns on stderr when the source has no
   `.graphifyignore`, and repeats the hygiene rows there. It warns but never fails: a dominating
   file can be the real core, so the agent decides.
+- **MCP refuses undeclared arguments.** The same session twice called `run_skill` with `skill`
+  where the schema says `name`. Each time the server dropped the unknown key without a word and
+  answered only `missing required argument 'name'`. Every tool schema already says
+  `additionalProperties: false`, but nothing enforced it. `tools::check_arguments` now runs at
+  the protocol boundary, on both `call_tool` and `enqueue_task`. It refuses any key the tool does
+  not declare with `invalid_params` and lists the accepted keys. `session-mcp.py tools` prints
+  each tool's argument keys, with required ones marked `*`, so a driving agent reads them and
+  does not guess.
 
 ## Acceptance criteria
 
@@ -24,6 +32,10 @@ engine's real core (`Value`, `Graph`, `IR`). The map read as the codebase but de
 - A source with no `.graphifyignore` gets the stderr warning, and the map still builds.
 - Without `--source`, `graphify-communities.py` writes the same bytes as before.
 - A `graph.json` path that resolves outside the source (`../x`) is never opened.
+- Over MCP, `run_skill {"slug", "skill"}` is `invalid_params` naming `'skill'` and
+  `accepted: idempotency_key, name, slug`, and it never reaches the model. A synchronous tool
+  (`get_idea` with an extra `id`) is refused the same way. Every tool accepts all of its own
+  declared keys.
 - `bash scripts/gate.sh` is green.
 
 # Intent — Graphify first for codebase brainstorms, a narrower MCP register_source, and the CNone nit (ADR-0043, ADR-0044)

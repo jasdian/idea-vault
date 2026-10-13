@@ -91,6 +91,7 @@ impl ServerHandler for IdeaVaultMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        tools::check_arguments(&request.name, request.arguments.as_ref())?;
         tools::call_sync(&self.state, &self.tasks, &request.name, request.arguments).await
     }
 
@@ -99,6 +100,7 @@ impl ServerHandler for IdeaVaultMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CreateTaskResult, McpError> {
+        tools::check_arguments(&request.name, request.arguments.as_ref())?;
         self.tasks
             .enqueue(&self.state, &request.name, request.arguments)
             .await
