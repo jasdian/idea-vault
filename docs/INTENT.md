@@ -1,3 +1,21 @@
+# Intent — a small map's hygiene list stays quiet (ADR-0043, docs/15 Layer 3)
+
+Mapping bom-kit (a 451-line Rust crate, 65 nodes) for an idea-vault brainstorm listed four of its
+six source files under `## Map hygiene` as "dominates". At 5% of 65 nodes, any file with four
+symbols qualifies, so the list named the whole core and told the agent nothing; on stderr it read
+as a warning to act on. A file must now hold 5% of the nodes **and** at least 50 of them
+(`DOMINANT_MIN_NODES`) to be listed as dominating. Generated-code markers are still listed at any
+size. FalkorDB's bindgen file (35% of 11,116 nodes) is still listed.
+
+## Acceptance criteria
+
+- On bom-kit `ecb2b5e`, `bash scripts/graphify-map.sh` prints no hygiene rows and
+  `COMMUNITIES.md` says no file holds 5% of the nodes and at least 50 of them.
+- A 64-node map whose `core.rs` holds 60 nodes still lists it, and a marked 1-node file is still
+  listed (`tests/graphify_communities.rs`); a 65-node map spread over four files lists none.
+- docs/15 Layer 3 states the 50-node floor.
+- `bash scripts/gate.sh` is green.
+
 # Intent — Graphify map hygiene, and MCP refuses undeclared arguments (ADR-0043, ADR-0024, docs/15 Layer 3)
 
 Mapping FalkorDB (a trending C graph database mid-port to Rust) for an idea-vault brainstorm hit a

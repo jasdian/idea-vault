@@ -349,7 +349,8 @@ a Python and TypeScript monorepo, not re-run here):
 
 So exclude tests and generated code, and use `--code-only`. `graphify-map.sh` checks the result.
 It warns when the source has no `.graphifyignore`. `COMMUNITIES.md` then ends with a **Map
-hygiene** list: files that hold 5% or more of the nodes, and files whose header marks them
+hygiene** list: files that hold 5% or more of the nodes (and at least 50 of them, so a small
+crate's map, where every file holds 5%, lists none), and files whose header marks them
 generated (bindgen, `@generated`, `DO NOT EDIT`). The script repeats the list on stderr. Ignore
 what is generated, vendored or test code, then rebuild. Keep a dominating file that is
 hand-written: it is the core. On FalkorDB's Rust engine, one bindgen file held 35% of the nodes
