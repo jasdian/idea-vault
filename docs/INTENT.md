@@ -31,7 +31,9 @@ engine's real core (`Value`, `Graph`, `IR`). The map read as the codebase but de
   hand-maintained `redisearch/mod.rs` stays listed, by its marker.
 - A source with no `.graphifyignore` gets the stderr warning, and the map still builds.
 - Without `--source`, `graphify-communities.py` writes the same bytes as before.
-- A `graph.json` path that resolves outside the source (`../x`) is never opened.
+- A `graph.json` path that resolves outside the source, by `../x` or through a symlink, is never
+  opened (`tests/graphify_communities.rs`, which fails with the guard removed). A row reads
+  `marker: "…"`, not `generated:`, since a hand-written header can mention bindgen.
 - Over MCP, `run_skill {"slug", "skill"}` is `invalid_params` naming `'skill'` and
   `accepted: idempotency_key, name, slug`, and it never reaches the model. A synchronous tool
   (`get_idea` with an extra `id`) is refused the same way. Every tool accepts all of its own

@@ -64,7 +64,8 @@ def hygiene_lines(rows) -> list:
         "",
     ]
     for f, c, share, marker in rows:
-        why = f"generated: \"{marker[:80]}\"" if marker else "dominates"
+        # "marker", not "generated": a header line can mention bindgen without being its output.
+        why = f"marker: \"{marker[:80]}\"" if marker else "dominates"
         out.append(f"- `{f}`: {c} nodes ({share:.0%}), {why}")
     return out
 
