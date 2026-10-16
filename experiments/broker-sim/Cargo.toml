@@ -1,0 +1,14 @@
+[package]
+name = "broker-sim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Headless bot sim + kill test for the 'Stock Market Returns' broker-pit game idea"
+
+# Standalone: not part of the idea-vault crate's build.
+[workspace]
+
+[dependencies]
+
+[profile.release]
+debug = false
