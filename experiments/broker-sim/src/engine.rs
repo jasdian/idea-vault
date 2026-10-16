@@ -50,6 +50,22 @@ pub fn optimal_offset(k: f64) -> f64 {
     0.5 * (lo + hi) / k
 }
 
+/// The offset e (in ATR) maximising p(e)·(m + e): the expected value of one yell when the
+/// player expects fair to move `m` ATR in its favour before the position is marked. The fill
+/// curve is still evaluated against *current* fair. `best_offset(0, k) == optimal_offset(k)`.
+pub fn best_offset(m: f64, k: f64) -> f64 {
+    // h(e) = 1 + E − k(m + e)E with E = e^{ke}: positive at e = −m, negative far right.
+    let h = |e: f64| {
+        let big_e = (k * e).exp();
+        1.0 + big_e - k * (m + e) * big_e
+    };
+    let (lo, hi) = (0..200).fold((-m, m.abs() + 20.0 / k), |(lo, hi), _| {
+        let mid = 0.5 * (lo + hi);
+        if h(mid) > 0.0 { (mid, hi) } else { (lo, mid) }
+    });
+    0.5 * (lo + hi)
+}
+
 /// The player's book. `edge` accumulates the fill-time edge (fair − price for buys), so that
 /// end-of-day P&L splits into edge + inventory mark-to-market.
 #[derive(Clone, Debug)]
@@ -105,6 +121,8 @@ impl Account {
 /// only the Oracle may read them; honest strategies use `tape`/`atr_tape`.
 pub struct Obs<'a> {
     pub t: usize,
+    /// Ticks left after this one until the close.
+    pub ticks_left: usize,
     pub tick: &'a Tick,
     pub rules: &'a Rules,
 }
@@ -135,11 +153,21 @@ pub fn run_day<S: Strategy>(
     let (_, acct, _) = market.iter().enumerate().fold(
         (strat.init(n, strat_rng), Account::flat(n), fill_rng),
         |(state, acct, rng), (t, tick)| {
-            let (state, yell) = strat.act(&state, &Obs { t, tick, rules }, &acct);
+            let (state, yell) = strat.act(
+                &state,
+                &Obs {
+                    t,
+                    ticks_left: market.len() - 1 - t,
+                    tick,
+                    rules,
+                },
+                &acct,
+            );
             match yell.filter(|y| acct.can(y, rules)) {
                 Some(y) => {
                     let fair = tick.fair[y.asset];
-                    let edge_atr = y.side.sign() * (fair - y.price) / tick.atr_sys[y.asset];
+                    let edge_atr =
+                        y.side.sign() * (tick.fill_fair[y.asset] - y.price) / tick.atr_sys[y.asset];
                     let (u, rng) = rng.uniform();
                     let acct = if u < fill_prob(edge_atr, rules.k) {
                         acct.filled(&y, fair)
@@ -178,6 +206,21 @@ mod tests {
             let ev = |x: f64| x * fill_prob(x, k);
             assert!((x * k - 1.278_464_5).abs() < 1e-6);
             assert!(ev(x) > ev(x * 0.95) && ev(x) > ev(x * 1.05));
+        }
+    }
+
+    #[test]
+    fn best_offset_reduces_to_x_star_and_maximises_ev() {
+        for k in [1.0, 2.0, 4.0] {
+            assert!((best_offset(0.0, k) - optimal_offset(k)).abs() < 1e-9);
+            for m in [-1.0, 0.3, 2.0] {
+                let ev = |e: f64| (m + e) * fill_prob(e, k);
+                let e = best_offset(m, k);
+                assert!(
+                    ev(e) >= ev(e - 0.01) && ev(e) >= ev(e + 0.01),
+                    "k={k} m={m}"
+                );
+            }
         }
     }
 

@@ -1,27 +1,42 @@
-//! The three bots of the kill test. Oracle and Estimator share one scheduler (which asset to
+//! The three bots of the baseline kill test. Oracle and Estimator share one scheduler (which asset to
 //! look at, which side to yell) so the only difference between them is the price they yell.
 
 use crate::engine::{Account, Obs, Side, Strategy, Yell};
 use crate::rng::Rng;
 
-/// Round-robin attention over assets; lean against inventory, alternate when flat, and never
-/// yell into the limit.
+/// Which side to yell on an asset holding `q` units: lean against inventory, alternate by
+/// round when flat, never into the limit.
+pub fn lean(t: usize, n_assets: usize, q: i64, limit: i64) -> Side {
+    match q {
+        q if q >= limit => Side::Sell,
+        q if q <= -limit => Side::Buy,
+        q if q > 0 => Side::Sell,
+        q if q < 0 => Side::Buy,
+        _ if (t / n_assets).is_multiple_of(2) => Side::Buy,
+        _ => Side::Sell,
+    }
+}
+
+/// Round-robin attention over assets, leaning against inventory.
 fn schedule(obs: &Obs, acct: &Account) -> (usize, Side) {
     let n = acct.inv.len();
     let asset = obs.t % n;
-    let q = acct.inv[asset];
-    let side = match q {
-        q if q >= obs.rules.limit => Side::Sell,
-        q if q <= -obs.rules.limit => Side::Buy,
-        q if q > 0 => Side::Sell,
-        q if q < 0 => Side::Buy,
-        _ if (obs.t / n).is_multiple_of(2) => Side::Buy,
-        _ => Side::Sell,
-    };
-    (asset, side)
+    (asset, lean(obs.t, n, acct.inv[asset], obs.rules.limit))
 }
 
-fn quote(side: Side, mid: f64, offset_atr: f64, atr: f64) -> f64 {
+/// One EMA step of the fair estimate over the tape (the first print seeds it).
+pub fn ema(prev: &Option<Vec<f64>>, tape: &[f64], alpha: f64) -> Vec<f64> {
+    match prev {
+        None => tape.to_vec(),
+        Some(prev) => prev
+            .iter()
+            .zip(tape)
+            .map(|(&e, &p)| e + alpha * (p - e))
+            .collect(),
+    }
+}
+
+pub fn quote(side: Side, mid: f64, offset_atr: f64, atr: f64) -> f64 {
     mid - side.sign() * offset_atr * atr
 }
 
@@ -60,15 +75,7 @@ impl Strategy for Estimator {
         None
     }
     fn act(&self, s: &Self::State, obs: &Obs, acct: &Account) -> (Self::State, Option<Yell>) {
-        let tape = &obs.tick.tape;
-        let est: Vec<f64> = match s {
-            None => tape.clone(),
-            Some(prev) => prev
-                .iter()
-                .zip(tape)
-                .map(|(&e, &p)| e + self.alpha * (p - e))
-                .collect(),
-        };
+        let est = ema(s, &obs.tick.tape, self.alpha);
         let (asset, side) = schedule(obs, acct);
         let atr = if self.shown_atr {
             obs.tick.atr_sys[asset]

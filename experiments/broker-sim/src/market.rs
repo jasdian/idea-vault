@@ -31,14 +31,30 @@ pub struct MarketParams {
     pub tape_noise_atr: f64,
 }
 
-/// What exists at one tick. `fair` and `atr_sys` are the system's hidden truth; `tape` and
-/// `atr_tape` are what an honest player can see.
+/// The hidden dynamics an asset is in at one tick. The baseline market is a single `Walk`;
+/// the regime market (`crate::regime`) switches between the other five.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Regime {
+    Walk,
+    Calm,
+    TrendUp,
+    TrendDown,
+    Volatile,
+    Jumpy,
+}
+
+/// What exists at one tick. `fair`, `atr_sys`, `fill_fair` and `regime` are the system's hidden
+/// truth; `tape` and `atr_tape` are what an honest player can see. `fill_fair` is the value the
+/// fill curve is evaluated against: `fair`, except where informed counterparties are present,
+/// when it is the fair value a few ticks ahead (they pick off stale quotes).
 #[derive(Clone, Debug)]
 pub struct Tick {
     pub fair: Vec<f64>,
     pub atr_sys: Vec<f64>,
     pub tape: Vec<f64>,
     pub atr_tape: Vec<f64>,
+    pub fill_fair: Vec<f64>,
+    pub regime: Vec<Regime>,
 }
 
 fn fair_path(spec: &AssetSpec, p: &MarketParams, n: usize, rng: Rng) -> Vec<f64> {
@@ -89,54 +105,112 @@ pub fn atr_series(path: &[f64], bar_len: usize, atr_bars: usize) -> Vec<f64> {
         .collect()
 }
 
+/// One asset's generated truth over warmup + day + look-ahead ticks.
+pub struct Path {
+    pub fair: Vec<f64>,
+    pub regime: Vec<Regime>,
+}
+
+/// How generated paths become observable ticks.
+#[derive(Clone, Debug)]
+pub struct Observation {
+    pub warmup_ticks: usize,
+    pub ticks: usize,
+    pub bar_len: usize,
+    pub atr_bars: usize,
+    pub tape_noise_atr: f64,
+    /// Ticks of look-ahead informed counterparties have while an asset is `Jumpy`.
+    pub informed_window: usize,
+}
+
 /// One asset's whole-day columns, before transposing into ticks.
 struct Series {
     fair: Vec<f64>,
     atr_sys: Vec<f64>,
     tape: Vec<f64>,
     atr_tape: Vec<f64>,
+    fill_fair: Vec<f64>,
+    regime: Vec<Regime>,
 }
 
-/// One day of market, deterministic in `(params, rng)`.
+fn series(path: &Path, o: &Observation, tape_rng: Rng) -> Series {
+    let atr_sys = atr_series(&path.fair, o.bar_len, o.atr_bars);
+    let tape: Vec<f64> = path
+        .fair
+        .iter()
+        .zip(&atr_sys)
+        .scan(tape_rng, |r, (&f, &a)| {
+            let (z, r1) = r.normal();
+            *r = r1;
+            Some(f + z * o.tape_noise_atr * a)
+        })
+        .collect();
+    let atr_tape = atr_series(&tape, o.bar_len, o.atr_bars);
+    let last = path.fair.len() - 1;
+    let fill_fair = path
+        .regime
+        .iter()
+        .enumerate()
+        .map(|(t, r)| match r {
+            Regime::Jumpy => path.fair[(t + o.informed_window).min(last)],
+            _ => path.fair[t],
+        })
+        .collect();
+    Series {
+        fair: path.fair.clone(),
+        atr_sys,
+        tape,
+        atr_tape,
+        fill_fair,
+        regime: path.regime.clone(),
+    }
+}
+
+/// Observe generated paths (one per asset, each at least warmup + ticks long) as the day's
+/// tradable ticks; `tape_rng(i)` seeds asset i's print noise.
+pub fn assemble(paths: &[Path], o: &Observation, tape_rng: impl Fn(usize) -> Rng) -> Vec<Tick> {
+    let cols: Vec<Series> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| series(p, o, tape_rng(i)))
+        .collect();
+    let col = |t: usize, f: fn(&Series) -> &Vec<f64>| cols.iter().map(|c| f(c)[t]).collect();
+    (o.warmup_ticks..o.warmup_ticks + o.ticks)
+        .map(|t| Tick {
+            fair: col(t, |c| &c.fair),
+            atr_sys: col(t, |c| &c.atr_sys),
+            tape: col(t, |c| &c.tape),
+            atr_tape: col(t, |c| &c.atr_tape),
+            fill_fair: col(t, |c| &c.fill_fair),
+            regime: cols.iter().map(|c| c.regime[t]).collect(),
+        })
+        .collect()
+}
+
+/// One day of the baseline market (a single random-walk-with-news regime), deterministic in
+/// `(params, rng)`.
 pub fn day(p: &MarketParams, rng: Rng) -> Vec<Tick> {
     let total = p.warmup_ticks + p.ticks;
-    let per_asset: Vec<Series> = p
+    let paths: Vec<Path> = p
         .assets
         .iter()
         .enumerate()
-        .map(|(i, spec)| {
-            let base = Rng::derive(rng.next_u64().0, &[i as u64]);
-            let fair = fair_path(spec, p, total, base);
-            let atr_sys = atr_series(&fair, p.bar_len, p.atr_bars);
-            let tape: Vec<f64> = fair
-                .iter()
-                .zip(&atr_sys)
-                .scan(
-                    Rng::derive(rng.next_u64().0, &[i as u64, 1]),
-                    |r, (&f, &a)| {
-                        let (z, r1) = r.normal();
-                        *r = r1;
-                        Some(f + z * p.tape_noise_atr * a)
-                    },
-                )
-                .collect();
-            let atr_tape = atr_series(&tape, p.bar_len, p.atr_bars);
-            Series {
-                fair,
-                atr_sys,
-                tape,
-                atr_tape,
-            }
+        .map(|(i, spec)| Path {
+            fair: fair_path(spec, p, total, Rng::derive(rng.next_u64().0, &[i as u64])),
+            regime: vec![Regime::Walk; total],
         })
         .collect();
-    (p.warmup_ticks..total)
-        .map(|t| Tick {
-            fair: per_asset.iter().map(|a| a.fair[t]).collect(),
-            atr_sys: per_asset.iter().map(|a| a.atr_sys[t]).collect(),
-            tape: per_asset.iter().map(|a| a.tape[t]).collect(),
-            atr_tape: per_asset.iter().map(|a| a.atr_tape[t]).collect(),
-        })
-        .collect()
+    let o = Observation {
+        warmup_ticks: p.warmup_ticks,
+        ticks: p.ticks,
+        bar_len: p.bar_len,
+        atr_bars: p.atr_bars,
+        tape_noise_atr: p.tape_noise_atr,
+        informed_window: 0,
+    };
+    assemble(&paths, &o, |i| {
+        Rng::derive(rng.next_u64().0, &[i as u64, 1])
+    })
 }
 
 #[cfg(test)]

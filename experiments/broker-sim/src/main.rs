@@ -6,6 +6,7 @@
 //! day's noise: skill is invisible within a day and the core loop is KILLED as designed.
 //!
 //!   cargo run --release -- [--days N] [--cal N] [--seed S] [--shown-atr]
+//!   cargo run --release -- regimes [--days N] [--cal N] [--seed S]   (see regime_test.rs)
 //!
 //! `--shown-atr`: the game displays the true ATR, so the Estimator scales its offset by it
 //! instead of by an ATR measured off the (noisy) tape.
@@ -13,6 +14,9 @@
 mod bots;
 mod engine;
 mod market;
+mod regime;
+mod regime_bots;
+mod regime_test;
 mod rng;
 mod stats;
 
@@ -23,14 +27,14 @@ use rng::Rng;
 use stats::{Summary, paired};
 
 const ALPHAS: [f64; 7] = [0.03, 0.06, 0.1, 0.2, 0.35, 0.6, 1.0];
-const CAL_TAG: u64 = 1;
-const EVAL_TAG: u64 = 2;
+pub const CAL_TAG: u64 = 1;
+pub const EVAL_TAG: u64 = 2;
 
-struct Args {
-    days: usize,
-    cal: usize,
-    seed: u64,
-    shown_atr: bool,
+pub struct Args {
+    pub days: usize,
+    pub cal: usize,
+    pub seed: u64,
+    pub shown_atr: bool,
 }
 
 fn parse_args() -> Args {
@@ -87,7 +91,14 @@ fn market_for(p: &MarketParams, seed: u64, tag: u64, d: usize) -> Vec<Tick> {
     day(p, Rng::derive(seed, &[tag, d as u64]))
 }
 
-fn play<S: Strategy>(s: &S, m: &[Tick], rules: &Rules, seed: u64, tag: u64, d: usize) -> DayResult {
+pub fn play<S: Strategy>(
+    s: &S,
+    m: &[Tick],
+    rules: &Rules,
+    seed: u64,
+    tag: u64,
+    d: usize,
+) -> DayResult {
     let fills = Rng::derive(seed, &[tag, d as u64, 0xF111]);
     let own = Rng::derive(seed, &[tag, d as u64, 0x5747]);
     run_day(s, m, rules, fills, own)
@@ -95,24 +106,21 @@ fn play<S: Strategy>(s: &S, m: &[Tick], rules: &Rules, seed: u64, tag: u64, d: u
 
 /// Pick the Estimator's α on calibration days (disjoint seeds from evaluation), so the
 /// Estimator is a competent tape reader, not a strawman.
-fn calibrate(p: &MarketParams, rules: &Rules, x: f64, a: &Args) -> f64 {
-    let markets: Vec<Vec<Tick>> = (0..a.cal)
-        .map(|d| market_for(p, a.seed, CAL_TAG, d))
-        .collect();
+pub fn calibrate(markets: &[Vec<Tick>], rules: &Rules, x: f64, seed: u64, shown_atr: bool) -> f64 {
     ALPHAS
         .iter()
         .map(|&alpha| {
             let e = Estimator {
                 alpha,
                 offset_atr: x,
-                shown_atr: a.shown_atr,
+                shown_atr,
             };
             let mean = markets
                 .iter()
                 .enumerate()
-                .map(|(d, m)| play(&e, m, rules, a.seed, CAL_TAG, d).pnl)
+                .map(|(d, m)| play(&e, m, rules, seed, CAL_TAG, d).pnl)
                 .sum::<f64>()
-                / a.cal as f64;
+                / markets.len() as f64;
             (alpha, mean)
         })
         .fold((ALPHAS[0], f64::MIN), |best, cur| {
@@ -141,7 +149,10 @@ fn evaluate(noise: f64, k: f64, a: &Args) -> Row {
     let p = params(noise);
     let rules = Rules { k, limit: 10 };
     let x = optimal_offset(k);
-    let alpha = calibrate(&p, &rules, x, a);
+    let cal: Vec<Vec<Tick>> = (0..a.cal)
+        .map(|d| market_for(&p, a.seed, CAL_TAG, d))
+        .collect();
+    let alpha = calibrate(&cal, &rules, x, a.seed, a.shown_atr);
     let (oracle, est) = (
         Oracle { offset_atr: x },
         Estimator {
@@ -185,6 +196,9 @@ fn evaluate(noise: f64, k: f64, a: &Args) -> Row {
 
 fn main() {
     let a = parse_args();
+    if std::env::args().nth(1).as_deref() == Some("regimes") {
+        return regime_test::run(&a);
+    }
     println!(
         "# Kill test: broker-pit ATR fill model\n\n\
          seed {} · {} eval days · {} calibration days · 3 assets · 180 ticks/day · 1 yell/tick · limit ±10 · ATR shown to player: {}\n\n\
