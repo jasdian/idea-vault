@@ -489,6 +489,18 @@ pub async fn extract_and_store(
     {
         if let FactOp::Update(target) = &op {
             if let Some(i) = existing.iter().position(|f| &f.frontmatter.slug == target) {
+                // An UPDATE whose claim has moved names it in its own title. The owner's title
+                // and text are never replaced (ADR-0023), so the new headline leads the appended
+                // text instead of being dropped.
+                let headline = title.trim().trim_end_matches('.');
+                let body = if headline.is_empty()
+                    || headline.eq_ignore_ascii_case(
+                        existing[i].frontmatter.title.trim().trim_end_matches('.'),
+                    ) {
+                    body
+                } else {
+                    format!("**{headline}.** {body}")
+                };
                 match updates.iter_mut().find(|(j, _)| *j == i) {
                     Some((_, text)) => {
                         text.push(' ');

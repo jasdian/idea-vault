@@ -83,7 +83,8 @@ sequenceDiagram
 **What each stage does:**
 
 - **Judge.** Deterministic code, not a model call. It drops failed and empty answers, then splits
-  each answer into atomic **findings** (its list items, `ai::contract::items`). Findings are
+  each answer into atomic **findings** (its list items, `ai::contract::items`; an item indented
+  under another joins it, so a label bullet over sub-bullets is one finding). Findings are
   interleaved round-robin so every lens keeps its top items under the cap of 20, and near-duplicates
   (≥80% word overlap) are merged, keeping every lens that raised them.
 - **Audit** (`concepts::audit`, on by default, live toggle, [ADR-0023](../adr/0023-verification-layer.md)).

@@ -637,10 +637,13 @@ pub fn summarize_contract(contract: OutputContract, raw: &str) -> String {
 }
 
 /// The list items of a bullets or numbered answer, markers stripped — how an orchestrator splits
-/// one agent's answer into separately auditable findings. Text with no list becomes one item.
+/// one agent's answer into separately auditable findings (ADR-0023). Text with no list becomes one
+/// item. An item indented deeper than the item above it joins that item, so a label bullet over
+/// sub-bullets stays one finding instead of an empty label plus context-free orphans.
 pub fn items(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_list = false;
+    let mut top_indent = 0;
     for line in text.lines() {
         let t = line.trim();
         if is_bullet(line) || is_numbered(line) {
@@ -650,7 +653,17 @@ pub fn items(text: &str) -> Vec<String> {
                 let digits = t.chars().take_while(char::is_ascii_digit).count();
                 t[digits + 2..].trim()
             };
-            out.push(body.to_string());
+            let indent = line.len() - line.trim_start().len();
+            match out.last_mut() {
+                Some(last) if in_list && indent > top_indent => {
+                    last.push(' ');
+                    last.push_str(body);
+                }
+                _ => {
+                    out.push(body.to_string());
+                    top_indent = indent;
+                }
+            }
             in_list = true;
         } else if in_list && !t.is_empty() && line.starts_with([' ', '\t']) {
             if let Some(last) = out.last_mut() {
@@ -1049,6 +1062,24 @@ mod tests {
         );
         assert_eq!(items("just prose"), ["just prose".to_string()]);
         assert!(items("  ").is_empty());
+    }
+
+    #[test]
+    fn items_folds_an_indented_sub_item_into_the_item_above_it() {
+        // A label bullet over sub-bullets is one finding, never an empty label plus orphans.
+        let text = "- **Rival only:**\n  - hooks fire in subagents\n  - context reaches the model\n- **Next:** run the probe\n1. Claim\n   2. nested number\n2. Other";
+        assert_eq!(
+            items(text),
+            [
+                "**Rival only:** hooks fire in subagents context reaches the model",
+                "**Next:** run the probe",
+                "Claim nested number",
+                "Other",
+            ]
+            .map(String::from)
+        );
+        // An indented first item still sets the top level its siblings are measured against.
+        assert_eq!(items("  - a\n  - b"), ["a", "b"].map(String::from));
     }
 
     #[test]

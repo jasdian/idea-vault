@@ -191,6 +191,11 @@ async fn restore_updates_by_appending_dedupes_and_quarantines_ungrounded_facts()
         key.body
     );
     assert!(key.body.contains("Still true after review."));
+    assert!(
+        !key.body.contains("**Key insight"),
+        "an UPDATE under the same title adds no headline:\n{}",
+        key.body
+    );
     let second = facts
         .iter()
         .find(|f| f.frontmatter.slug == "second-point")
@@ -218,6 +223,57 @@ async fn restore_updates_by_appending_dedupes_and_quarantines_ungrounded_facts()
             .entries
             .len(),
         3
+    );
+}
+
+#[tokio::test]
+async fn restore_update_under_a_new_title_leads_the_appended_text_with_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_idea(tmp.path(), "i");
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("v1 statement."),
+            tokens("FACT: Key insight is unverified\nQUOTE: \"we ship the first version solo\"\nBody.\n"),
+        ],
+    )
+    .await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
+        .await
+        .unwrap();
+
+    // The re-store flips the claim: the UPDATE's title is the new headline (ADR-0023 keeps the
+    // owner's title and text, so the headline goes into the appended text, not the frontmatter).
+    let mock = spawn_sequence(
+        &["llama3.2"],
+        vec![
+            tokens("v2 statement."),
+            tokens(
+                "FACT: Key insight is verified\nOP: UPDATE key-insight-is-unverified\nQUOTE: \"we ship the first version solo\"\nThe probe passed.\n",
+            ),
+        ],
+    )
+    .await;
+    let client = LlmBackend::ollama_only(OllamaClient::new(mock.url.clone(), "llama3.2").unwrap());
+    extract::extract_and_store(&client, &sem(), tmp.path(), "i", ContextBudget::new(4096))
+        .await
+        .unwrap();
+
+    let facts = store::read_memory_facts(tmp.path(), "i").unwrap();
+    assert_eq!(facts.len(), 1);
+    let fact = &facts[0];
+    assert_eq!(fact.frontmatter.title, "Key insight is unverified");
+    assert!(
+        fact.body.starts_with("Body."),
+        "the prior text is kept verbatim:\n{}",
+        fact.body
+    );
+    assert!(
+        fact.body
+            .contains(":_ **Key insight is verified.** The probe passed."),
+        "the new headline leads the appended text:\n{}",
+        fact.body
     );
 }
 

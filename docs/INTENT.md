@@ -1,3 +1,36 @@
+# Intent — nested list items stay with their parent, and a flipped UPDATE keeps its headline (ADR-0023, D12)
+
+A swarm on 2026-10-19 audited an empty finding. A researcher wrote a label bullet
+(`- **Tripwire rival only:**`) over three indented sub-bullets, and `contract::items` returned the
+label and each sub-bullet as separate findings: one empty, three without the qualifier that made
+them true. The label took one of the 20 audit slots (run `20261019T153014559Z-swarm`, finding
+F16). The shape is common: 41 of 128 journaled answers carry it, and premortem answers were split
+into orphan findings such as "**Chain:**" and "Likelihood: high". An item indented deeper than
+the item above it now joins that item, like an indented prose line already did.
+
+The same day a re-store answered `FACT: Warning delivery via additionalContext reaches subagents`
+/ `OP: UPDATE warning-delivery-via-additionalcontext-is-unverified`. The appended text said
+"verified" but the store dropped the new title, so the memory index still reads "is unverified".
+ADR-0023 keeps the owner's title and text, so the UPDATE's differing title now opens the appended
+text in bold instead of being discarded.
+
+## Acceptance criteria
+
+- `contract::items` folds an indented sub-item into the item above it
+  (`items_folds_an_indented_sub_item_into_the_item_above_it`), and an indented first item still
+  sets the top level.
+- `idea-vault regrade --parser contract` over the local vault reports 0 pass/fail flips; only
+  item counts change.
+- An UPDATE under a different title leads its appended text with that title and keeps the
+  fact's title and prior text (`restore_update_under_a_new_title_leads_the_appended_text_with_it`);
+  one under the same title adds no headline.
+- docs/06-concepts/swarm.md and memory.md say so.
+- `check_source_path_reports_a_relative_path_as_not_absolute_before_any_overlap` passes in a
+  checkout under `.claude/worktrees/`: it asserted `is_ok()` for `cwd/elsewhere`, which the
+  hidden-path refusal (ADR-0044) rejects there, so it now asserts only that the sibling does not
+  overlap the vault.
+- `bash scripts/gate.sh` is green.
+
 # Intent — a small map's hygiene list stays quiet (ADR-0043, docs/15 Layer 3)
 
 Mapping bom-kit (a 451-line Rust crate, 65 nodes) for an idea-vault brainstorm listed four of its

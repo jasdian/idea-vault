@@ -102,7 +102,9 @@ Rules:
 - **Merge on re-store:** the extractor is shown the facts already in memory and answers per fact:
   - `ADD` — a new fact;
   - `UPDATE <slug>` — **appended** to that fact under an `_Updated <date>:_` line; the existing
-    text, which the owner may have edited, is never replaced;
+    text, which the owner may have edited, is never replaced. When the UPDATE's `FACT:` title
+    differs from the fact's title, the appended text opens with it in bold, so a flipped claim
+    is visible where the old title still stands;
   - `NOOP` — already captured.
 
   An `ADD` whose title slugifies to an existing fact is still skipped as a backstop. Memory only

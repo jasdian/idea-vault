@@ -1382,7 +1382,12 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let err = check_source_path(vault, &[], None, &cwd).unwrap_err();
         assert!(err.contains("overlaps the vault"), "{err}");
-        assert!(check_source_path(vault, &[], None, &cwd.join("elsewhere")).is_ok());
+        // A sibling of the vault does not overlap it. Only the overlap verdict is asserted: a
+        // checkout under a hidden dir (a Claude Code worktree in `.claude/worktrees/`) is refused
+        // by the always-on hidden-path check, which is not what this test is about (ADR-0044).
+        if let Err(err) = check_source_path(vault, &[], None, &cwd.join("elsewhere")) {
+            assert!(!err.contains("overlaps the vault"), "{err}");
+        }
     }
 
     #[test]
